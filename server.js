@@ -1,0 +1,3383 @@
+const express = require("express");
+const cors = require("cors");
+const helmet = require("helmet");
+const morgan = require("morgan");
+const bcrypt = require("bcryptjs");
+const jwt = require("jsonwebtoken");
+const { createClient } = require("@supabase/supabase-js");
+const speakeasy = require("speakeasy");
+const QRCode = require("qrcode");
+const { v4: uuidv4 } = require("uuid");
+require("dotenv").config();
+
+const {
+  authenticate,
+  authorizeAdmin,
+  checkAccountFrozen,
+  logAdminAction,
+  otpRateLimiter,
+} = require("./middleware/auth");
+
+const app = express();
+
+// Security middleware
+/*app.use(helmet());
+app.use(
+  cors({
+    origin: process.env.FRONTEND_URL,
+    credentials: true,
+  }),
+);*/
+app.use(
+  cors({
+    origin: [
+      "http://localhost:5500",
+      "http://127.0.0.1:5500",
+      "https://bank-backend-blush.vercel.app",        // your backend (sometimes needed)
+      "https://zivarabank.vercel.app/",     // ← ADD YOUR FRONTEND URL HERE
+      // you can add more later
+    ],
+    credentials: true,
+    methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
+    allowedHeaders: ["Content-Type", "Authorization"],
+  }),
+);
+app.use(express.json());
+app.use(morgan("combined"));
+
+// Supabase client
+const supabase = createClient(
+  process.env.SUPABASE_URL,
+  process.env.SUPABASE_SERVICE_KEY,
+);
+
+// ==================== AUTHENTICATION ROUTES ====================
+
+// Register
+app.post("/api/auth/register", async (req, res) => {
+  try {
+    const { email, password, first_name, last_name, phone } = req.body;
+
+    // Check if user exists
+    const { data: existingUser } = await supabase
+      .from("users")
+      .select("email")
+      .eq("email", email)
+      .single();
+
+    if (existingUser) {
+      return res.status(400).json({ error: "Email already registered" });
+    }
+
+    // Hash password
+    const hashedPassword = await bcrypt.hash(password, 10);
+
+    // Create user
+    const { data: user, error } = await supabase
+      .from("users")
+      .insert({
+        email,
+        password_hash: hashedPassword,
+        first_name,
+        last_name,
+        phone,
+        role: "user",
+      })
+      .select()
+      .single();
+
+    if (error) throw error;
+
+    // Create account for user
+    await supabase.from("accounts").insert({
+      user_id: user.id,
+      account_type: "checking",
+      currency: "USD",
+      balance: 0.0, // Welcome bonus
+      available_balance: 0.0,
+    });
+
+    // Generate token
+    const token = jwt.sign(
+      { userId: user.id, email: user.email, role: user.role },
+      process.env.JWT_SECRET,
+      { expiresIn: process.env.JWT_EXPIRE },
+    );
+
+    res.status(201).json({
+      message: "User created successfully",
+      token,
+      user: {
+        id: user.id,
+        email: user.email,
+        first_name: user.first_name,
+        last_name: user.last_name,
+        role: user.role,
+      },
+    });
+  } catch (error) {
+    console.error("Registration error:", error);
+    res.status(500).json({ error: "Registration failed" });
+  }
+});
+
+// Login
+app.post("/api/auth/login", async (req, res) => {
+  try {
+    const { email, password } = req.body;
+
+    // Get user
+    const { data: user, error } = await supabase
+      .from("users")
+      .select("*")
+      .eq("email", email)
+      .single();
+
+    if (error || !user) {
+      return res.status(401).json({ error: "Invalid credentials" });
+    }
+
+    // Check password
+    const validPassword = await bcrypt.compare(password, user.password_hash);
+    if (!validPassword) {
+      return res.status(401).json({ error: "Invalid credentials" });
+    }
+
+    // Check if account is active
+    if (!user.is_active) {
+      return res.status(403).json({ error: "Account is deactivated" });
+    }
+
+    // Check 2FA
+    if (user.two_factor_enabled) {
+      return res.json({
+        requiresTwoFactor: true,
+        userId: user.id,
+      });
+    }
+
+    // Generate token
+    const token = jwt.sign(
+      { userId: user.id, email: user.email, role: user.role },
+      process.env.JWT_SECRET,
+      { expiresIn: process.env.JWT_EXPIRE },
+    );
+
+    res.json({
+      token,
+      user: {
+        id: user.id,
+        email: user.email,
+        first_name: user.first_name,
+        last_name: user.last_name,
+        role: user.role,
+        is_frozen: user.is_frozen,
+        kyc_status: user.kyc_status,
+      },
+    });
+  } catch (error) {
+    console.error("Login error:", error);
+    res.status(500).json({ error: "Login failed" });
+  }
+});
+
+// Verify 2FA
+app.post("/api/auth/verify-2fa", async (req, res) => {
+  try {
+    const { userId, token } = req.body;
+
+    const { data: user } = await supabase
+      .from("users")
+      .select("*")
+      .eq("id", userId)
+      .single();
+
+    if (!user) {
+      return res.status(404).json({ error: "User not found" });
+    }
+
+    const verified = speakeasy.totp.verify({
+      secret: user.two_factor_secret,
+      encoding: "base32",
+      token,
+    });
+
+    if (!verified) {
+      return res.status(401).json({ error: "Invalid 2FA token" });
+    }
+
+    const jwtToken = jwt.sign(
+      { userId: user.id, email: user.email, role: user.role },
+      process.env.JWT_SECRET,
+      { expiresIn: process.env.JWT_EXPIRE },
+    );
+
+    res.json({
+      token: jwtToken,
+      user: {
+        id: user.id,
+        email: user.email,
+        first_name: user.first_name,
+        last_name: user.last_name,
+        role: user.role,
+      },
+    });
+  } catch (error) {
+    console.error("2FA verification error:", error);
+    res.status(500).json({ error: "Verification failed" });
+  }
+});
+
+// ==================== USER DASHBOARD ROUTES ====================
+
+// Get user profile
+app.get("/api/user/profile", authenticate, async (req, res) => {
+  try {
+    const { data: user, error } = await supabase
+      .from("users")
+      .select(
+        "id, email, first_name, last_name, phone, date_of_birth, address, city, country, postal_code, kyc_status, two_factor_enabled, is_frozen, freeze_reason, created_at",
+      )
+      .eq("id", req.user.id)
+      .single();
+
+    if (error) throw error;
+
+    res.json(user);
+  } catch (error) {
+    console.error("Profile fetch error:", error);
+    res.status(500).json({ error: "Failed to fetch profile" });
+  }
+});
+
+// Update profile
+app.put("/api/user/profile", authenticate, async (req, res) => {
+  try {
+    const {
+      first_name,
+      last_name,
+      phone,
+      address,
+      city,
+      country,
+      postal_code,
+    } = req.body;
+
+    const { data: user, error } = await supabase
+      .from("users")
+      .update({
+        first_name,
+        last_name,
+        phone,
+        address,
+        city,
+        country,
+        postal_code,
+        updated_at: new Date(),
+      })
+      .eq("id", req.user.id)
+      .select()
+      .single();
+
+    if (error) throw error;
+
+    res.json({ message: "Profile updated successfully", user });
+  } catch (error) {
+    console.error("Profile update error:", error);
+    res.status(500).json({ error: "Failed to update profile" });
+  }
+});
+
+// Change password
+app.post("/api/user/change-password", authenticate, async (req, res) => {
+  try {
+    const { current_password, new_password } = req.body;
+
+    // Verify current password
+    const validPassword = await bcrypt.compare(
+      current_password,
+      req.user.password_hash,
+    );
+    if (!validPassword) {
+      return res.status(401).json({ error: "Current password is incorrect" });
+    }
+
+    // Hash new password
+    const hashedPassword = await bcrypt.hash(new_password, 10);
+
+    // Update password
+    const { error } = await supabase
+      .from("users")
+      .update({ password_hash: hashedPassword })
+      .eq("id", req.user.id);
+
+    if (error) throw error;
+
+    res.json({ message: "Password changed successfully" });
+  } catch (error) {
+    console.error("Password change error:", error);
+    res.status(500).json({ error: "Failed to change password" });
+  }
+});
+
+// Enable 2FA
+app.post("/api/user/enable-2fa", authenticate, async (req, res) => {
+  try {
+    const secret = speakeasy.generateSecret({
+      name: `BankApp:${req.user.email}`,
+    });
+
+    // Save secret to user
+    await supabase
+      .from("users")
+      .update({ two_factor_secret: secret.base32 })
+      .eq("id", req.user.id);
+
+    // Generate QR code
+    const qrCode = await QRCode.toDataURL(secret.otpauth_url);
+
+    res.json({ secret: secret.base32, qrCode });
+  } catch (error) {
+    console.error("2FA enable error:", error);
+    res.status(500).json({ error: "Failed to enable 2FA" });
+  }
+});
+
+// Verify and activate 2FA
+app.post("/api/user/verify-enable-2fa", authenticate, async (req, res) => {
+  try {
+    const { token } = req.body;
+
+    const verified = speakeasy.totp.verify({
+      secret: req.user.two_factor_secret,
+      encoding: "base32",
+      token,
+    });
+
+    if (!verified) {
+      return res.status(401).json({ error: "Invalid token" });
+    }
+
+    await supabase
+      .from("users")
+      .update({ two_factor_enabled: true })
+      .eq("id", req.user.id);
+
+    res.json({ message: "2FA enabled successfully" });
+  } catch (error) {
+    console.error("2FA verification error:", error);
+    res.status(500).json({ error: "Failed to verify 2FA" });
+  }
+});
+
+// Disable 2FA
+app.post("/api/user/disable-2fa", authenticate, async (req, res) => {
+  try {
+    await supabase
+      .from("users")
+      .update({
+        two_factor_enabled: false,
+        two_factor_secret: null,
+      })
+      .eq("id", req.user.id);
+
+    res.json({ message: "2FA disabled successfully" });
+  } catch (error) {
+    console.error("2FA disable error:", error);
+    res.status(500).json({ error: "Failed to disable 2FA" });
+  }
+});
+
+// Get accounts and balances
+app.get(
+  "/api/user/accounts",
+  authenticate,
+  checkAccountFrozen,
+  async (req, res) => {
+    try {
+      const { data: accounts, error } = await supabase
+        .from("accounts")
+        .select("*")
+        .eq("user_id", req.user.id);
+
+      if (error) throw error;
+
+      res.json(accounts);
+    } catch (error) {
+      console.error("Accounts fetch error:", error);
+      res.status(500).json({ error: "Failed to fetch accounts" });
+    }
+  },
+);
+
+// Get transactions
+app.get(
+  "/api/user/transactions",
+  authenticate,
+  checkAccountFrozen,
+  async (req, res) => {
+    try {
+      const { page = 1, limit = 20 } = req.query;
+      const offset = (page - 1) * limit;
+
+      const { data: accounts } = await supabase
+        .from("accounts")
+        .select("id")
+        .eq("user_id", req.user.id);
+
+      const accountIds = accounts.map((a) => a.id);
+
+      const { data: transactions, error } = await supabase
+        .from("transactions")
+        .select(
+          `
+                *,
+                from_account:accounts!transactions_from_account_id_fkey(account_number),
+                to_account:accounts!transactions_to_account_id_fkey(account_number)
+            `,
+        )
+        .or(
+          `from_account_id.in.(${accountIds.join(",")}),to_account_id.in.(${accountIds.join(",")})`,
+        )
+        .order("created_at", { ascending: false })
+        .range(offset, offset + limit - 1);
+
+      if (error) throw error;
+
+      // Get total count
+      const { count } = await supabase
+        .from("transactions")
+        .select("*", { count: "exact", head: true })
+        .or(
+          `from_account_id.in.(${accountIds.join(",")}),to_account_id.in.(${accountIds.join(",")})`,
+        );
+
+      res.json({
+        transactions,
+        pagination: {
+          page: parseInt(page),
+          limit: parseInt(limit),
+          total: count,
+          pages: Math.ceil(count / limit),
+        },
+      });
+    } catch (error) {
+      console.error("Transactions fetch error:", error);
+      res.status(500).json({ error: "Failed to fetch transactions" });
+    }
+  },
+);
+
+// Download statement
+app.get(
+  "/api/user/statements",
+  authenticate,
+  checkAccountFrozen,
+  async (req, res) => {
+    try {
+      const { account_id, start_date, end_date, format = "csv" } = req.query;
+
+      // Verify account belongs to user
+      const { data: account } = await supabase
+        .from("accounts")
+        .select("*")
+        .eq("id", account_id)
+        .eq("user_id", req.user.id)
+        .single();
+
+      if (!account) {
+        return res.status(404).json({ error: "Account not found" });
+      }
+
+      // Get transactions
+      const { data: transactions } = await supabase
+        .from("transactions")
+        .select("*")
+        .or(`from_account_id.eq.${account_id},to_account_id.eq.${account_id}`)
+        .gte("created_at", start_date)
+        .lte("created_at", end_date)
+        .order("created_at", { ascending: true });
+
+      if (format === "csv") {
+        // Generate CSV
+        let csv = "Date,Description,Type,Amount,Balance\n";
+        let balance = 0;
+
+        transactions.forEach((t) => {
+          const isCredit = t.to_account_id === account_id;
+          const amount = isCredit ? t.amount : -t.amount;
+          balance += amount;
+
+          csv += `${t.created_at},${t.description},${isCredit ? "Credit" : "Debit"},${amount},${balance}\n`;
+        });
+
+        res.setHeader("Content-Type", "text/csv");
+        res.setHeader(
+          "Content-Disposition",
+          "attachment; filename=statement.csv",
+        );
+        res.send(csv);
+      } else {
+        // Return JSON
+        res.json(transactions);
+      }
+    } catch (error) {
+      console.error("Statement generation error:", error);
+      res.status(500).json({ error: "Failed to generate statement" });
+    }
+  },
+);
+
+// Transfer money
+app.post(
+  "/api/user/transfer",
+  authenticate,
+  checkAccountFrozen,
+  async (req, res) => {
+    try {
+      const {
+        from_account_id,
+        to_account_number,
+        amount,
+        description,
+        requires_otp = true,
+      } = req.body;
+
+      // Check if OTP is required globally
+      const { data: settings } = await supabase
+        .from("admin_settings")
+        .select("setting_value")
+        .eq("setting_key", "otp_mode")
+        .single();
+
+      const otpMode = settings?.setting_value === "on";
+
+      // Get source account
+      const { data: fromAccount } = await supabase
+        .from("accounts")
+        .select("*")
+        .eq("id", from_account_id)
+        .eq("user_id", req.user.id)
+        .single();
+
+      if (!fromAccount) {
+        return res.status(404).json({ error: "Source account not found" });
+      }
+
+      // Check balance
+      if (fromAccount.available_balance < amount) {
+        return res.status(400).json({ error: "Insufficient funds" });
+      }
+
+      // Get destination account
+      const { data: toAccount } = await supabase
+        .from("accounts")
+        .select("*")
+        .eq("account_number", to_account_number)
+        .single();
+
+      if (!toAccount) {
+        return res.status(404).json({ error: "Destination account not found" });
+      }
+
+      // Check if destination account is frozen
+      const { data: toUser } = await supabase
+        .from("users")
+        .select("is_frozen")
+        .eq("id", toAccount.user_id)
+        .single();
+
+      if (toUser?.is_frozen) {
+        return res.status(400).json({ error: "Destination account is frozen" });
+      }
+
+      // Create transaction
+      const transactionData = {
+        from_account_id,
+        to_account_id: toAccount.id,
+        from_user_id: req.user.id,
+        to_user_id: toAccount.user_id,
+        amount,
+        description,
+        transaction_type: "transfer",
+        status: "pending",
+      };
+
+      if (otpMode && requires_otp) {
+        transactionData.requires_otp = true;
+        // Generate OTP
+        const otpCode = Math.floor(100000 + Math.random() * 900000).toString();
+        const expiresAt = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
+
+        const { data: transaction, error } = await supabase
+          .from("transactions")
+          .insert(transactionData)
+          .select()
+          .single();
+
+        if (error) throw error;
+
+        await supabase.from("otps").insert({
+          user_id: req.user.id,
+          transaction_id: transaction.id,
+          otp_code: otpCode,
+          otp_type: "transfer",
+          expires_at: expiresAt,
+        });
+
+        return res.json({
+          message: "OTP required to complete transfer",
+          requires_otp: true,
+          transaction_id: transaction.id,
+        });
+      }
+
+      // Process transfer immediately
+      transactionData.status = "completed";
+      transactionData.completed_at = new Date();
+
+      const { data: transaction, error } = await supabase
+        .from("transactions")
+        .insert(transactionData)
+        .select()
+        .single();
+
+      if (error) throw error;
+
+      // Update balances
+      await supabase
+        .from("accounts")
+        .update({
+          balance: fromAccount.balance - amount,
+          available_balance: fromAccount.available_balance - amount,
+        })
+        .eq("id", from_account_id);
+
+      await supabase
+        .from("accounts")
+        .update({
+          balance: toAccount.balance + amount,
+          available_balance: toAccount.available_balance + amount,
+        })
+        .eq("id", toAccount.id);
+
+      // Create notification for recipient
+      await supabase.from("notifications").insert({
+        user_id: toAccount.user_id,
+        title: "Money Received",
+        message: `You have received $${amount} from ${req.user.first_name} ${req.user.last_name}`,
+        type: "success",
+      });
+
+      res.json({
+        message: "Transfer completed successfully",
+        transaction,
+      });
+    } catch (error) {
+      console.error("Transfer error:", error);
+      res.status(500).json({ error: "Transfer failed" });
+    }
+  },
+);
+
+// Verify OTP and complete transaction
+app.post("/api/user/verify-otp", authenticate, async (req, res) => {
+  try {
+    const { transaction_id, otp_code } = req.body;
+
+    // Get OTP record
+    const { data: otpRecord } = await supabase
+      .from("otps")
+      .select("*")
+      .eq("transaction_id", transaction_id)
+      .eq("otp_code", otp_code)
+      .eq("is_used", false)
+      .single();
+
+    if (!otpRecord || new Date(otpRecord.expires_at) < new Date()) {
+      return res.status(401).json({ error: "Invalid or expired OTP" });
+    }
+
+    // Mark OTP as used
+    await supabase
+      .from("otps")
+      .update({ is_used: true })
+      .eq("id", otpRecord.id);
+
+    // Get transaction
+    const { data: transaction } = await supabase
+      .from("transactions")
+      .select("*")
+      .eq("id", transaction_id)
+      .single();
+
+    // Get accounts
+    const { data: fromAccount } = await supabase
+      .from("accounts")
+      .select("*")
+      .eq("id", transaction.from_account_id)
+      .single();
+
+    const { data: toAccount } = await supabase
+      .from("accounts")
+      .select("*")
+      .eq("id", transaction.to_account_id)
+      .single();
+
+    // Update balances
+    await supabase
+      .from("accounts")
+      .update({
+        balance: fromAccount.balance - transaction.amount,
+        available_balance: fromAccount.available_balance - transaction.amount,
+      })
+      .eq("id", transaction.from_account_id);
+
+    await supabase
+      .from("accounts")
+      .update({
+        balance: toAccount.balance + transaction.amount,
+        available_balance: toAccount.available_balance + transaction.amount,
+      })
+      .eq("id", transaction.to_account_id);
+
+    // Update transaction status
+    await supabase
+      .from("transactions")
+      .update({
+        status: "completed",
+        completed_at: new Date(),
+        otp_verified: true,
+      })
+      .eq("id", transaction_id);
+
+    res.json({ message: "Transaction completed successfully" });
+  } catch (error) {
+    console.error("OTP verification error:", error);
+    res.status(500).json({ error: "OTP verification failed" });
+  }
+});
+
+// Get cards
+app.get(
+  "/api/user/cards",
+  authenticate,
+  checkAccountFrozen,
+  async (req, res) => {
+    try {
+      const { data: cards, error } = await supabase
+        .from("cards")
+        .select("*, account:accounts(account_number)")
+        .eq("user_id", req.user.id);
+
+      if (error) throw error;
+
+      res.json(cards);
+    } catch (error) {
+      console.error("Cards fetch error:", error);
+      res.status(500).json({ error: "Failed to fetch cards" });
+    }
+  },
+);
+
+// Purchase card
+app.post(
+  "/api/user/purchase-card",
+  authenticate,
+  checkAccountFrozen,
+  async (req, res) => {
+    try {
+      const { card_type, is_virtual = false, purchase_method } = req.body;
+
+      // Get card purchase settings
+      const { data: settings } = await supabase
+        .from("admin_settings")
+        .select("setting_value")
+        .eq("setting_key", "card_purchase_method")
+        .single();
+
+      const cardPrice = 10.0; // Card price
+
+      // Generate card details
+      const cardNumber =
+        "4" +
+        Math.floor(Math.random() * 1000000000000000)
+          .toString()
+          .padStart(15, "0");
+      const expiryDate = new Date();
+      expiryDate.setFullYear(expiryDate.getFullYear() + 3);
+      const cvv = Math.floor(100 + Math.random() * 900).toString();
+
+      const { data: card, error } = await supabase
+        .from("cards")
+        .insert({
+          user_id: req.user.id,
+          account_id: null, // Will be linked after activation
+          card_number: cardNumber,
+          card_type,
+          expiry_date: expiryDate,
+          cvv,
+          card_status: "inactive",
+          is_virtual,
+          purchase_method: purchase_method || settings?.setting_value,
+          purchase_reference: uuidv4(),
+        })
+        .select()
+        .single();
+
+      if (error) throw error;
+
+      res.json({
+        message: "Card purchased successfully",
+        card,
+        payment_instructions: {
+          method: purchase_method || settings?.setting_value,
+          amount: cardPrice,
+          reference: card.purchase_reference,
+          // Add crypto payment details if applicable
+          crypto_address:
+            purchase_method === "crypto"
+              ? "0x742d35Cc6634C0532925a3b844Bc1e7f9c5f5f5f"
+              : null,
+        },
+      });
+    } catch (error) {
+      console.error("Card purchase error:", error);
+      res.status(500).json({ error: "Failed to purchase card" });
+    }
+  },
+);
+
+// Activate card
+app.post(
+  "/api/user/activate-card/:cardId",
+  authenticate,
+  checkAccountFrozen,
+  async (req, res) => {
+    try {
+      const { cardId } = req.params;
+
+      // Check if card is purchased and belongs to user
+      const { data: card } = await supabase
+        .from("cards")
+        .select("*")
+        .eq("id", cardId)
+        .eq("user_id", req.user.id)
+        .single();
+
+      if (!card) {
+        return res.status(404).json({ error: "Card not found" });
+      }
+
+      if (card.card_status !== "inactive") {
+        return res.status(400).json({ error: "Card cannot be activated" });
+      }
+
+      // Get user's primary account
+      const { data: account } = await supabase
+        .from("accounts")
+        .select("id")
+        .eq("user_id", req.user.id)
+        .eq("account_type", "checking")
+        .single();
+
+      // Activate card
+      await supabase
+        .from("cards")
+        .update({
+          card_status: "active",
+          account_id: account.id,
+        })
+        .eq("id", cardId);
+
+      res.json({ message: "Card activated successfully" });
+    } catch (error) {
+      console.error("Card activation error:", error);
+      res.status(500).json({ error: "Failed to activate card" });
+    }
+  },
+);
+
+// Toggle card status (freeze/unfreeze)
+app.post(
+  "/api/user/toggle-card/:cardId",
+  authenticate,
+  checkAccountFrozen,
+  async (req, res) => {
+    try {
+      const { cardId } = req.params;
+      const { action } = req.body; // 'freeze' or 'unfreeze'
+
+      const newStatus = action === "freeze" ? "frozen" : "active";
+
+      const { error } = await supabase
+        .from("cards")
+        .update({ card_status: newStatus })
+        .eq("id", cardId)
+        .eq("user_id", req.user.id);
+
+      if (error) throw error;
+
+      res.json({ message: `Card ${action}d successfully` });
+    } catch (error) {
+      console.error("Card toggle error:", error);
+      res.status(500).json({ error: "Failed to update card status" });
+    }
+  },
+);
+
+// Report lost/stolen card
+app.post(
+  "/api/user/report-card/:cardId",
+  authenticate,
+  checkAccountFrozen,
+  async (req, res) => {
+    try {
+      const { cardId } = req.params;
+
+      await supabase
+        .from("cards")
+        .update({ card_status: "lost" })
+        .eq("id", cardId)
+        .eq("user_id", req.user.id);
+
+      // Create support ticket
+      const { data: ticket } = await supabase
+        .from("support_tickets")
+        .insert({
+          user_id: req.user.id,
+          subject: "Lost/Stolen Card Report",
+          message: `Card ID: ${cardId} reported as lost/stolen`,
+          priority: "high",
+        })
+        .select()
+        .single();
+
+      res.json({
+        message: "Card reported successfully. Support ticket created.",
+        ticket,
+      });
+    } catch (error) {
+      console.error("Card report error:", error);
+      res.status(500).json({ error: "Failed to report card" });
+    }
+  },
+);
+
+// Get beneficiaries
+app.get(
+  "/api/user/beneficiaries",
+  authenticate,
+  checkAccountFrozen,
+  async (req, res) => {
+    try {
+      const { data: beneficiaries, error } = await supabase
+        .from("beneficiaries")
+        .select("*")
+        .eq("user_id", req.user.id)
+        .eq("is_active", true);
+
+      if (error) throw error;
+
+      res.json(beneficiaries);
+    } catch (error) {
+      console.error("Beneficiaries fetch error:", error);
+      res.status(500).json({ error: "Failed to fetch beneficiaries" });
+    }
+  },
+);
+
+// Add beneficiary
+app.post(
+  "/api/user/beneficiaries",
+  authenticate,
+  checkAccountFrozen,
+  async (req, res) => {
+    try {
+      const {
+        beneficiary_name,
+        account_number,
+        bank_name,
+        bank_code,
+        relationship,
+      } = req.body;
+
+      const { data: beneficiary, error } = await supabase
+        .from("beneficiaries")
+        .insert({
+          user_id: req.user.id,
+          beneficiary_name,
+          account_number,
+          bank_name,
+          bank_code,
+          relationship,
+        })
+        .select()
+        .single();
+
+      if (error) throw error;
+
+      res.json({ message: "Beneficiary added successfully", beneficiary });
+    } catch (error) {
+      console.error("Add beneficiary error:", error);
+      res.status(500).json({ error: "Failed to add beneficiary" });
+    }
+  },
+);
+
+// Remove beneficiary
+app.delete(
+  "/api/user/beneficiaries/:id",
+  authenticate,
+  checkAccountFrozen,
+  async (req, res) => {
+    try {
+      const { id } = req.params;
+
+      await supabase
+        .from("beneficiaries")
+        .update({ is_active: false })
+        .eq("id", id)
+        .eq("user_id", req.user.id);
+
+      res.json({ message: "Beneficiary removed successfully" });
+    } catch (error) {
+      console.error("Remove beneficiary error:", error);
+      res.status(500).json({ error: "Failed to remove beneficiary" });
+    }
+  },
+);
+
+// Get bills
+app.get(
+  "/api/user/bills",
+  authenticate,
+  checkAccountFrozen,
+  async (req, res) => {
+    try {
+      const { data: bills, error } = await supabase
+        .from("bills")
+        .select("*")
+        .eq("user_id", req.user.id);
+
+      if (error) throw error;
+
+      res.json(bills);
+    } catch (error) {
+      console.error("Bills fetch error:", error);
+      res.status(500).json({ error: "Failed to fetch bills" });
+    }
+  },
+);
+
+// Add bill
+app.post(
+  "/api/user/bills",
+  authenticate,
+  checkAccountFrozen,
+  async (req, res) => {
+    try {
+      const {
+        biller_name,
+        biller_account,
+        category,
+        amount,
+        due_date,
+        is_recurring,
+        recurring_frequency,
+      } = req.body;
+
+      const { data: bill, error } = await supabase
+        .from("bills")
+        .insert({
+          user_id: req.user.id,
+          biller_name,
+          biller_account,
+          category,
+          amount,
+          due_date,
+          is_recurring,
+          recurring_frequency,
+        })
+        .select()
+        .single();
+
+      if (error) throw error;
+
+      res.json({ message: "Bill added successfully", bill });
+    } catch (error) {
+      console.error("Add bill error:", error);
+      res.status(500).json({ error: "Failed to add bill" });
+    }
+  },
+);
+
+// Pay bill
+app.post(
+  "/api/user/pay-bill/:billId",
+  authenticate,
+  checkAccountFrozen,
+  async (req, res) => {
+    try {
+      const { billId } = req.params;
+      const { account_id } = req.body;
+
+      // Get bill
+      const { data: bill } = await supabase
+        .from("bills")
+        .select("*")
+        .eq("id", billId)
+        .eq("user_id", req.user.id)
+        .single();
+
+      if (!bill) {
+        return res.status(404).json({ error: "Bill not found" });
+      }
+
+      // Get account
+      const { data: account } = await supabase
+        .from("accounts")
+        .select("*")
+        .eq("id", account_id)
+        .eq("user_id", req.user.id)
+        .single();
+
+      if (!account) {
+        return res.status(404).json({ error: "Account not found" });
+      }
+
+      if (account.available_balance < bill.amount) {
+        return res.status(400).json({ error: "Insufficient funds" });
+      }
+
+      // Create transaction
+      const { data: transaction } = await supabase
+        .from("transactions")
+        .insert({
+          from_account_id: account_id,
+          from_user_id: req.user.id,
+          amount: bill.amount,
+          description: `Bill payment to ${bill.biller_name}`,
+          transaction_type: "bill_payment",
+          status: "completed",
+          completed_at: new Date(),
+        })
+        .select()
+        .single();
+
+      // Update account balance
+      await supabase
+        .from("accounts")
+        .update({
+          balance: account.balance - bill.amount,
+          available_balance: account.available_balance - bill.amount,
+        })
+        .eq("id", account_id);
+
+      // Update bill status
+      await supabase.from("bills").update({ status: "paid" }).eq("id", billId);
+
+      // If recurring, create next bill
+      if (bill.is_recurring) {
+        let nextDueDate = new Date(bill.due_date);
+        switch (bill.recurring_frequency) {
+          case "monthly":
+            nextDueDate.setMonth(nextDueDate.getMonth() + 1);
+            break;
+          case "quarterly":
+            nextDueDate.setMonth(nextDueDate.getMonth() + 3);
+            break;
+          case "yearly":
+            nextDueDate.setFullYear(nextDueDate.getFullYear() + 1);
+            break;
+        }
+
+        await supabase.from("bills").insert({
+          user_id: req.user.id,
+          biller_name: bill.biller_name,
+          biller_account: bill.biller_account,
+          category: bill.category,
+          amount: bill.amount,
+          due_date: nextDueDate,
+          is_recurring: true,
+          recurring_frequency: bill.recurring_frequency,
+          status: "pending",
+        });
+      }
+
+      res.json({ message: "Bill paid successfully", transaction });
+    } catch (error) {
+      console.error("Pay bill error:", error);
+      res.status(500).json({ error: "Failed to pay bill" });
+    }
+  },
+);
+
+// Get exchange rates
+app.get("/api/user/exchange-rates", authenticate, async (req, res) => {
+  try {
+    const { data: rates, error } = await supabase
+      .from("exchange_rates")
+      .select("*");
+
+    if (error) throw error;
+
+    res.json(rates);
+  } catch (error) {
+    console.error("Exchange rates fetch error:", error);
+    res.status(500).json({ error: "Failed to fetch exchange rates" });
+  }
+});
+
+// Currency conversion
+app.post(
+  "/api/user/convert-currency",
+  authenticate,
+  checkAccountFrozen,
+  async (req, res) => {
+    try {
+      const { from_currency, to_currency, amount } = req.body;
+
+      const { data: rate } = await supabase
+        .from("exchange_rates")
+        .select("rate")
+        .eq("from_currency", from_currency)
+        .eq("to_currency", to_currency)
+        .single();
+
+      if (!rate) {
+        return res.status(404).json({ error: "Exchange rate not found" });
+      }
+
+      const convertedAmount = amount * rate.rate;
+
+      res.json({
+        from_currency,
+        to_currency,
+        amount,
+        converted_amount: convertedAmount,
+        rate: rate.rate,
+      });
+    } catch (error) {
+      console.error("Currency conversion error:", error);
+      res.status(500).json({ error: "Conversion failed" });
+    }
+  },
+);
+
+// Get budgets
+app.get(
+  "/api/user/budgets",
+  authenticate,
+  checkAccountFrozen,
+  async (req, res) => {
+    try {
+      const { month, year } = req.query;
+      const currentDate = new Date();
+      const queryMonth = month || currentDate.getMonth() + 1;
+      const queryYear = year || currentDate.getFullYear();
+
+      const { data: budgets, error } = await supabase
+        .from("budgets")
+        .select("*")
+        .eq("user_id", req.user.id)
+        .eq("month", queryMonth)
+        .eq("year", queryYear);
+
+      if (error) throw error;
+
+      res.json(budgets);
+    } catch (error) {
+      console.error("Budgets fetch error:", error);
+      res.status(500).json({ error: "Failed to fetch budgets" });
+    }
+  },
+);
+
+// Create or update budget
+app.post(
+  "/api/user/budgets",
+  authenticate,
+  checkAccountFrozen,
+  async (req, res) => {
+    try {
+      const { category, amount, month, year } = req.body;
+
+      // Check if budget exists
+      const { data: existingBudget } = await supabase
+        .from("budgets")
+        .select("id")
+        .eq("user_id", req.user.id)
+        .eq("category", category)
+        .eq("month", month)
+        .eq("year", year)
+        .single();
+
+      if (existingBudget) {
+        // Update
+        await supabase
+          .from("budgets")
+          .update({ amount })
+          .eq("id", existingBudget.id);
+      } else {
+        // Create
+        await supabase.from("budgets").insert({
+          user_id: req.user.id,
+          category,
+          amount,
+          month,
+          year,
+          spent: 0,
+        });
+      }
+
+      res.json({ message: "Budget saved successfully" });
+    } catch (error) {
+      console.error("Budget save error:", error);
+      res.status(500).json({ error: "Failed to save budget" });
+    }
+  },
+);
+
+// Get support tickets
+app.get("/api/user/tickets", authenticate, async (req, res) => {
+  try {
+    const { data: tickets, error } = await supabase
+      .from("support_tickets")
+      .select("*")
+      .eq("user_id", req.user.id)
+      .order("created_at", { ascending: false });
+
+    if (error) throw error;
+
+    res.json(tickets);
+  } catch (error) {
+    console.error("Tickets fetch error:", error);
+    res.status(500).json({ error: "Failed to fetch tickets" });
+  }
+});
+
+// Create support ticket
+app.post("/api/user/tickets", authenticate, async (req, res) => {
+  try {
+    const { subject, message, priority = "medium" } = req.body;
+
+    const { data: ticket, error } = await supabase
+      .from("support_tickets")
+      .insert({
+        user_id: req.user.id,
+        subject,
+        message,
+        priority,
+      })
+      .select()
+      .single();
+
+    if (error) throw error;
+
+    res.json({ message: "Ticket created successfully", ticket });
+  } catch (error) {
+    console.error("Ticket creation error:", error);
+    res.status(500).json({ error: "Failed to create ticket" });
+  }
+});
+
+// Get chat messages for ticket
+app.get(
+  "/api/user/tickets/:ticketId/messages",
+  authenticate,
+  async (req, res) => {
+    try {
+      const { ticketId } = req.params;
+
+      // Verify ticket belongs to user
+      const { data: ticket } = await supabase
+        .from("support_tickets")
+        .select("id")
+        .eq("id", ticketId)
+        .eq("user_id", req.user.id)
+        .single();
+
+      if (!ticket) {
+        return res.status(404).json({ error: "Ticket not found" });
+      }
+
+      const { data: messages, error } = await supabase
+        .from("chat_messages")
+        .select("*, sender:sender_id(first_name, last_name, role)")
+        .eq("ticket_id", ticketId)
+        .order("created_at", { ascending: true });
+
+      if (error) throw error;
+
+      res.json(messages);
+    } catch (error) {
+      console.error("Messages fetch error:", error);
+      res.status(500).json({ error: "Failed to fetch messages" });
+    }
+  },
+);
+
+// Send chat message
+app.post(
+  "/api/user/tickets/:ticketId/messages",
+  authenticate,
+  async (req, res) => {
+    try {
+      const { ticketId } = req.params;
+      const { message } = req.body;
+
+      // Verify ticket belongs to user
+      const { data: ticket } = await supabase
+        .from("support_tickets")
+        .select("id")
+        .eq("id", ticketId)
+        .eq("user_id", req.user.id)
+        .single();
+
+      if (!ticket) {
+        return res.status(404).json({ error: "Ticket not found" });
+      }
+
+      const { data: chatMessage, error } = await supabase
+        .from("chat_messages")
+        .insert({
+          ticket_id: ticketId,
+          sender_id: req.user.id,
+          message,
+          is_admin_reply: false,
+        })
+        .select()
+        .single();
+
+      if (error) throw error;
+
+      res.json({ message: "Message sent successfully", chatMessage });
+    } catch (error) {
+      console.error("Message send error:", error);
+      res.status(500).json({ error: "Failed to send message" });
+    }
+  },
+);
+
+// Get notifications
+app.get("/api/user/notifications", authenticate, async (req, res) => {
+  try {
+    const { data: notifications, error } = await supabase
+      .from("notifications")
+      .select("*")
+      .eq("user_id", req.user.id)
+      .order("created_at", { ascending: false })
+      .limit(50);
+
+    if (error) throw error;
+
+    res.json(notifications);
+  } catch (error) {
+    console.error("Notifications fetch error:", error);
+    res.status(500).json({ error: "Failed to fetch notifications" });
+  }
+});
+
+// Mark notification as read
+app.post("/api/user/notifications/:id/read", authenticate, async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    await supabase
+      .from("notifications")
+      .update({ is_read: true })
+      .eq("id", id)
+      .eq("user_id", req.user.id);
+
+    res.json({ message: "Notification marked as read" });
+  } catch (error) {
+    console.error("Notification update error:", error);
+    res.status(500).json({ error: "Failed to update notification" });
+  }
+});
+
+// Request OTP for withdrawal
+app.post(
+  "/api/user/request-withdrawal-otp",
+  authenticate,
+  checkAccountFrozen,
+  async (req, res) => {
+    try {
+      const { amount, account_id, bank_details } = req.body;
+
+      // Check if user is frozen
+      if (req.user.is_frozen) {
+        return res.status(403).json({
+          error: "Account frozen. Please contact support.",
+          requires_otp: true,
+        });
+      }
+
+      // Check OTP mode
+      const { data: settings } = await supabase
+        .from("admin_settings")
+        .select("setting_value")
+        .eq("setting_key", "otp_mode")
+        .single();
+
+      const otpMode = settings?.setting_value === "on";
+
+      if (!otpMode && !req.user.is_frozen) {
+        return res.json({
+          message: "OTP not required",
+          requires_otp: false,
+        });
+      }
+
+      // Create withdrawal request in chat
+      const { data: ticket } = await supabase
+        .from("support_tickets")
+        .insert({
+          user_id: req.user.id,
+          subject: "OTP Request for Withdrawal",
+          message: JSON.stringify({
+            type: "otp_request",
+            action: "withdrawal",
+            amount,
+            account_id,
+            bank_details,
+          }),
+          priority: "high",
+          status: "open",
+        })
+        .select()
+        .single();
+
+      // Send auto-reply with OTP request instructions
+      await supabase.from("chat_messages").insert({
+        ticket_id: ticket.id,
+        sender_id: req.user.id,
+        message: "I need an OTP code for withdrawal",
+        is_admin_reply: false,
+      });
+
+      res.json({
+        message: "OTP request sent. Please check chat for OTP code.",
+        requires_otp: true,
+        ticket_id: ticket.id,
+      });
+    } catch (error) {
+      console.error("OTP request error:", error);
+      res.status(500).json({ error: "Failed to request OTP" });
+    }
+  },
+);
+
+// Process withdrawal with OTP
+app.post(
+  "/api/user/process-withdrawal",
+  authenticate,
+  checkAccountFrozen,
+  async (req, res) => {
+    try {
+      const { amount, account_id, otp_code, bank_details } = req.body;
+
+      // Verify OTP
+      const { data: otpRecord } = await supabase
+        .from("otps")
+        .select("*")
+        .eq("otp_code", otp_code)
+        .eq("user_id", req.user.id)
+        .eq("otp_type", "withdrawal")
+        .eq("is_used", false)
+        .single();
+
+      if (!otpRecord || new Date(otpRecord.expires_at) < new Date()) {
+        return res.status(401).json({ error: "Invalid or expired OTP" });
+      }
+
+      // Mark OTP as used
+      await supabase
+        .from("otps")
+        .update({ is_used: true })
+        .eq("id", otpRecord.id);
+
+      // Get account
+      const { data: account } = await supabase
+        .from("accounts")
+        .select("*")
+        .eq("id", account_id)
+        .eq("user_id", req.user.id)
+        .single();
+
+      if (!account) {
+        return res.status(404).json({ error: "Account not found" });
+      }
+
+      if (account.available_balance < amount) {
+        return res.status(400).json({ error: "Insufficient funds" });
+      }
+
+      // Create withdrawal transaction
+      const { data: transaction } = await supabase
+        .from("transactions")
+        .insert({
+          from_account_id: account_id,
+          from_user_id: req.user.id,
+          amount,
+          description: `Withdrawal to ${bank_details?.bank_name || "external account"}`,
+          transaction_type: "withdrawal",
+          status: "completed",
+          completed_at: new Date(),
+          otp_verified: true,
+        })
+        .select()
+        .single();
+
+      // Update account balance
+      await supabase
+        .from("accounts")
+        .update({
+          balance: account.balance - amount,
+          available_balance: account.available_balance - amount,
+        })
+        .eq("id", account_id);
+
+      res.json({
+        message: "Withdrawal processed successfully",
+        transaction,
+      });
+    } catch (error) {
+      console.error("Withdrawal error:", error);
+      res.status(500).json({ error: "Withdrawal failed" });
+    }
+  },
+);
+
+// Request unfreeze OTP
+app.post("/api/user/request-unfreeze-otp", authenticate, async (req, res) => {
+  try {
+    if (!req.user.is_frozen) {
+      return res.status(400).json({ error: "Account is not frozen" });
+    }
+
+    // Create unfreeze request ticket
+    const { data: ticket } = await supabase
+      .from("support_tickets")
+      .insert({
+        user_id: req.user.id,
+        subject: "Account Unfreeze Request",
+        message: `Account frozen reason: ${req.user.freeze_reason || "Not specified"}`,
+        priority: "high",
+      })
+      .select()
+      .single();
+
+    // Create chat message
+    await supabase.from("chat_messages").insert({
+      ticket_id: ticket.id,
+      sender_id: req.user.id,
+      message: "I would like to request an OTP to unfreeze my account",
+      is_admin_reply: false,
+    });
+
+    // Check if payment is required for unfreeze
+    const { data: settings } = await supabase
+      .from("admin_settings")
+      .select("setting_value")
+      .eq("setting_key", "freeze_otp_required")
+      .single();
+
+    const requiresPayment = settings?.setting_value === "true";
+
+    res.json({
+      message: "Unfreeze request sent. Please check chat for OTP code.",
+      ticket_id: ticket.id,
+      requires_payment: requiresPayment,
+      payment_details: requiresPayment
+        ? {
+            amount: 5.0,
+            method: "crypto",
+            address: "0x742d35Cc6634C0532925a3b844Bc1e7f9c5f5f5f",
+          }
+        : null,
+    });
+  } catch (error) {
+    console.error("Unfreeze request error:", error);
+    res.status(500).json({ error: "Failed to request unfreeze" });
+  }
+});
+
+// Verify unfreeze OTP
+app.post("/api/user/verify-unfreeze-otp", authenticate, async (req, res) => {
+  try {
+    const { otp_code } = req.body;
+
+    if (!req.user.is_frozen) {
+      return res.status(400).json({ error: "Account is not frozen" });
+    }
+
+    // Verify OTP
+    const { data: otpRecord } = await supabase
+      .from("otps")
+      .select("*")
+      .eq("otp_code", otp_code)
+      .eq("user_id", req.user.id)
+      .eq("otp_type", "unfreeze")
+      .eq("is_used", false)
+      .single();
+
+    if (!otpRecord || new Date(otpRecord.expires_at) < new Date()) {
+      return res.status(401).json({ error: "Invalid or expired OTP" });
+    }
+
+    // Mark OTP as used
+    await supabase
+      .from("otps")
+      .update({ is_used: true })
+      .eq("id", otpRecord.id);
+
+    // Unfreeze account
+    await supabase
+      .from("users")
+      .update({
+        is_frozen: false,
+        freeze_reason: null,
+      })
+      .eq("id", req.user.id);
+
+    // Create notification
+    await supabase.from("notifications").insert({
+      user_id: req.user.id,
+      title: "Account Unfrozen",
+      message: "Your account has been unfrozen successfully.",
+      type: "success",
+    });
+
+    res.json({ message: "Account unfrozen successfully" });
+  } catch (error) {
+    console.error("Unfreeze verification error:", error);
+    res.status(500).json({ error: "Failed to unfreeze account" });
+  }
+});
+
+// ==================== ADMIN ROUTES ====================
+
+// Get all users (admin)
+app.get("/api/admin/users", authenticate, authorizeAdmin, async (req, res) => {
+  try {
+    const { page = 1, limit = 20, search, status } = req.query;
+    const offset = (page - 1) * limit;
+
+    let query = supabase
+      .from("users")
+      .select("*, accounts(*)", { count: "exact" });
+
+    if (search) {
+      query = query.or(
+        `email.ilike.%${search}%,first_name.ilike.%${search}%,last_name.ilike.%${search}%`,
+      );
+    }
+
+    if (status) {
+      if (status === "frozen") {
+        query = query.eq("is_frozen", true);
+      } else if (status === "active") {
+        query = query.eq("is_active", true).eq("is_frozen", false);
+      } else if (status === "inactive") {
+        query = query.eq("is_active", false);
+      }
+    }
+
+    const {
+      data: users,
+      count,
+      error,
+    } = await query
+      .range(offset, offset + limit - 1)
+      .order("created_at", { ascending: false });
+
+    if (error) throw error;
+
+    res.json({
+      users,
+      pagination: {
+        page: parseInt(page),
+        limit: parseInt(limit),
+        total: count,
+        pages: Math.ceil(count / limit),
+      },
+    });
+  } catch (error) {
+    console.error("Admin users fetch error:", error);
+    res.status(500).json({ error: "Failed to fetch users" });
+  }
+});
+
+// Get user details (admin)
+/*app.get(
+  "/api/admin/users/:userId",
+  authenticate,
+  authorizeAdmin,
+  async (req, res) => {
+    try {
+      const { userId } = req.params;
+
+      const { data: user, error } = await supabase
+        .from("users")
+        .select("*, accounts(*), cards(*), transactions(*), support_tickets(*)")
+        .eq("id", userId)
+        .single();
+
+      if (error) throw error;
+
+      res.json(user);
+    } catch (error) {
+      console.error("Admin user fetch error:", error);
+      res.status(500).json({ error: "Failed to fetch user" });
+    }
+  },
+);*/
+
+// GET /api/admin/accounts
+app.get(
+  "/api/admin/accounts",
+  authenticate,
+  authorizeAdmin,
+  async (req, res) => {
+    try {
+      const page = parseInt(req.query.page) || 1;
+      const limit = parseInt(req.query.limit) || 20;
+      const offset = (page - 1) * limit;
+
+      const {
+        data: accounts,
+        error,
+        count,
+      } = await supabase
+        .from("accounts")
+        .select(
+          `
+        id,
+        account_number,
+        account_type,
+        currency,
+        balance,
+        available_balance,
+        status,
+        daily_limit,
+        monthly_limit,
+        created_at,
+        user_id,
+        users!accounts_user_id_fkey (id, email, first_name, last_name, is_frozen, kyc_status)
+      `,
+          { count: "exact" },
+        )
+        .range(offset, offset + limit - 1)
+        .order("created_at", { ascending: false });
+
+      if (error) throw error;
+
+      res.json({
+        accounts: accounts || [],
+        pagination: {
+          page,
+          limit,
+          total: count || 0,
+          pages: Math.ceil((count || 0) / limit),
+        },
+      });
+    } catch (err) {
+      console.error("Admin accounts error:", err);
+      res.status(500).json({ error: "Failed to load accounts" });
+    }
+  },
+);
+
+// Create user (admin)
+app.post("/api/admin/users", authenticate, authorizeAdmin, async (req, res) => {
+  try {
+    const {
+      email,
+      password,
+      first_name,
+      last_name,
+      phone,
+      role = "user",
+    } = req.body;
+
+    // Check if user exists
+    const { data: existingUser } = await supabase
+      .from("users")
+      .select("email")
+      .eq("email", email)
+      .single();
+
+    if (existingUser) {
+      return res.status(400).json({ error: "Email already registered" });
+    }
+
+    // Hash password
+    const hashedPassword = await bcrypt.hash(password, 10);
+
+    // Create user
+    const { data: user, error } = await supabase
+      .from("users")
+      .insert({
+        email,
+        password_hash: hashedPassword,
+        first_name,
+        last_name,
+        phone,
+        role,
+        kyc_status: "verified",
+      })
+      .select()
+      .single();
+
+    if (error) throw error;
+
+    // Create account for user
+    await supabase.from("accounts").insert({
+      user_id: user.id,
+      account_type: "checking",
+      currency: "USD",
+      balance: 0,
+      available_balance: 0,
+    });
+
+    // Log admin action
+    await supabase.from("admin_actions").insert({
+      admin_id: req.user.id,
+      action_type: "create_user",
+      target_user_id: user.id,
+      details: { created_by: req.user.email },
+    });
+
+    res.status(201).json({ message: "User created successfully", user });
+  } catch (error) {
+    console.error("Admin create user error:", error);
+    res.status(500).json({ error: "Failed to create user" });
+  }
+});
+
+// Update user (admin)
+app.put(
+  "/api/admin/users/:userId",
+  authenticate,
+  authorizeAdmin,
+  async (req, res) => {
+    try {
+      const { userId } = req.params;
+      const updates = req.body;
+
+      // Remove sensitive fields
+      delete updates.password_hash;
+      delete updates.id;
+      delete updates.created_at;
+
+      const { data: user, error } = await supabase
+        .from("users")
+        .update({
+          ...updates,
+          updated_at: new Date(),
+        })
+        .eq("id", userId)
+        .select()
+        .single();
+
+      if (error) throw error;
+
+      // Log admin action
+      await supabase.from("admin_actions").insert({
+        admin_id: req.user.id,
+        action_type: "update_user",
+        target_user_id: userId,
+        details: updates,
+      });
+
+      res.json({ message: "User updated successfully", user });
+    } catch (error) {
+      console.error("Admin update user error:", error);
+      res.status(500).json({ error: "Failed to update user" });
+    }
+  },
+);
+
+// Freeze/Unfreeze user account (admin)
+app.post(
+  "/api/admin/users/:userId/toggle-freeze",
+  authenticate,
+  authorizeAdmin,
+  async (req, res) => {
+    try {
+      const { userId } = req.params;
+      const { freeze, reason } = req.body;
+
+      const { data: user } = await supabase
+        .from("users")
+        .update({
+          is_frozen: freeze,
+          freeze_reason: freeze ? reason : null,
+        })
+        .eq("id", userId)
+        .select()
+        .single();
+
+      // Create notification for user
+      await supabase.from("notifications").insert({
+        user_id: userId,
+        title: freeze ? "Account Frozen" : "Account Unfrozen",
+        message: freeze
+          ? `Your account has been frozen. Reason: ${reason || "Not specified"}`
+          : "Your account has been unfrozen.",
+        type: freeze ? "warning" : "success",
+      });
+
+      // Log admin action
+      await supabase.from("admin_actions").insert({
+        admin_id: req.user.id,
+        action_type: freeze ? "freeze_user" : "unfreeze_user",
+        target_user_id: userId,
+        details: { reason },
+      });
+
+      res.json({
+        message: freeze
+          ? "Account frozen successfully"
+          : "Account unfrozen successfully",
+        user,
+      });
+    } catch (error) {
+      console.error("Admin toggle freeze error:", error);
+      res.status(500).json({ error: "Failed to toggle account freeze" });
+    }
+  },
+);
+
+// Verify KYC (admin)
+app.post(
+  "/api/admin/users/:userId/verify-kyc",
+  authenticate,
+  authorizeAdmin,
+  async (req, res) => {
+    try {
+      const { userId } = req.params;
+      const { status, notes } = req.body;
+
+      await supabase
+        .from("users")
+        .update({
+          kyc_status: status,
+          updated_at: new Date(),
+        })
+        .eq("id", userId);
+
+      // Create notification
+      await supabase.from("notifications").insert({
+        user_id: userId,
+        title: "KYC Update",
+        message: `Your KYC verification status is now: ${status}`,
+        type: status === "verified" ? "success" : "warning",
+      });
+
+      // Log admin action
+      await supabase.from("admin_actions").insert({
+        admin_id: req.user.id,
+        action_type: "verify_kyc",
+        target_user_id: userId,
+        details: { status, notes },
+      });
+
+      res.json({ message: "KYC status updated successfully" });
+    } catch (error) {
+      console.error("KYC verification error:", error);
+      res.status(500).json({ error: "Failed to update KYC status" });
+    }
+  },
+);
+
+// Update user balance (admin)
+app.post(
+  "/api/admin/users/:userId/update-balance",
+  authenticate,
+  authorizeAdmin,
+  async (req, res) => {
+    try {
+      const { userId } = req.params;
+      const {
+        account_id,
+        amount,
+        action,
+        make_it_look_like_transfer,
+        from_user_id,
+        description,
+      } = req.body;
+
+      const { data: account } = await supabase
+        .from("accounts")
+        .select("*")
+        .eq("id", account_id)
+        .eq("user_id", userId)
+        .single();
+
+      if (!account) {
+        return res.status(404).json({ error: "Account not found" });
+      }
+
+      let newBalance;
+      if (action === "add") {
+        newBalance = account.balance + amount;
+      } else if (action === "subtract") {
+        newBalance = account.balance - amount;
+      } else if (action === "set") {
+        newBalance = amount;
+      }
+
+      // Update balance
+      await supabase
+        .from("accounts")
+        .update({
+          balance: newBalance,
+          available_balance: newBalance,
+          updated_at: new Date(),
+        })
+        .eq("id", account_id);
+
+      // Create transaction record
+      const transactionData = {
+        from_account_id:
+          make_it_look_like_transfer && from_user_id ? account_id : null,
+        to_account_id: make_it_look_like_transfer ? account_id : null,
+        from_user_id:
+          make_it_look_like_transfer && from_user_id ? from_user_id : null,
+        to_user_id: make_it_look_like_transfer ? userId : null,
+        amount: Math.abs(amount),
+        description: description || `Admin balance adjustment: ${action}`,
+        transaction_type: "admin_adjustment",
+        status: "completed",
+        completed_at: new Date(),
+        is_admin_adjusted: true,
+        admin_note: `Adjusted by admin ${req.user.email}`,
+      };
+
+      const { data: transaction } = await supabase
+        .from("transactions")
+        .insert(transactionData)
+        .select()
+        .single();
+
+      // Create notification
+      await supabase.from("notifications").insert({
+        user_id: userId,
+        title: "Balance Updated",
+        message: `Your account balance has been updated. New balance: $${newBalance.toFixed(2)}`,
+        type: "info",
+      });
+
+      // Log admin action
+      await supabase.from("admin_actions").insert({
+        admin_id: req.user.id,
+        action_type: "update_balance",
+        target_user_id: userId,
+        details: {
+          account_id,
+          amount,
+          action,
+          make_it_look_like_transfer,
+          from_user_id,
+        },
+      });
+
+      res.json({
+        message: "Balance updated successfully",
+        new_balance: newBalance,
+        transaction: make_it_look_like_transfer ? transaction : null,
+      });
+    } catch (error) {
+      console.error("Admin update balance error:", error);
+      res.status(500).json({ error: "Failed to update balance" });
+    }
+  },
+);
+
+// Impersonate user (admin)
+app.post(
+  "/api/admin/impersonate/:userId",
+  authenticate,
+  authorizeAdmin,
+  async (req, res) => {
+    try {
+      const { userId } = req.params;
+
+      // Get user details
+      const { data: user } = await supabase
+        .from("users")
+        .select("*")
+        .eq("id", userId)
+        .single();
+
+      if (!user) {
+        return res.status(404).json({ error: "User not found" });
+      }
+
+      // Generate impersonation token
+      const token = jwt.sign(
+        {
+          userId: user.id,
+          email: user.email,
+          role: user.role,
+          isImpersonated: true,
+          adminId: req.user.id,
+        },
+        process.env.JWT_SECRET,
+        { expiresIn: "1h" },
+      );
+
+      // Log admin action
+      await supabase.from("admin_actions").insert({
+        admin_id: req.user.id,
+        action_type: "impersonate",
+        target_user_id: userId,
+        details: { impersonated_by: req.user.email },
+      });
+
+      res.json({
+        message: "Impersonation successful",
+        token,
+        user: {
+          id: user.id,
+          email: user.email,
+          first_name: user.first_name,
+          last_name: user.last_name,
+          role: user.role,
+          isImpersonated: true,
+        },
+      });
+    } catch (error) {
+      console.error("Impersonation error:", error);
+      res.status(500).json({ error: "Impersonation failed" });
+    }
+  },
+);
+
+// Get all transactions (admin)
+app.get(
+  "/api/admin/transactions",
+  authenticate,
+  authorizeAdmin,
+  async (req, res) => {
+    try {
+      const {
+        page = 1,
+        limit = 50,
+        user_id,
+        type,
+        status,
+        start_date,
+        end_date,
+      } = req.query;
+      const offset = (page - 1) * limit;
+
+      let query = supabase
+        .from("transactions")
+        .select(
+          "*, from_account:accounts!transactions_from_account_id_fkey(*), to_account:accounts!transactions_to_account_id_fkey(*)",
+          { count: "exact" },
+        );
+
+      if (user_id) {
+        query = query.or(`from_user_id.eq.${user_id},to_user_id.eq.${user_id}`);
+      }
+
+      if (type) {
+        query = query.eq("transaction_type", type);
+      }
+
+      if (status) {
+        query = query.eq("status", status);
+      }
+
+      if (start_date) {
+        query = query.gte("created_at", start_date);
+      }
+
+      if (end_date) {
+        query = query.lte("created_at", end_date);
+      }
+
+      const {
+        data: transactions,
+        count,
+        error,
+      } = await query
+        .order("created_at", { ascending: false })
+        .range(offset, offset + limit - 1);
+
+      if (error) throw error;
+
+      res.json({
+        transactions,
+        pagination: {
+          page: parseInt(page),
+          limit: parseInt(limit),
+          total: count,
+          pages: Math.ceil(count / limit),
+        },
+      });
+    } catch (error) {
+      console.error("Admin transactions fetch error:", error);
+      res.status(500).json({ error: "Failed to fetch transactions" });
+    }
+  },
+);
+
+// Approve/Reject transaction (admin)
+app.post(
+  "/api/admin/transactions/:transactionId/:action",
+  authenticate,
+  authorizeAdmin,
+  async (req, res) => {
+    try {
+      const { transactionId, action } = req.params; // action: approve, reject
+      const { reason } = req.body;
+
+      const { data: transaction } = await supabase
+        .from("transactions")
+        .select("*")
+        .eq("id", transactionId)
+        .single();
+
+      if (!transaction) {
+        return res.status(404).json({ error: "Transaction not found" });
+      }
+
+      if (action === "approve" && transaction.status === "pending") {
+        // Process transaction
+        const { data: fromAccount } = await supabase
+          .from("accounts")
+          .select("*")
+          .eq("id", transaction.from_account_id)
+          .single();
+
+        const { data: toAccount } = await supabase
+          .from("accounts")
+          .select("*")
+          .eq("id", transaction.to_account_id)
+          .single();
+
+        // Update balances
+        await supabase
+          .from("accounts")
+          .update({
+            balance: fromAccount.balance - transaction.amount,
+            available_balance:
+              fromAccount.available_balance - transaction.amount,
+          })
+          .eq("id", transaction.from_account_id);
+
+        await supabase
+          .from("accounts")
+          .update({
+            balance: toAccount.balance + transaction.amount,
+            available_balance: toAccount.available_balance + transaction.amount,
+          })
+          .eq("id", transaction.to_account_id);
+
+        await supabase
+          .from("transactions")
+          .update({
+            status: "completed",
+            completed_at: new Date(),
+          })
+          .eq("id", transactionId);
+      } else if (action === "reject") {
+        await supabase
+          .from("transactions")
+          .update({
+            status: "rejected",
+            description:
+              transaction.description + ` (Rejected: ${reason || "No reason"})`,
+          })
+          .eq("id", transactionId);
+      }
+
+      // Log admin action
+      await supabase.from("admin_actions").insert({
+        admin_id: req.user.id,
+        action_type: `${action}_transaction`,
+        target_user_id: transaction.from_user_id,
+        details: { transaction_id: transactionId, reason },
+      });
+
+      res.json({ message: `Transaction ${action}d successfully` });
+    } catch (error) {
+      console.error("Admin transaction action error:", error);
+      res.status(500).json({ error: `Failed to ${action} transaction` });
+    }
+  },
+);
+
+// Generate OTP (admin)
+app.post(
+  "/api/admin/generate-otp",
+  authenticate,
+  authorizeAdmin,
+  async (req, res) => {
+    try {
+      const { user_id, otp_type, transaction_id } = req.body;
+
+      const otpCode = Math.floor(100000 + Math.random() * 900000).toString();
+      const expiresAt = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
+
+      const { data: otp, error } = await supabase
+        .from("otps")
+        .insert({
+          user_id,
+          otp_code: otpCode,
+          otp_type,
+          transaction_id,
+          expires_at: expiresAt,
+        })
+        .select()
+        .single();
+
+      if (error) throw error;
+
+      // Log admin action
+      await supabase.from("admin_actions").insert({
+        admin_id: req.user.id,
+        action_type: "generate_otp",
+        target_user_id: user_id,
+        details: { otp_type, transaction_id },
+      });
+
+      res.json({
+        message: "OTP generated successfully",
+        otp_code: otpCode,
+        expires_at: expiresAt,
+        otp,
+      });
+    } catch (error) {
+      console.error("OTP generation error:", error);
+      res.status(500).json({ error: "Failed to generate OTP" });
+    }
+  },
+);
+
+// Toggle OTP mode (admin)
+app.post(
+  "/api/admin/toggle-otp-mode",
+  authenticate,
+  authorizeAdmin,
+  async (req, res) => {
+    try {
+      const { mode } = req.body; // 'on' or 'off'
+
+      await supabase.from("admin_settings").upsert(
+        {
+          setting_key: "otp_mode",
+          setting_value: mode,
+          updated_by: req.user.id,
+          updated_at: new Date(),
+        },
+        { onConflict: "setting_key" },
+      );
+
+      // Also update related settings
+      await supabase.from("admin_settings").upsert(
+        {
+          setting_key: "withdrawal_otp_required",
+          setting_value: mode === "on" ? "true" : "false",
+          updated_by: req.user.id,
+          updated_at: new Date(),
+        },
+        { onConflict: "setting_key" },
+      );
+
+      await supabase.from("admin_settings").upsert(
+        {
+          setting_key: "transfer_otp_required",
+          setting_value: mode === "on" ? "true" : "false",
+          updated_by: req.user.id,
+          updated_at: new Date(),
+        },
+        { onConflict: "setting_key" },
+      );
+
+      // Log admin action
+      await supabase.from("admin_actions").insert({
+        admin_id: req.user.id,
+        action_type: "toggle_otp_mode",
+        details: { mode },
+      });
+
+      res.json({ message: `OTP mode turned ${mode}` });
+    } catch (error) {
+      console.error("Toggle OTP mode error:", error);
+      res.status(500).json({ error: "Failed to toggle OTP mode" });
+    }
+  },
+);
+
+// Get admin settings
+app.get(
+  "/api/admin/settings",
+  authenticate,
+  authorizeAdmin,
+  async (req, res) => {
+    try {
+      const { data: settings, error } = await supabase
+        .from("admin_settings")
+        .select("*");
+
+      if (error) throw error;
+
+      res.json(settings);
+    } catch (error) {
+      console.error("Admin settings fetch error:", error);
+      res.status(500).json({ error: "Failed to fetch settings" });
+    }
+  },
+);
+
+// Update admin settings
+app.post(
+  "/api/admin/settings",
+  authenticate,
+  authorizeAdmin,
+  async (req, res) => {
+    try {
+      const settings = req.body;
+
+      for (const [key, value] of Object.entries(settings)) {
+        await supabase.from("admin_settings").upsert(
+          {
+            setting_key: key,
+            setting_value: value,
+            updated_by: req.user.id,
+            updated_at: new Date(),
+          },
+          { onConflict: "setting_key" },
+        );
+      }
+
+      // Log admin action
+      await supabase.from("admin_actions").insert({
+        admin_id: req.user.id,
+        action_type: "update_settings",
+        details: settings,
+      });
+
+      res.json({ message: "Settings updated successfully" });
+    } catch (error) {
+      console.error("Admin settings update error:", error);
+      res.status(500).json({ error: "Failed to update settings" });
+    }
+  },
+);
+
+// GET /api/user/transactions/category-summary
+app.get(
+  "/api/user/transactions/category-summary",
+  authenticate,
+  checkAccountFrozen,
+  async (req, res) => {
+    try {
+      const { data, error } = await supabase
+        .from("transactions")
+        .select("amount, description, created_at, status")
+        .eq("from_user_id", req.user.id) // outgoing only
+        .eq("status", "completed")
+        .gte(
+          "created_at",
+          new Date(Date.now() - 30 * 24 * 60 * 60 * 1000).toISOString(),
+        ); // last 30 days
+
+      if (error) throw error;
+
+      // Group by category
+      const summary = data.reduce((acc, tx) => {
+        const cat = tx.category || "Other";
+        acc[cat] = (acc[cat] || 0) + Math.abs(tx.amount);
+        return acc;
+      }, {});
+
+      // Convert to array for chart
+      const result = Object.entries(summary).map(([category, total]) => ({
+        category,
+        total: Number(total.toFixed(2)),
+      }));
+
+      res.json(result);
+    } catch (err) {
+      console.error(err);
+      res.status(500).json({ error: "Failed to load category summary" });
+    }
+  },
+);
+// Get single user details using raw SQL
+app.get(
+  "/api/admin/users/:userId",
+  authenticate,
+  authorizeAdmin,
+  async (req, res) => {
+    try {
+      const { userId } = req.params;
+
+      // Use raw SQL query to avoid Supabase's ambiguous relationship handling
+      const { data, error } = await supabase.rpc("get_user_complete_data", {
+        user_id_param: userId,
+      });
+
+      if (error) {
+        console.error("RPC error:", error);
+
+        // Fallback to manual query if RPC fails
+        return await getUserDataManually(userId, res);
+      }
+
+      res.json(data);
+    } catch (error) {
+      console.error("Admin user fetch error:", error);
+      res.status(500).json({
+        error: "Failed to fetch user",
+        details: error.message,
+      });
+    }
+  },
+);
+
+// Fallback manual function
+async function getUserDataManually(userId, res) {
+  try {
+    // Get user
+    const { data: user, error: userError } = await supabase
+      .from("users")
+      .select("*")
+      .eq("id", userId)
+      .single();
+
+    if (userError) throw userError;
+
+    // Get accounts
+    const { data: accounts } = await supabase
+      .from("accounts")
+      .select("*")
+      .eq("user_id", userId);
+
+    // Get cards
+    const { data: cards } = await supabase
+      .from("cards")
+      .select("*")
+      .eq("user_id", userId);
+
+    // Get all transactions (using union approach)
+    const { data: transactions, error: transError } = await supabase
+      .from("transactions")
+      .select(
+        `
+                id,
+                transaction_id,
+                amount,
+                currency,
+                description,
+                transaction_type,
+                status,
+                created_at,
+                completed_at,
+                from_account_id,
+                to_account_id,
+                from_user_id,
+                to_user_id
+            `,
+      )
+      .or(`from_user_id.eq.${userId},to_user_id.eq.${userId}`)
+      .order("created_at", { ascending: false })
+      .limit(50);
+
+    if (transError) {
+      console.error("Transaction error:", transError);
+    }
+
+    // Get account details for each transaction
+    const transactionsWithAccounts = await Promise.all(
+      (transactions || []).map(async (t) => {
+        let fromAccount = null;
+        let toAccount = null;
+
+        if (t.from_account_id) {
+          const { data: acc } = await supabase
+            .from("accounts")
+            .select("id, account_number, account_type")
+            .eq("id", t.from_account_id)
+            .single();
+          fromAccount = acc;
+        }
+
+        if (t.to_account_id) {
+          const { data: acc } = await supabase
+            .from("accounts")
+            .select("id, account_number, account_type")
+            .eq("id", t.to_account_id)
+            .single();
+          toAccount = acc;
+        }
+
+        return {
+          ...t,
+          from_account: fromAccount,
+          to_account: toAccount,
+        };
+      }),
+    );
+
+    const completeUser = {
+      ...user,
+      accounts: accounts || [],
+      cards: cards || [],
+      transactions: transactionsWithAccounts || [],
+    };
+
+    res.json(completeUser);
+  } catch (error) {
+    console.error("Manual fetch error:", error);
+    res.status(500).json({ error: "Failed to fetch user data" });
+  }
+}
+
+// Update user (admin) - FIXED VERSION
+app.put(
+  "/api/admin/users/:userId",
+  authenticate,
+  authorizeAdmin,
+  async (req, res) => {
+    try {
+      const { userId } = req.params;
+      const updates = req.body;
+
+      // Remove any fields that shouldn't be updated
+      const safeUpdates = {};
+      const allowedFields = [
+        "first_name",
+        "last_name",
+        "email",
+        "phone",
+        "date_of_birth",
+        "address",
+        "city",
+        "country",
+        "postal_code",
+        "role",
+        "kyc_status",
+        "id_type",
+        "id_number",
+        "is_active",
+        "is_frozen",
+        "freeze_reason",
+        "two_factor_enabled",
+      ];
+
+      allowedFields.forEach((field) => {
+        if (updates[field] !== undefined && updates[field] !== null) {
+          safeUpdates[field] = updates[field];
+        }
+      });
+
+      // Add timestamp
+      safeUpdates.updated_at = new Date();
+
+      // Check email uniqueness if changed
+      if (safeUpdates.email) {
+        const { data: existingUser } = await supabase
+          .from("users")
+          .select("id")
+          .eq("email", safeUpdates.email)
+          .neq("id", userId)
+          .maybeSingle();
+
+        if (existingUser) {
+          return res.status(400).json({ error: "Email already in use" });
+        }
+      }
+
+      // Update user
+      const { data: user, error: updateError } = await supabase
+        .from("users")
+        .update(safeUpdates)
+        .eq("id", userId)
+        .select(
+          "id, email, first_name, last_name, role, kyc_status, is_active, is_frozen",
+        )
+        .single();
+
+      if (updateError) {
+        console.error("Update error:", updateError);
+        return res.status(500).json({ error: "Failed to update user" });
+      }
+
+      // Log admin action
+      await supabase.from("admin_actions").insert({
+        admin_id: req.user.id,
+        action_type: "update_user",
+        target_user_id: userId,
+        details: safeUpdates,
+      });
+
+      // Create notifications for important changes
+      if (updates.is_frozen !== undefined) {
+        await supabase.from("notifications").insert({
+          user_id: userId,
+          title: updates.is_frozen ? "Account Frozen" : "Account Unfrozen",
+          message: updates.is_frozen
+            ? `Your account has been frozen. Reason: ${updates.freeze_reason || "Not specified"}`
+            : "Your account has been unfrozen.",
+          type: updates.is_frozen ? "warning" : "success",
+        });
+      }
+
+      res.json({
+        message: "User updated successfully",
+        user,
+      });
+    } catch (error) {
+      console.error("Admin update user error:", error);
+      res.status(500).json({ error: "Failed to update user" });
+    }
+  },
+);
+
+// Reset user password (admin)
+app.post(
+  "/api/admin/users/:userId/reset-password",
+  authenticate,
+  authorizeAdmin,
+  async (req, res) => {
+    try {
+      const { userId } = req.params;
+
+      // Generate temporary password
+      const tempPassword =
+        Math.random().toString(36).slice(-8) +
+        Math.random().toString(36).slice(-8).toUpperCase() +
+        "!1";
+      const hashedPassword = await bcrypt.hash(tempPassword, 10);
+
+      // Update password
+      await supabase
+        .from("users")
+        .update({ password_hash: hashedPassword })
+        .eq("id", userId);
+
+      // Create notification
+      await supabase.from("notifications").insert({
+        user_id: userId,
+        title: "Password Reset",
+        message:
+          "Your password has been reset by an administrator. Please check your email for the new temporary password.",
+        type: "warning",
+      });
+
+      // In a real application, send email with temporary password
+      console.log(`Temporary password for user ${userId}: ${tempPassword}`);
+
+      // Log admin action
+      await supabase.from("admin_actions").insert({
+        admin_id: req.user.id,
+        action_type: "reset_password",
+        target_user_id: userId,
+      });
+
+      res.json({ message: "Password reset successfully" });
+    } catch (error) {
+      console.error("Admin reset password error:", error);
+      res.status(500).json({ error: "Failed to reset password" });
+    }
+  },
+);
+
+// Get single transaction details (admin)
+app.get(
+  "/api/admin/transactions/:transactionId",
+  authenticate,
+  authorizeAdmin,
+  async (req, res) => {
+    try {
+      const { transactionId } = req.params;
+
+      const { data: transaction, error } = await supabase
+        .from("transactions")
+        .select(
+          `
+                *,
+                from_account:accounts!transactions_from_account_id_fkey(*),
+                to_account:accounts!transactions_to_account_id_fkey(*),
+                from_user:users!transactions_from_user_id_fkey(first_name, last_name, email),
+                to_user:users!transactions_to_user_id_fkey(first_name, last_name, email)
+            `,
+        )
+        .eq("id", transactionId)
+        .single();
+
+      if (error) throw error;
+
+      res.json(transaction);
+    } catch (error) {
+      console.error("Admin transaction fetch error:", error);
+      res.status(500).json({ error: "Failed to fetch transaction" });
+    }
+  },
+);
+
+// Toggle card status (admin)
+app.post(
+  "/api/admin/cards/:cardId/toggle",
+  authenticate,
+  authorizeAdmin,
+  async (req, res) => {
+    try {
+      const { cardId } = req.params;
+      const { action } = req.body; // 'freeze' or 'unfreeze'
+
+      const newStatus = action === "freeze" ? "frozen" : "active";
+
+      const { data: card, error } = await supabase
+        .from("cards")
+        .update({ card_status: newStatus })
+        .eq("id", cardId)
+        .select()
+        .single();
+
+      if (error) throw error;
+
+      // Create notification for user
+      await supabase.from("notifications").insert({
+        user_id: card.user_id,
+        title: `Card ${action}d`,
+        message: `Your card ending in ${card.card_number.slice(-4)} has been ${action}d by an administrator.`,
+        type: "warning",
+      });
+
+      // Log admin action
+      await supabase.from("admin_actions").insert({
+        admin_id: req.user.id,
+        action_type: `card_${action}`,
+        target_user_id: card.user_id,
+        details: { card_id: cardId },
+      });
+
+      res.json({ message: `Card ${action}d successfully`, card });
+    } catch (error) {
+      console.error("Admin toggle card error:", error);
+      res.status(500).json({ error: "Failed to toggle card" });
+    }
+  },
+);
+
+// Report card as lost/stolen (admin)
+app.post(
+  "/api/admin/cards/:cardId/report",
+  authenticate,
+  authorizeAdmin,
+  async (req, res) => {
+    try {
+      const { cardId } = req.params;
+
+      const { data: card, error } = await supabase
+        .from("cards")
+        .update({ card_status: "lost" })
+        .eq("id", cardId)
+        .select()
+        .single();
+
+      if (error) throw error;
+
+      // Create notification for user
+      await supabase.from("notifications").insert({
+        user_id: card.user_id,
+        title: "Card Reported Lost/Stolen",
+        message: `Your card ending in ${card.card_number.slice(-4)} has been reported as lost/stolen. A new card will be issued.`,
+        type: "danger",
+      });
+
+      // Create support ticket
+      await supabase.from("support_tickets").insert({
+        user_id: card.user_id,
+        subject: "Lost/Stolen Card Reported",
+        message: `Card ending in ${card.card_number.slice(-4)} reported as lost/stolen by administrator.`,
+        priority: "high",
+      });
+
+      // Log admin action
+      await supabase.from("admin_actions").insert({
+        admin_id: req.user.id,
+        action_type: "card_report_lost",
+        target_user_id: card.user_id,
+        details: { card_id: cardId },
+      });
+
+      res.json({ message: "Card reported successfully", card });
+    } catch (error) {
+      console.error("Admin report card error:", error);
+      res.status(500).json({ error: "Failed to report card" });
+    }
+  },
+);
+
+// FIXED: GET /api/admin/support-tickets (no more 500)
+app.get(
+  "/api/admin/support-tickets",
+  authenticate,
+  authorizeAdmin,
+  async (req, res) => {
+    try {
+      const { status, search } = req.query;
+
+      let query = supabase
+        .from("support_tickets")
+        .select(
+          `
+                *,
+                users!user_id (first_name, last_name, email)
+            `,
+        )
+        .order("created_at", { ascending: false });
+
+      if (status) query = query.eq("status", status);
+      if (search) query = query.ilike("subject", `%${search}%`);
+
+      const { data: tickets, error } = await query;
+
+      if (error) throw error;
+
+      res.json({ tickets: tickets || [] });
+    } catch (err) {
+      console.error("Support tickets error:", err.message);
+      res.status(500).json({ error: "Failed to load tickets" });
+    }
+  },
+);
+
+// Get support tickets (admin)
+app.get(
+  "/api/admin/support-tickets",
+  authenticate,
+  authorizeAdmin,
+  async (req, res) => {
+    try {
+      const { status, priority, page = 1, limit = 20 } = req.query;
+      const offset = (page - 1) * limit;
+
+      let query = supabase
+        .from("support_tickets")
+        .select("*, user:users(first_name, last_name, email)", {
+          count: "exact",
+        });
+
+      if (status) {
+        query = query.eq("status", status);
+      }
+
+      if (priority) {
+        query = query.eq("priority", priority);
+      }
+
+      const {
+        data: tickets,
+        count,
+        error,
+      } = await query
+        .order("created_at", { ascending: false })
+        .range(offset, offset + limit - 1);
+
+      if (error) throw error;
+
+      res.json({
+        tickets,
+        pagination: {
+          page: parseInt(page),
+          limit: parseInt(limit),
+          total: count,
+          pages: Math.ceil(count / limit),
+        },
+      });
+    } catch (error) {
+      console.error("Admin tickets fetch error:", error);
+      res.status(500).json({ error: "Failed to fetch support tickets" });
+    }
+  },
+);
+
+// Reply to support ticket (admin)
+app.post(
+  "/api/admin/support-tickets/:ticketId/reply",
+  authenticate,
+  authorizeAdmin,
+  async (req, res) => {
+    try {
+      const { ticketId } = req.params;
+      const { message } = req.body;
+
+      // Update ticket status
+      await supabase
+        .from("support_tickets")
+        .update({
+          status: "in_progress",
+          updated_at: new Date(),
+        })
+        .eq("id", ticketId);
+
+      // Add admin reply
+      const { data: reply } = await supabase
+        .from("chat_messages")
+        .insert({
+          ticket_id: ticketId,
+          sender_id: req.user.id,
+          message,
+          is_admin_reply: true,
+        })
+        .select()
+        .single();
+
+      // Get ticket to get user_id
+      const { data: ticket } = await supabase
+        .from("support_tickets")
+        .select("user_id")
+        .eq("id", ticketId)
+        .single();
+
+      // Create notification for user
+      await supabase.from("notifications").insert({
+        user_id: ticket.user_id,
+        title: "New Support Reply",
+        message: "An admin has replied to your support ticket",
+        type: "info",
+        action_url: `/support/${ticketId}`,
+      });
+
+      res.json({ message: "Reply sent successfully", reply });
+    } catch (error) {
+      console.error("Admin ticket reply error:", error);
+      res.status(500).json({ error: "Failed to send reply" });
+    }
+  },
+);
+
+// Close support ticket (admin)
+app.post(
+  "/api/admin/support-tickets/:ticketId/close",
+  authenticate,
+  authorizeAdmin,
+  async (req, res) => {
+    try {
+      const { ticketId } = req.params;
+      const { resolution } = req.body;
+
+      await supabase
+        .from("support_tickets")
+        .update({
+          status: "closed",
+          updated_at: new Date(),
+        })
+        .eq("id", ticketId);
+
+      // Get ticket to get user_id
+      const { data: ticket } = await supabase
+        .from("support_tickets")
+        .select("user_id")
+        .eq("id", ticketId)
+        .single();
+
+      // Create notification
+      await supabase.from("notifications").insert({
+        user_id: ticket.user_id,
+        title: "Support Ticket Closed",
+        message: resolution || "Your support ticket has been closed",
+        type: "info",
+      });
+
+      res.json({ message: "Ticket closed successfully" });
+    } catch (error) {
+      console.error("Admin close ticket error:", error);
+      res.status(500).json({ error: "Failed to close ticket" });
+    }
+  },
+);
+
+// Process bulk operations (admin)
+app.post(
+  "/api/admin/bulk-operations",
+  authenticate,
+  authorizeAdmin,
+  async (req, res) => {
+    try {
+      const { operation, users, amount, description } = req.body;
+      const bulkReference = uuidv4();
+
+      const results = [];
+
+      for (const userId of users) {
+        try {
+          if (operation === "deposit") {
+            // Get user's primary account
+            const { data: account } = await supabase
+              .from("accounts")
+              .select("*")
+              .eq("user_id", userId)
+              .eq("account_type", "checking")
+              .single();
+
+            if (account) {
+              await supabase
+                .from("accounts")
+                .update({
+                  balance: account.balance + amount,
+                  available_balance: account.available_balance + amount,
+                })
+                .eq("id", account.id);
+
+              await supabase.from("transactions").insert({
+                to_account_id: account.id,
+                to_user_id: userId,
+                amount,
+                description: description || "Bulk deposit",
+                transaction_type: "bulk_deposit",
+                status: "completed",
+                completed_at: new Date(),
+                is_bulk: true,
+                bulk_reference: bulkReference,
+              });
+
+              results.push({ userId, status: "success" });
+            }
+          } else if (operation === "withdrawal") {
+            // Similar logic for withdrawal
+          }
+        } catch (error) {
+          results.push({ userId, status: "failed", error: error.message });
+        }
+      }
+
+      // Log admin action
+      await supabase.from("admin_actions").insert({
+        admin_id: req.user.id,
+        action_type: "bulk_operation",
+        details: {
+          operation,
+          users_count: users.length,
+          amount,
+          bulk_reference: bulkReference,
+          results,
+        },
+      });
+
+      res.json({
+        message: "Bulk operation completed",
+        bulk_reference: bulkReference,
+        results,
+      });
+    } catch (error) {
+      console.error("Bulk operation error:", error);
+      res.status(500).json({ error: "Bulk operation failed" });
+    }
+  },
+);
+
+// Get admin dashboard stats
+app.get("/api/admin/stats", authenticate, authorizeAdmin, async (req, res) => {
+  try {
+    // Total users
+    const { count: totalUsers } = await supabase
+      .from("users")
+      .select("*", { count: "exact", head: true });
+
+    // Active users (not frozen, active)
+    const { count: activeUsers } = await supabase
+      .from("users")
+      .select("*", { count: "exact", head: true })
+      .eq("is_active", true)
+      .eq("is_frozen", false);
+
+    // Frozen users
+    const { count: frozenUsers } = await supabase
+      .from("users")
+      .select("*", { count: "exact", head: true })
+      .eq("is_frozen", true);
+
+    // Pending KYC
+    const { count: pendingKYC } = await supabase
+      .from("users")
+      .select("*", { count: "exact", head: true })
+      .eq("kyc_status", "pending");
+
+    // Total transactions today
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const { count: todayTransactions } = await supabase
+      .from("transactions")
+      .select("*", { count: "exact", head: true })
+      .gte("created_at", today.toISOString());
+
+    // Total volume today
+    const { data: volumeData } = await supabase
+      .from("transactions")
+      .select("amount")
+      .gte("created_at", today.toISOString())
+      .eq("status", "completed");
+
+    const todayVolume = volumeData?.reduce((sum, t) => sum + t.amount, 0) || 0;
+
+    // Open support tickets
+    const { count: openTickets } = await supabase
+      .from("support_tickets")
+      .select("*", { count: "exact", head: true })
+      .eq("status", "open");
+
+    res.json({
+      totalUsers,
+      activeUsers,
+      frozenUsers,
+      pendingKYC,
+      todayTransactions,
+      todayVolume,
+      openTickets,
+      timestamp: new Date(),
+    });
+  } catch (error) {
+    console.error("Admin stats error:", error);
+    res.status(500).json({ error: "Failed to fetch stats" });
+  }
+});
+
+// Start server
+const PORT = process.env.PORT || 3000;
+app.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
+});
+
+// Create default admin user
+const createDefaultAdmin = async () => {
+  try {
+    const { data: existingAdmin } = await supabase
+      .from("users")
+      .select("email")
+      .eq("email", process.env.ADMIN_EMAIL)
+      .single();
+
+    if (!existingAdmin) {
+      const hashedPassword = await bcrypt.hash(process.env.ADMIN_PASSWORD, 10);
+
+      await supabase.from("users").insert({
+        email: process.env.ADMIN_EMAIL,
+        password_hash: hashedPassword,
+        first_name: "Admin",
+        last_name: "User",
+        role: "admin",
+        kyc_status: "verified",
+        is_active: true,
+      });
+
+      console.log("Default admin user created");
+    }
+  } catch (error) {
+    console.error("Error creating default admin:", error);
+  }
+};
+
+createDefaultAdmin();
