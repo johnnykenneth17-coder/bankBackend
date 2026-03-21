@@ -229,11 +229,3 @@ const {
 
 
 
-// middleware/auth.js – bottom should have:
-module.exports = {
-  authenticate,
-  authorizeAdmin,
-  checkAccountFrozen,
-  logAdminAction,
-  otpRateLimiter
-};
