@@ -17,7 +17,7 @@ const {
   checkAccountFrozen,
   logAdminAction,
   otpRateLimiter,
-} = require("./middleware/auth");   // ← relative path from api/index.js
+} = require("../middleware/auth");   // ← relative path from api/index.js
 
 // ONLY NOW declare app
 const app = express();
