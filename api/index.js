@@ -1,32 +1,3 @@
-// Handle preflight OPTIONS for ALL routes explicitly
-app.options("*", (req, res) => {
-  const origin = req.headers.origin;
-
-  // Allow your local dev origin + production frontend(s)
-  const allowedOrigins = [
-    "http://localhost:5500",
-    "http://127.0.0.1:5500",
-    "https://zivarabank.vercel.app", // ← add your real frontend domain here
-    // add more if needed
-  ];
-
-  if (origin && allowedOrigins.includes(origin)) {
-    res.setHeader("Access-Control-Allow-Origin", origin);
-  } else {
-    res.setHeader("Access-Control-Allow-Origin", "*"); // temp for debugging
-  }
-
-  res.setHeader("Access-Control-Allow-Credentials", "true");
-  res.setHeader(
-    "Access-Control-Allow-Methods",
-    "GET, POST, PUT, DELETE, PATCH, OPTIONS",
-  );
-  res.setHeader("Access-Control-Allow-Headers", "Content-Type, Authorization");
-  res.setHeader("Access-Control-Max-Age", "86400"); // cache preflight 24 hours
-
-  return res.status(204).end();
-});
-
 const express = require("express");
 const cors = require("cors");
 const helmet = require("helmet");
@@ -39,129 +10,38 @@ const QRCode = require("qrcode");
 const { v4: uuidv4 } = require("uuid");
 require("dotenv").config();
 
-const {
-  authenticate,
-  authorizeAdmin,
-  checkAccountFrozen,
-  logAdminAction,
-  otpRateLimiter,
-} = require("./middleware/auth");
-
+// ONLY NOW declare app
 const app = express();
 
-// Security middleware
+// Security middleware FIRST (after app is declared)
 app.use(helmet());
+
+// Then cors
 app.use(
   cors({
-    origin: process.env.FRONTEND_URL,
-    credentials: true,
-  }),
-);
-/*app.use(
-  cors({
-    origin: [
-      "http://localhost:5500",
-      "http://127.0.0.1:5500",
-      "https://bank-backend-blush.vercel.app",        // your backend (sometimes needed)
-      "https://zivarabank.vercel.app/",     // ← ADD YOUR FRONTEND URL HERE
-      // you can add more later
-    ],
-    credentials: true,
-    methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS"],
-    allowedHeaders: ["Content-Type", "Authorization"],
-  }),
-);*/
-
-/*const cors = require("cors");
-
-// List ALL possible origins you want to allow
-const allowedOrigins = [
-  "http://localhost:5500",
-  "http://127.0.0.1:5500",
-  "https://zivarabank.vercel.app", // ← your actual production frontend
-  "https://zivarabank-git-main-*.vercel.app", // ← for preview branches (optional but helpful)
-  // Add your custom domain later if you attach one
-];
-
-app.use(
-  cors({
-    origin: function (origin, callback) {
-      // Allow requests with no origin (like mobile apps, curl, Postman)
-      if (!origin) return callback(null, true);
-
-      if (allowedOrigins.indexOf(origin) !== -1) {
+    origin: (origin, callback) => {
+      const allowed = [
+        "http://localhost:5500",
+        "http://127.0.0.1:5500",
+        "https://zivarabank.vercel.app",
+        "*",
+      ];
+      if (
+        !origin ||
+        allowed.includes(origin) ||
+        allowed.some((a) => origin?.startsWith(a))
+      ) {
         callback(null, true);
       } else {
         callback(new Error("Not allowed by CORS"));
       }
     },
     credentials: true,
-    methods: ["GET", "POST", "PUT", "DELETE", "PATCH", "OPTIONS"],
+    methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
     allowedHeaders: ["Content-Type", "Authorization"],
-    // Important: helps with preflight caching
-    optionsSuccessStatus: 200,
-  }),
-);*/
-
-/*const cors = require("cors");
-
-app.use(
-  cors({
-    origin: (origin, callback) => {
-      // List of allowed origins - add your real production frontend domains here
-      const allowedOrigins = [
-        "http://localhost:5500",
-        "http://127.0.0.1:5500",
-        "https://zivarabank.vercel.app",           // ← your frontend domain
-        "https://*.vercel.app",                     // allow preview / branch domains
-        // "http://your-other-domain.com",          // add more if needed
-      ];
-
-      // For development & testing: allow requests with no origin (Postman, curl, etc.)
-      if (!origin) {
-        return callback(null, true);
-      }
-
-      // Allow if origin is in the list
-      if (allowedOrigins.includes(origin) || allowedOrigins.some(o => origin.startsWith(o))) {
-        callback(null, origin);   // reflect the requesting origin
-      } else {
-        // For debugging you can temporarily allow everything:
-        // callback(null, true);
-        
-        // Normal behavior - reject unknown origins
-        callback(new Error("Not allowed by CORS policy"));
-      }
-    },
-
-    credentials: true,                        // very important if using cookies / auth headers
-
-    methods: [
-      "GET",
-      "POST",
-      "PUT",
-      "DELETE",
-      "PATCH",
-      "OPTIONS"
-    ],
-
-    allowedHeaders: [
-      "Content-Type",
-      "Authorization",
-      "X-Requested-With",
-      "Accept",
-      "Origin"
-    ],
-
-    exposedHeaders: ["Content-Length", "X-Content-Type-Options"],
-
-    // Many people need this on Vercel because of preflight caching issues
     optionsSuccessStatus: 204,
-
-    // Helps with some browser strictness
-    preflightContinue: false
-  })
-);*/
+  }),
+);
 app.use(express.json());
 app.use(morgan("combined"));
 
@@ -3470,8 +3350,6 @@ app.get("/api/admin/stats", authenticate, authorizeAdmin, async (req, res) => {
 app.listen(PORT, () => {
   console.log(`Server running on port ${PORT}`);
 });*/
-
-
 
 // Create default admin user
 const createDefaultAdmin = async () => {
