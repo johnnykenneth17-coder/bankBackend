@@ -1813,6 +1813,69 @@ app.post("/api/user/verify-unfreeze-otp", authenticate, async (req, res) => {
   }
 });
 
+// ==================== LIVE SUPPORT CHAT ROUTES ====================
+
+// Send message (user or admin)
+app.post("/api/chat/live/send", authenticate, async (req, res) => {
+  const { message } = req.body;
+  const isAdmin = req.user.role === "admin";
+
+  try {
+    const { data, error } = await supabase
+      .from("live_support_messages")
+      .insert({
+        user_id: isAdmin ? null : req.user.id, // user_id is always the customer
+        admin_id: isAdmin ? req.user.id : null,
+        message,
+        is_from_admin: isAdmin,
+        status: "sent",
+      })
+      .select()
+      .single();
+
+    if (error) throw error;
+
+    res.json({ success: true, message: data });
+  } catch (err) {
+    res.status(500).json({ error: "Failed to send message" });
+  }
+});
+
+// Get chat history for a user (admin or user)
+app.get("/api/chat/live/:userId", authenticate, async (req, res) => {
+  const targetUserId = req.params.userId || req.user.id;
+
+  try {
+    const { data } = await supabase
+      .from("live_support_messages")
+      .select("*")
+      .eq("user_id", targetUserId)
+      .order("created_at", { ascending: true });
+
+    res.json(data || []);
+  } catch (err) {
+    res.status(500).json({ error: "Failed to load chat" });
+  }
+});
+
+// Mark messages as read
+app.post("/api/chat/live/mark-read", authenticate, async (req, res) => {
+  const { userId } = req.body; // the customer whose messages we are marking
+
+  try {
+    await supabase
+      .from("live_support_messages")
+      .update({ status: "read", read_at: new Date() })
+      .eq("user_id", userId)
+      .eq("is_from_admin", false) // only mark user's messages as read by admin
+      .is("read_at", null);
+
+    res.json({ success: true });
+  } catch (err) {
+    res.status(500).json({ error: "Failed to mark read" });
+  }
+});
+
 // ==================== ADMIN ROUTES ====================
 
 // Get all users (admin)
