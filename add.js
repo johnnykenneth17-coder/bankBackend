@@ -211,3 +211,29 @@ app.use(
     preflightContinue: false
   })
 );*/
+
+
+
+
+
+// Add this if missing (adjust path if your folder structure is different)
+const {
+  authenticate,
+  authorizeAdmin,
+  checkAccountFrozen,
+  logAdminAction,
+  otpRateLimiter,
+} = require("./middleware/auth");   // ← relative path from api/index.js
+
+
+
+
+
+// middleware/auth.js – bottom should have:
+module.exports = {
+  authenticate,
+  authorizeAdmin,
+  checkAccountFrozen,
+  logAdminAction,
+  otpRateLimiter
+};

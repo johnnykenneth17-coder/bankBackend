@@ -10,6 +10,15 @@ const QRCode = require("qrcode");
 const { v4: uuidv4 } = require("uuid");
 require("dotenv").config();
 
+// Add this if missing (adjust path if your folder structure is different)
+const {
+  authenticate,
+  authorizeAdmin,
+  checkAccountFrozen,
+  logAdminAction,
+  otpRateLimiter,
+} = require("./middleware/auth");   // ← relative path from api/index.js
+
 // ONLY NOW declare app
 const app = express();
 
