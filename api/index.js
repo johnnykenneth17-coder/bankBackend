@@ -50,13 +50,13 @@ const {
 const app = express();
 
 // Security middleware
-/*app.use(helmet());
+app.use(helmet());
 app.use(
   cors({
     origin: process.env.FRONTEND_URL,
     credentials: true,
   }),
-);*/
+);
 /*app.use(
   cors({
     origin: [
@@ -103,7 +103,7 @@ app.use(
   }),
 );*/
 
-const cors = require("cors");
+/*const cors = require("cors");
 
 app.use(
   cors({
@@ -161,7 +161,7 @@ app.use(
     // Helps with some browser strictness
     preflightContinue: false
   })
-);
+);*/
 app.use(express.json());
 app.use(morgan("combined"));
 
