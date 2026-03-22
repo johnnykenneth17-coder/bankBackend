@@ -1816,7 +1816,7 @@ app.post("/api/user/verify-unfreeze-otp", authenticate, async (req, res) => {
 // ==================== LIVE SUPPORT CHAT ROUTES ====================
 
 // Send message (user or admin)
-app.post("/api/chat/live/send", authenticate, async (req, res) => {
+/*pp.post("/api/chat/live/send", authenticate, async (req, res) => {
   const { message } = req.body;
   const isAdmin = req.user.role === "admin";
 
@@ -1874,7 +1874,86 @@ app.post("/api/chat/live/mark-read", authenticate, async (req, res) => {
   } catch (err) {
     res.status(500).json({ error: "Failed to mark read" });
   }
+});*/
+
+// ────────────────────────────────────────────────
+//     LIVE SUPPORT / CHAT ROUTES (minimal version)
+// ────────────────────────────────────────────────
+
+// User — get chat history
+app.get('/api/chat/live', authenticate, checkAccountFrozen, async (req, res) => {
+    try {
+        const { data, error } = await supabase
+            .from('live_support_messages')
+            .select(`
+                id,
+                message,
+                is_from_admin,
+                created_at,
+                status,
+                read_at
+            `)
+            .eq('user_id', req.user.id)
+            .order('created_at', { ascending: true });
+
+        if (error) throw error;
+
+        res.json({ messages: data || [] });
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: 'Failed to load chat history' });
+    }
 });
+
+// User — send message
+app.post('/api/chat/live', authenticate, checkAccountFrozen, async (req, res) => {
+    const { message } = req.body;
+
+    if (!message?.trim()) {
+        return res.status(400).json({ error: 'Message cannot be empty' });
+    }
+
+    try {
+        const { data, error } = await supabase
+            .from('live_support_messages')
+            .insert({
+                user_id: req.user.id,
+                message: message.trim(),
+                is_from_admin: false,
+                status: 'sent'
+            })
+            .select()
+            .single();
+
+        if (error) throw error;
+
+        res.json({ success: true, message: data });
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: 'Failed to send message' });
+    }
+});
+
+// Admin — get list of users who have messaged
+app.get('/api/admin/live-chat/users', authenticate, authorizeAdmin, async (req, res) => {
+    try {
+        const { data, error } = await supabase
+            .from('live_support_messages')
+            .select('user_id, users!user_id (email, first_name, last_name)')
+            .is('admin_id', null)           // only user-initiated threads
+            .order('created_at', { ascending: false });
+
+        if (error) throw error;
+
+        // Group by user_id to get unique users
+        const uniqueUsers = [...new Map(data.map(item => [item.user_id, item])).values()];
+
+        res.json({ users: uniqueUsers });
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: 'Failed to load active chat users' });
+    }
+}); 
 
 // ==================== ADMIN ROUTES ====================
 
