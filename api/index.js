@@ -1936,67 +1936,77 @@ app.post("/api/chat/live", authenticate, async (req, res) => {
 });
 
 // ADMIN SIDE - Get list of users who have messaged (for sidebar)
-app.get(
-  "/api/admin/live-chat/users",
-  authenticate,
-  authorizeAdmin,
-  async (req, res) => {
-    try {
-      const { data, error } = await supabase
-        .from("live_support_messages")
-        .select(
-          `
+app.get("/api/admin/live-chat/users", authenticate, authorizeAdmin, async (req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from("live_support_messages")
+      .select(`
         user_id,
-        users!inner (first_name, last_name, email)
-      `,
-        )
-        .order("created_at", { ascending: false });
+        users (first_name, last_name, email)
+      `)
+      .order("created_at", { ascending: false, foreignTable: "live_support_messages" });
 
-      if (error) throw error;
+    if (error) {
+      console.error("Supabase error in live-chat/users:", error);
+      throw error;
+    }
 
-      // Deduplicate users
-      const seen = new Set();
-      const users = [];
-      (data || []).forEach((m) => {
-        if (!seen.has(m.user_id)) {
-          seen.add(m.user_id);
-          users.push({
-            user_id: m.user_id,
-            name: `${m.users.first_name} ${m.users.last_name}`,
-            email: m.users.email,
+    if (!data || data.length === 0) {
+      return res.json({ users: [] });
+    }
+
+    // Deduplicate + format
+    const seen = new Set();
+    const uniqueUsers = [];
+
+    data.forEach(row => {
+      if (row.user_id && !seen.has(row.user_id)) {
+        seen.add(row.user_id);
+        const user = row.users;
+        if (user) {
+          uniqueUsers.push({
+            user_id: row.user_id,
+            name: `${user.first_name || ''} ${user.last_name || ''}`.trim() || "Unknown User",
+            email: user.email || "no-email"
           });
         }
-      });
+      }
+    });
 
-      res.json({ users });
-    } catch (error) {
-      console.error("Admin live-chat users error:", error);
-      res.status(500).json({ error: "Failed to load conversations" });
-    }
-  },
-);
+    res.json({ users: uniqueUsers });
+  } catch (err) {
+    console.error("Admin live-chat users endpoint error:", err);
+    res.status(500).json({ error: "Failed to load user list", details: err.message });
+  }
+});   
+
 
 // ADMIN SIDE - Get messages for a specific user
-app.get(
-  "/api/admin/live-chat/:userId",
-  authenticate,
-  authorizeAdmin,
-  async (req, res) => {
-    try {
-      const { userId } = req.params;
-      const { data, error } = await supabase
-        .from("live_support_messages")
-        .select("*")
-        .eq("user_id", userId)
-        .order("created_at", { ascending: true });
+app.get("/api/admin/live-chat/:userId", authenticate, authorizeAdmin, async (req, res) => {
+  try {
+    const { userId } = req.params;
 
-      if (error) throw error;
-      res.json({ messages: data || [] });
-    } catch (error) {
-      res.status(500).json({ error: "Failed to load chat" });
-    }
-  },
-);
+    const { data, error } = await supabase
+      .from("live_support_messages")
+      .select(`
+        id,
+        message,
+        is_from_admin,
+        status,
+        created_at,
+        admin_id
+      `)
+      .eq("user_id", userId)
+      .order("created_at", { ascending: true });
+
+    if (error) throw error;
+
+    res.json({ messages: data || [] });
+  } catch (err) {
+    console.error("Admin load chat error:", err);
+    res.status(500).json({ error: "Failed to load messages" });
+  }
+});
 
 // ADMIN SIDE - Reply as admin
 app.post(
