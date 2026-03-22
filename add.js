@@ -146,3 +146,65 @@ app.post(
     }
   },
 );
+
+
+
+
+
+
+
+
+
+
+
+
+
+// ADMIN - List of users who ever sent a message
+app.get("/api/admin/live-chat/users", authenticate, authorizeAdmin, async (req, res) => {
+  try {
+    // Step 1: Get distinct user_ids that have at least one message
+    const { data: userIdsData, error: idsError } = await supabase
+      .from("live_support_messages")
+      .select("user_id")
+      .order("created_at", { ascending: false });
+
+    if (idsError) {
+      console.error("Error fetching user_ids:", idsError);
+      throw idsError;
+    }
+
+    if (!userIdsData || userIdsData.length === 0) {
+      return res.json({ users: [] });
+    }
+
+    // Step 2: Get unique user_ids
+    const uniqueUserIds = [...new Set(userIdsData.map(row => row.user_id))];
+
+    // Step 3: Fetch user details for those IDs
+    const { data: usersData, error: usersError } = await supabase
+      .from("users")
+      .select("id, first_name, last_name, email")
+      .in("id", uniqueUserIds);
+
+    if (usersError) {
+      console.error("Error fetching users:", usersError);
+      throw usersError;
+    }
+
+    // Step 4: Format response
+    const formattedUsers = (usersData || []).map(user => ({
+      user_id: user.id,
+      name: `${user.first_name || ''} ${user.last_name || ''}`.trim() || "Unknown",
+      email: user.email || "no-email@found.com"
+    }));
+
+    res.json({ users: formattedUsers });
+
+  } catch (err) {
+    console.error("ADMIN /live-chat/users CRASH:", err.message, err.details || err);
+    res.status(500).json({ 
+      error: "Failed to load conversations",
+      debug: err.message   // ← helpful in dev, remove in prod if you want
+    });
+  }
+});
