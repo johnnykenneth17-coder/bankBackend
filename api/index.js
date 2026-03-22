@@ -2028,7 +2028,7 @@ app.post(
   },
 );
 
-// ==================== ADMIN ROUTES ====================
+// ==================== ADMIN ROUTES ================
 
 // Get all users (admin)
 app.get("/api/admin/users", authenticate, authorizeAdmin, async (req, res) => {
