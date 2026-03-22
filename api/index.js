@@ -1879,81 +1879,154 @@ app.post("/api/chat/live/mark-read", authenticate, async (req, res) => {
 // ────────────────────────────────────────────────
 //     LIVE SUPPORT / CHAT ROUTES (minimal version)
 // ────────────────────────────────────────────────
+// ==================== LIVE SUPPORT CHAT ROUTES ====================
 
-// User — get chat history
-app.get('/api/chat/live', authenticate, checkAccountFrozen, async (req, res) => {
-    try {
-        const { data, error } = await supabase
-            .from('live_support_messages')
-            .select(`
-                id,
-                message,
-                is_from_admin,
-                created_at,
-                status,
-                read_at
-            `)
-            .eq('user_id', req.user.id)
-            .order('created_at', { ascending: true });
+// USER SIDE - Get own chat history
+app.get("/api/chat/live", authenticate, async (req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from("live_support_messages")
+      .select(
+        `
+        id,
+        message,
+        is_from_admin,
+        status,
+        created_at
+      `,
+      )
+      .eq("user_id", req.user.id)
+      .order("created_at", { ascending: true });
 
-        if (error) throw error;
+    if (error) throw error;
 
-        res.json({ messages: data || [] });
-    } catch (err) {
-        console.error(err);
-        res.status(500).json({ error: 'Failed to load chat history' });
-    }
+    res.json({ messages: data || [] });
+  } catch (error) {
+    console.error("Live chat GET error:", error);
+    res.status(500).json({ error: "Failed to load chat history" });
+  }
 });
 
-// User — send message
-app.post('/api/chat/live', authenticate, checkAccountFrozen, async (req, res) => {
+// USER SIDE - Send message
+app.post("/api/chat/live", authenticate, async (req, res) => {
+  try {
     const { message } = req.body;
-
-    if (!message?.trim()) {
-        return res.status(400).json({ error: 'Message cannot be empty' });
+    if (!message || !message.trim()) {
+      return res.status(400).json({ error: "Message cannot be empty" });
     }
 
-    try {
-        const { data, error } = await supabase
-            .from('live_support_messages')
-            .insert({
-                user_id: req.user.id,
-                message: message.trim(),
-                is_from_admin: false,
-                status: 'sent'
-            })
-            .select()
-            .single();
+    const { data, error } = await supabase
+      .from("live_support_messages")
+      .insert({
+        user_id: req.user.id,
+        message: message.trim(),
+        is_from_admin: false,
+        status: "sent",
+      })
+      .select()
+      .single();
 
-        if (error) throw error;
+    if (error) throw error;
 
-        res.json({ success: true, message: data });
-    } catch (err) {
-        console.error(err);
-        res.status(500).json({ error: 'Failed to send message' });
-    }
+    res.json({ success: true, message: data });
+  } catch (error) {
+    console.error("Live chat POST error:", error);
+    res.status(500).json({ error: "Failed to send message" });
+  }
 });
 
-// Admin — get list of users who have messaged
-app.get('/api/admin/live-chat/users', authenticate, authorizeAdmin, async (req, res) => {
+// ADMIN SIDE - Get list of users who have messaged (for sidebar)
+app.get(
+  "/api/admin/live-chat/users",
+  authenticate,
+  authorizeAdmin,
+  async (req, res) => {
     try {
-        const { data, error } = await supabase
-            .from('live_support_messages')
-            .select('user_id, users!user_id (email, first_name, last_name)')
-            .is('admin_id', null)           // only user-initiated threads
-            .order('created_at', { ascending: false });
+      const { data, error } = await supabase
+        .from("live_support_messages")
+        .select(
+          `
+        user_id,
+        users!inner (first_name, last_name, email)
+      `,
+        )
+        .order("created_at", { ascending: false });
 
-        if (error) throw error;
+      if (error) throw error;
 
-        // Group by user_id to get unique users
-        const uniqueUsers = [...new Map(data.map(item => [item.user_id, item])).values()];
+      // Deduplicate users
+      const seen = new Set();
+      const users = [];
+      (data || []).forEach((m) => {
+        if (!seen.has(m.user_id)) {
+          seen.add(m.user_id);
+          users.push({
+            user_id: m.user_id,
+            name: `${m.users.first_name} ${m.users.last_name}`,
+            email: m.users.email,
+          });
+        }
+      });
 
-        res.json({ users: uniqueUsers });
-    } catch (err) {
-        console.error(err);
-        res.status(500).json({ error: 'Failed to load active chat users' });
+      res.json({ users });
+    } catch (error) {
+      console.error("Admin live-chat users error:", error);
+      res.status(500).json({ error: "Failed to load conversations" });
     }
-}); 
+  },
+);
+
+// ADMIN SIDE - Get messages for a specific user
+app.get(
+  "/api/admin/live-chat/:userId",
+  authenticate,
+  authorizeAdmin,
+  async (req, res) => {
+    try {
+      const { userId } = req.params;
+      const { data, error } = await supabase
+        .from("live_support_messages")
+        .select("*")
+        .eq("user_id", userId)
+        .order("created_at", { ascending: true });
+
+      if (error) throw error;
+      res.json({ messages: data || [] });
+    } catch (error) {
+      res.status(500).json({ error: "Failed to load chat" });
+    }
+  },
+);
+
+// ADMIN SIDE - Reply as admin
+app.post(
+  "/api/admin/live-chat/:userId",
+  authenticate,
+  authorizeAdmin,
+  async (req, res) => {
+    try {
+      const { userId } = req.params;
+      const { message } = req.body;
+
+      if (!message?.trim()) {
+        return res.status(400).json({ error: "Message cannot be empty" });
+      }
+
+      const { error } = await supabase.from("live_support_messages").insert({
+        user_id: userId,
+        admin_id: req.user.id,
+        message: message.trim(),
+        is_from_admin: true,
+        status: "sent",
+      });
+
+      if (error) throw error;
+      res.json({ success: true });
+    } catch (error) {
+      res.status(500).json({ error: "Failed to send reply" });
+    }
+  },
+);
 
 // ==================== ADMIN ROUTES ====================
 
