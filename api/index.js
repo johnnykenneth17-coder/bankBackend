@@ -9,6 +9,7 @@ const speakeasy = require("speakeasy");
 const QRCode = require("qrcode");
 const { v4: uuidv4 } = require("uuid");
 require("dotenv").config();
+const router = express.Router();
 
 // Add this if missing (adjust path if your folder structure is different)
 const {
@@ -1936,9 +1937,6 @@ app.post("/api/chat/live", authenticate, async (req, res) => {
 });
 
 // In your user routes file (protected by authenticate middleware)
-
-const express = require('express');
-const router = express.Router();
 const { authenticate, checkAccountFrozen } = require('../middleware/auth'); // Note: Add Money bypasses freeze
 
 // GET saved cards (for display in Add Money page)
