@@ -2006,7 +2006,7 @@ router.post('/add-money', authenticate, async (req, res) => {
 // In your admin routes file (protected by authenticate + authorizeAdmin)
 
 
-const { authenticate, authorizeAdmin } = require('../middleware/auth');
+//const { authenticate, authorizeAdmin } = require('../middleware/auth');
 
 // GET all pending add money requests
 router.get('/add-money-requests', authenticate, authorizeAdmin, async (req, res) => {
