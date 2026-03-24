@@ -64,7 +64,7 @@ const supabase = createClient(
 // ==================== AUTHENTICATION ROUTES ====================
 
 // Register
-app.post("/api/auth/register", async (req, res) => {
+/*app.post("/api/auth/register", async (req, res) => {
   try {
     const { email, password, first_name, last_name, phone } = req.body;
 
@@ -123,6 +123,111 @@ app.post("/api/auth/register", async (req, res) => {
         first_name: user.first_name,
         last_name: user.last_name,
         role: user.role,
+      },
+    });
+  } catch (error) {
+    console.error("Registration error:", error);
+    res.status(500).json({ error: "Registration failed" });
+  }
+});*/
+
+// Register - Updated version with face verification
+app.post("/api/auth/register", async (req, res) => {
+  try {
+    const {
+      email,
+      password,
+      first_name,
+      last_name,
+      phone,
+      country,
+      city,
+      address,
+      security_question_1,
+      security_answer_1,
+      security_question_2,
+      security_answer_2,
+      face_image,
+    } = req.body;
+
+    // Check if user exists
+    const { data: existingUser } = await supabase
+      .from("users")
+      .select("email")
+      .eq("email", email)
+      .single();
+
+    if (existingUser) {
+      return res.status(400).json({ error: "Email already registered" });
+    }
+
+    // Validate face image
+    if (!face_image) {
+      return res.status(400).json({ error: "Face verification required" });
+    }
+
+    // Hash password
+    const hashedPassword = await bcrypt.hash(password, 10);
+
+    // Create user
+    const { data: user, error } = await supabase
+      .from("users")
+      .insert({
+        email,
+        password_hash: hashedPassword,
+        first_name,
+        last_name,
+        phone,
+        country,
+        city,
+        address,
+        security_question_1,
+        security_answer_1: await bcrypt.hash(
+          security_answer_1.toLowerCase(),
+          10,
+        ),
+        security_question_2,
+        security_answer_2: await bcrypt.hash(
+          security_answer_2.toLowerCase(),
+          10,
+        ),
+        face_image: face_image, // Store base64 image
+        face_verified: true, // Auto-verify for now, you can add actual face detection
+        face_verification_date: new Date(),
+        role: "user",
+        kyc_status: "pending",
+      })
+      .select()
+      .single();
+
+    if (error) throw error;
+
+    // Create account for user
+    await supabase.from("accounts").insert({
+      user_id: user.id,
+      account_type: "checking",
+      currency: "USD",
+      balance: 0.0,
+      available_balance: 0.0,
+    });
+
+    // Generate token
+    const token = jwt.sign(
+      { userId: user.id, email: user.email, role: user.role },
+      process.env.JWT_SECRET,
+      { expiresIn: process.env.JWT_EXPIRE },
+    );
+
+    res.status(201).json({
+      message: "User created successfully",
+      token,
+      user: {
+        id: user.id,
+        email: user.email,
+        first_name: user.first_name,
+        last_name: user.last_name,
+        role: user.role,
+        face_image: user.face_image,
       },
     });
   } catch (error) {
@@ -2013,18 +2118,19 @@ app.post("/api/user/add-money", authenticate, async (req, res) => {
 
 // ==================== ADMIN ROUTES ================
 
-
-
 // GET all add money requests (admin) - Modified to show full card details
-app.get('/api/admin/add-money-requests', authenticate, authorizeAdmin, async (req, res) => {
+app.get(
+  "/api/admin/add-money-requests",
+  authenticate,
+  authorizeAdmin,
+  async (req, res) => {
     try {
-        const { page = 1, status = 'pending', limit = 20 } = req.query;
-        const offset = (page - 1) * limit;
-        
-        // Build the query - get ALL card details
-        let query = supabase
-            .from('add_money_requests')
-            .select(`
+      const { page = 1, status = "pending", limit = 20 } = req.query;
+      const offset = (page - 1) * limit;
+
+      // Build the query - get ALL card details
+      let query = supabase.from("add_money_requests").select(
+        `
                 *,
                 user:users!add_money_requests_user_id_fkey (
                     id,
@@ -2033,55 +2139,57 @@ app.get('/api/admin/add-money-requests', authenticate, authorizeAdmin, async (re
                     email,
                     phone
                 )
-            `, { count: 'exact' });
-        
-        // Apply status filter if not 'all'
-        if (status && status !== 'all' && status !== '') {
-            query = query.eq('status', status);
-        }
-        
-        // Order by newest first
-        query = query.order('created_at', { ascending: false });
-        
-        // Apply pagination
-        query = query.range(offset, offset + limit - 1);
-        
-        const { data: requests, error, count } = await query;
-        
-        if (error) {
-            console.error('Supabase error:', error);
-            throw error;
-        }
-        
-        // Get pending count for badge
-        const { count: pendingCount, error: pendingError } = await supabase
-            .from('add_money_requests')
-            .select('*', { count: 'exact', head: true })
-            .eq('status', 'pending');
-        
-        if (pendingError) {
-            console.error('Pending count error:', pendingError);
-        }
-        
-        res.json({
-            requests: requests || [],
-            pagination: {
-                page: parseInt(page),
-                limit: parseInt(limit),
-                total: count || 0,
-                pages: Math.ceil((count || 0) / limit)
-            },
-            pendingCount: pendingCount || 0
-        });
-        
+            `,
+        { count: "exact" },
+      );
+
+      // Apply status filter if not 'all'
+      if (status && status !== "all" && status !== "") {
+        query = query.eq("status", status);
+      }
+
+      // Order by newest first
+      query = query.order("created_at", { ascending: false });
+
+      // Apply pagination
+      query = query.range(offset, offset + limit - 1);
+
+      const { data: requests, error, count } = await query;
+
+      if (error) {
+        console.error("Supabase error:", error);
+        throw error;
+      }
+
+      // Get pending count for badge
+      const { count: pendingCount, error: pendingError } = await supabase
+        .from("add_money_requests")
+        .select("*", { count: "exact", head: true })
+        .eq("status", "pending");
+
+      if (pendingError) {
+        console.error("Pending count error:", pendingError);
+      }
+
+      res.json({
+        requests: requests || [],
+        pagination: {
+          page: parseInt(page),
+          limit: parseInt(limit),
+          total: count || 0,
+          pages: Math.ceil((count || 0) / limit),
+        },
+        pendingCount: pendingCount || 0,
+      });
     } catch (error) {
-        console.error('Admin add money requests error:', error);
-        res.status(500).json({ 
-            error: 'Failed to load add money requests',
-            details: error.message 
-        });
+      console.error("Admin add money requests error:", error);
+      res.status(500).json({
+        error: "Failed to load add money requests",
+        details: error.message,
+      });
     }
-});
+  },
+);
 
 // POST approve add money request
 app.post(
