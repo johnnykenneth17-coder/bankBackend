@@ -54,6 +54,8 @@ app.use(
 );
 app.use(express.json());
 app.use(morgan("combined"));
+app.use(express.json({ limit: '2mb' }));
+app.use(express.urlencoded({ extended: true, limit: '2mb' }));
 
 // Supabase client
 const supabase = createClient(
@@ -63,76 +65,9 @@ const supabase = createClient(
 
 // ==================== AUTHENTICATION ROUTES ====================
 
-// Register
-/*app.post("/api/auth/register", async (req, res) => {
-  try {
-    const { email, password, first_name, last_name, phone } = req.body;
-
-    // Check if user exists
-    const { data: existingUser } = await supabase
-      .from("users")
-      .select("email")
-      .eq("email", email)
-      .single();
-
-    if (existingUser) {
-      return res.status(400).json({ error: "Email already registered" });
-    }
-
-    // Hash password
-    const hashedPassword = await bcrypt.hash(password, 10);
-
-    // Create user
-    const { data: user, error } = await supabase
-      .from("users")
-      .insert({
-        email,
-        password_hash: hashedPassword,
-        first_name,
-        last_name,
-        phone,
-        role: "user",
-      })
-      .select()
-      .single();
-
-    if (error) throw error;
-
-    // Create account for user
-    await supabase.from("accounts").insert({
-      user_id: user.id,
-      account_type: "checking",
-      currency: "USD",
-      balance: 0.0, // Welcome bonus
-      available_balance: 0.0,
-    });
-
-    // Generate token
-    const token = jwt.sign(
-      { userId: user.id, email: user.email, role: user.role },
-      process.env.JWT_SECRET,
-      { expiresIn: process.env.JWT_EXPIRE },
-    );
-
-    res.status(201).json({
-      message: "User created successfully",
-      token,
-      user: {
-        id: user.id,
-        email: user.email,
-        first_name: user.first_name,
-        last_name: user.last_name,
-        role: user.role,
-      },
-    });
-  } catch (error) {
-    console.error("Registration error:", error);
-    res.status(500).json({ error: "Registration failed" });
-  }
-});*/
 
 // Register - Updated version with face verification
-app.post("/api/auth/register", async (req, res) => {
+/*app.post("/api/auth/register", async (req, res) => {
   try {
     const {
       email,
@@ -234,6 +169,134 @@ app.post("/api/auth/register", async (req, res) => {
     console.error("Registration error:", error);
     res.status(500).json({ error: "Registration failed" });
   }
+});*/
+
+// Register - Updated to handle compressed images
+app.post("/api/auth/register", async (req, res) => {
+    try {
+        const { 
+            email, 
+            password, 
+            first_name, 
+            last_name, 
+            phone,
+            country,
+            city,
+            address,
+            security_question_1,
+            security_answer_1,
+            security_question_2,
+            security_answer_2,
+            face_image
+        } = req.body;
+
+        console.log('Registration attempt for:', email);
+        console.log('Face image received:', face_image ? `Yes, size: ${Math.round(face_image.length / 1024)}KB` : 'No');
+
+        // Check if user exists
+        const { data: existingUser } = await supabase
+            .from("users")
+            .select("email")
+            .eq("email", email)
+            .single();
+
+        if (existingUser) {
+            return res.status(400).json({ error: "Email already registered" });
+        }
+
+        // Validate face image (should be present)
+        if (!face_image || face_image.length < 100) {
+            return res.status(400).json({ error: "Face verification required" });
+        }
+
+        // Hash password
+        const hashedPassword = await bcrypt.hash(password, 10);
+        
+        // Hash security answers
+        const hashedAnswer1 = await bcrypt.hash(security_answer_1.toLowerCase().trim(), 10);
+        const hashedAnswer2 = await bcrypt.hash(security_answer_2.toLowerCase().trim(), 10);
+
+        // Create user with all fields
+        const { data: user, error } = await supabase
+            .from("users")
+            .insert({
+                email,
+                password_hash: hashedPassword,
+                first_name,
+                last_name,
+                phone,
+                country: country || null,
+                city: city || null,
+                address: address || null,
+                security_question_1,
+                security_answer_1: hashedAnswer1,
+                security_question_2,
+                security_answer_2: hashedAnswer2,
+                face_image: face_image,
+                face_verified: true,
+                face_verification_date: new Date().toISOString(),
+                role: "user",
+                kyc_status: "pending",
+                is_active: true,
+                is_frozen: false,
+                created_at: new Date().toISOString(),
+                updated_at: new Date().toISOString()
+            })
+            .select()
+            .single();
+
+        if (error) {
+            console.error('Supabase insert error:', error);
+            throw error;
+        }
+
+        console.log('User created with ID:', user.id);
+
+        // Create checking account for user
+        const { error: accountError } = await supabase
+            .from("accounts")
+            .insert({
+                user_id: user.id,
+                account_type: "checking",
+                currency: "USD",
+                balance: 0.00,
+                available_balance: 0.00,
+                status: "active",
+                created_at: new Date().toISOString(),
+                updated_at: new Date().toISOString()
+            });
+
+        if (accountError) {
+            console.error('Account creation error:', accountError);
+        }
+
+        // Generate token
+        const token = jwt.sign(
+            { userId: user.id, email: user.email, role: user.role },
+            process.env.JWT_SECRET,
+            { expiresIn: process.env.JWT_EXPIRE },
+        );
+
+        // Return user data
+        res.status(201).json({
+            message: "User created successfully",
+            token,
+            user: {
+                id: user.id,
+                email: user.email,
+                first_name: user.first_name,
+                last_name: user.last_name,
+                role: user.role,
+                phone: user.phone,
+                country: user.country,
+                city: user.city,
+                face_image: user.face_image
+            },
+        });
+    } catch (error) {
+        console.error("Registration error:", error);
+        res.status(500).json({ error: "Registration failed: " + error.message });
+    }
 });
 
 // Login
