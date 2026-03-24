@@ -162,9 +162,9 @@ app.post("/api/auth/register", async (req, res) => {
     }
 
     // Validate face image
-    if (!face_image) {
+    /*if (!face_image) {
       return res.status(400).json({ error: "Face verification required" });
-    }
+    }*/
 
     // Hash password
     const hashedPassword = await bcrypt.hash(password, 10);
