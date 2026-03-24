@@ -1937,7 +1937,7 @@ app.post("/api/chat/live", authenticate, async (req, res) => {
 });
 
 // In your user routes file (protected by authenticate middleware)
-const { authenticate, checkAccountFrozen } = require('../middleware/auth'); // Note: Add Money bypasses freeze
+//const { authenticate, checkAccountFrozen } = require('../middleware/auth'); // Note: Add Money bypasses freeze
 
 // GET saved cards (for display in Add Money page)
 router.get('/saved-cards', authenticate, async (req, res) => {
