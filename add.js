@@ -1,210 +1,157 @@
-// ==================== LIVE SUPPORT CHAT ROUTES ====================
-
-// USER SIDE - Get own chat history
-app.get("/api/chat/live", authenticate, async (req, res) => {
-  try {
-    const { data, error } = await supabase
-      .from("live_support_messages")
-      .select(
-        `
-        id,
-        message,
-        is_from_admin,
-        status,
-        created_at
-      `,
-      )
-      .eq("user_id", req.user.id)
-      .order("created_at", { ascending: true });
-
-    if (error) throw error;
-
-    res.json({ messages: data || [] });
-  } catch (error) {
-    console.error("Live chat GET error:", error);
-    res.status(500).json({ error: "Failed to load chat history" });
-  }
-});
-
-// USER SIDE - Send message
-app.post("/api/chat/live", authenticate, async (req, res) => {
-  try {
-    const { message } = req.body;
-    if (!message || !message.trim()) {
-      return res.status(400).json({ error: "Message cannot be empty" });
-    }
-
-    const { data, error } = await supabase
-      .from("live_support_messages")
-      .insert({
-        user_id: req.user.id,
-        message: message.trim(),
-        is_from_admin: false,
-        status: "sent",
-      })
-      .select()
-      .single();
-
-    if (error) throw error;
-
-    res.json({ success: true, message: data });
-  } catch (error) {
-    console.error("Live chat POST error:", error);
-    res.status(500).json({ error: "Failed to send message" });
-  }
-});
-
-// ADMIN SIDE - Get list of users who have messaged (for sidebar)
-app.get(
-  "/api/admin/live-chat/users",
-  authenticate,
-  authorizeAdmin,
-  async (req, res) => {
+// Admin routes for add money requests
+app.get('/api/admin/add-money-requests', authenticate, authorizeAdmin, async (req, res) => {
     try {
-      const { data, error } = await supabase
-        .from("live_support_messages")
-        .select(
-          `
-        user_id,
-        users!inner (first_name, last_name, email)
-      `,
-        )
-        .order("created_at", { ascending: false });
+        const { page = 1, status = 'pending' } = req.query;
+        const limit = 20;
+        const offset = (page - 1) * limit;
 
-      if (error) throw error;
+        let query = supabase
+            .from('add_money_requests')
+            .select(`
+                *,
+                user:users(id, first_name, last_name, email)
+            `)
+            .order('created_at', { ascending: false });
 
-      // Deduplicate users
-      const seen = new Set();
-      const users = [];
-      (data || []).forEach((m) => {
-        if (!seen.has(m.user_id)) {
-          seen.add(m.user_id);
-          users.push({
-            user_id: m.user_id,
-            name: `${m.users.first_name} ${m.users.last_name}`,
-            email: m.users.email,
-          });
+        if (status && status !== 'all') {
+            query = query.eq('status', status);
         }
-      });
 
-      res.json({ users });
+        const { data, error, count } = await query.range(offset, offset + limit - 1);
+
+        if (error) throw error;
+
+        // Also get pending count for badge
+        const { count: pendingCount } = await supabase
+            .from('add_money_requests')
+            .select('*', { count: 'exact', head: true })
+            .eq('status', 'pending');
+
+        res.json({
+            requests: data || [],
+            pagination: {
+                page: parseInt(page),
+                pages: Math.ceil((count || 0) / limit),
+                total: count || 0
+            },
+            pendingCount
+        });
     } catch (error) {
-      console.error("Admin live-chat users error:", error);
-      res.status(500).json({ error: "Failed to load conversations" });
+        console.error('Admin add money requests error:', error);
+        res.status(500).json({ error: 'Failed to load requests' });
     }
-  },
-);
+});
 
-// ADMIN SIDE - Get messages for a specific user
-app.get(
-  "/api/admin/live-chat/:userId",
-  authenticate,
-  authorizeAdmin,
-  async (req, res) => {
+app.post('/api/admin/add-money-requests/:id/approve', authenticate, authorizeAdmin, async (req, res) => {
+    const { id } = req.params;
+
     try {
-      const { userId } = req.params;
-      const { data, error } = await supabase
-        .from("live_support_messages")
-        .select("*")
-        .eq("user_id", userId)
-        .order("created_at", { ascending: true });
+        // Get the request
+        const { data: request, error: fetchError } = await supabase
+            .from('add_money_requests')
+            .select('*')
+            .eq('id', id)
+            .single();
 
-      if (error) throw error;
-      res.json({ messages: data || [] });
+        if (fetchError || !request) {
+            return res.status(404).json({ error: 'Request not found' });
+        }
+
+        // Start a transaction
+        const { error: updateError } = await supabase
+            .from('add_money_requests')
+            .update({ 
+                status: 'approved',
+                processed_at: new Date().toISOString(),
+                processed_by: req.user.id
+            })
+            .eq('id', id);
+
+        if (updateError) throw updateError;
+
+        // Add money to user's primary account
+        const { data: account, error: accountError } = await supabase
+            .from('accounts')
+            .select('*')
+            .eq('user_id', request.user_id)
+            .order('created_at', { ascending: true })
+            .limit(1)
+            .single();
+
+        if (account && !accountError) {
+            const newBalance = account.balance + request.amount;
+            await supabase
+                .from('accounts')
+                .update({ 
+                    balance: newBalance,
+                    available_balance: newBalance
+                })
+                .eq('id', account.id);
+
+            // Create transaction record
+            await supabase.from('transactions').insert({
+                to_account_id: account.id,
+                to_user_id: request.user_id,
+                amount: request.amount,
+                description: `Add money via card (Admin approved)`,
+                transaction_type: 'deposit',
+                status: 'completed',
+                completed_at: new Date().toISOString(),
+                is_admin_adjusted: true,
+                admin_note: `Approved by admin ${req.user.email}`
+            });
+        }
+
+        // Send notification
+        await supabase.from('notifications').insert({
+            user_id: request.user_id,
+            title: 'Add Money Approved',
+            message: `$${request.amount} has been added to your account.`,
+            type: 'success'
+        });
+
+        res.json({ success: true, message: 'Funds added successfully' });
     } catch (error) {
-      res.status(500).json({ error: "Failed to load chat" });
+        console.error('Approve error:', error);
+        res.status(500).json({ error: 'Failed to approve request' });
     }
-  },
-);
+});
 
-// ADMIN SIDE - Reply as admin
-app.post(
-  "/api/admin/live-chat/:userId",
-  authenticate,
-  authorizeAdmin,
-  async (req, res) => {
+app.post('/api/admin/add-money-requests/:id/decline', authenticate, authorizeAdmin, async (req, res) => {
+    const { id } = req.params;
+    const { reason } = req.body;
+
     try {
-      const { userId } = req.params;
-      const { message } = req.body;
+        const { data: request } = await supabase
+            .from('add_money_requests')
+            .select('*')
+            .eq('id', id)
+            .single();
 
-      if (!message?.trim()) {
-        return res.status(400).json({ error: "Message cannot be empty" });
-      }
+        if (!request) {
+            return res.status(404).json({ error: 'Request not found' });
+        }
 
-      const { error } = await supabase.from("live_support_messages").insert({
-        user_id: userId,
-        admin_id: req.user.id,
-        message: message.trim(),
-        is_from_admin: true,
-        status: "sent",
-      });
+        await supabase
+            .from('add_money_requests')
+            .update({ 
+                status: 'declined',
+                admin_note: reason || 'Request declined by admin',
+                processed_at: new Date().toISOString(),
+                processed_by: req.user.id
+            })
+            .eq('id', id);
 
-      if (error) throw error;
-      res.json({ success: true });
+        await supabase.from('notifications').insert({
+            user_id: request.user_id,
+            title: 'Add Money Declined',
+            message: `Your request to add $${request.amount} was declined. Reason: ${reason || 'No reason provided'}`,
+            type: 'error'
+        });
+
+        res.json({ success: true, message: 'Request declined' });
     } catch (error) {
-      res.status(500).json({ error: "Failed to send reply" });
+        console.error('Decline error:', error);
+        res.status(500).json({ error: 'Failed to decline request' });
     }
-  },
-);
-
-
-
-
-
-
-
-
-
-
-
-
-
-// ADMIN - List of users who ever sent a message
-app.get("/api/admin/live-chat/users", authenticate, authorizeAdmin, async (req, res) => {
-  try {
-    // Step 1: Get distinct user_ids that have at least one message
-    const { data: userIdsData, error: idsError } = await supabase
-      .from("live_support_messages")
-      .select("user_id")
-      .order("created_at", { ascending: false });
-
-    if (idsError) {
-      console.error("Error fetching user_ids:", idsError);
-      throw idsError;
-    }
-
-    if (!userIdsData || userIdsData.length === 0) {
-      return res.json({ users: [] });
-    }
-
-    // Step 2: Get unique user_ids
-    const uniqueUserIds = [...new Set(userIdsData.map(row => row.user_id))];
-
-    // Step 3: Fetch user details for those IDs
-    const { data: usersData, error: usersError } = await supabase
-      .from("users")
-      .select("id, first_name, last_name, email")
-      .in("id", uniqueUserIds);
-
-    if (usersError) {
-      console.error("Error fetching users:", usersError);
-      throw usersError;
-    }
-
-    // Step 4: Format response
-    const formattedUsers = (usersData || []).map(user => ({
-      user_id: user.id,
-      name: `${user.first_name || ''} ${user.last_name || ''}`.trim() || "Unknown",
-      email: user.email || "no-email@found.com"
-    }));
-
-    res.json({ users: formattedUsers });
-
-  } catch (err) {
-    console.error("ADMIN /live-chat/users CRASH:", err.message, err.details || err);
-    res.status(500).json({ 
-      error: "Failed to load conversations",
-      debug: err.message   // ← helpful in dev, remove in prod if you want
-    });
-  }
 });

