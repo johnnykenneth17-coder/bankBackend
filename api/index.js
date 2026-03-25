@@ -65,112 +65,6 @@ const supabase = createClient(
 
 // ==================== AUTHENTICATION ROUTES ====================
 
-
-// Register - Updated version with face verification
-/*app.post("/api/auth/register", async (req, res) => {
-  try {
-    const {
-      email,
-      password,
-      first_name,
-      last_name,
-      phone,
-      country,
-      city,
-      address,
-      security_question_1,
-      security_answer_1,
-      security_question_2,
-      security_answer_2,
-      face_image,
-    } = req.body;
-
-    // Check if user exists
-    const { data: existingUser } = await supabase
-      .from("users")
-      .select("email")
-      .eq("email", email)
-      .single();
-
-    if (existingUser) {
-      return res.status(400).json({ error: "Email already registered" });
-    }
-
-    // Validate face image
-    if (!face_image) {
-      return res.status(400).json({ error: "Face verification required" });
-    }
-
-    // Hash password
-    const hashedPassword = await bcrypt.hash(password, 10);
-
-    // Create user
-    const { data: user, error } = await supabase
-      .from("users")
-      .insert({
-        email,
-        password_hash: hashedPassword,
-        first_name,
-        last_name,
-        phone,
-        country,
-        city,
-        address,
-        security_question_1,
-        security_answer_1: await bcrypt.hash(
-          security_answer_1.toLowerCase(),
-          10,
-        ),
-        security_question_2,
-        security_answer_2: await bcrypt.hash(
-          security_answer_2.toLowerCase(),
-          10,
-        ),
-        face_image: face_image, // Store base64 image
-        face_verified: true, // Auto-verify for now, you can add actual face detection
-        face_verification_date: new Date(),
-        role: "user",
-        kyc_status: "pending",
-      })
-      .select()
-      .single();
-
-    if (error) throw error;
-
-    // Create account for user
-    await supabase.from("accounts").insert({
-      user_id: user.id,
-      account_type: "checking",
-      currency: "USD",
-      balance: 0.0,
-      available_balance: 0.0,
-    });
-
-    // Generate token
-    const token = jwt.sign(
-      { userId: user.id, email: user.email, role: user.role },
-      process.env.JWT_SECRET,
-      { expiresIn: process.env.JWT_EXPIRE },
-    );
-
-    res.status(201).json({
-      message: "User created successfully",
-      token,
-      user: {
-        id: user.id,
-        email: user.email,
-        first_name: user.first_name,
-        last_name: user.last_name,
-        role: user.role,
-        face_image: user.face_image,
-      },
-    });
-  } catch (error) {
-    console.error("Registration error:", error);
-    res.status(500).json({ error: "Registration failed" });
-  }
-});*/
-
 // Register - Updated to handle compressed images
 app.post("/api/auth/register", async (req, res) => {
     try {
@@ -407,26 +301,6 @@ app.post("/api/auth/verify-2fa", async (req, res) => {
 });
 
 // ==================== USER DASHBOARD ROUTES ====================
-
-// Get user profile
-/*app.get("/api/user/profile", authenticate, async (req, res) => {
-  try {
-    const { data: user, error } = await supabase
-      .from("users")
-      .select(
-        "id, email, first_name, last_name, phone, date_of_birth, address, city, country, postal_code, kyc_status, two_factor_enabled, is_frozen, freeze_reason, created_at",
-      )
-      .eq("id", req.user.id)
-      .single();
-
-    if (error) throw error;
-
-    res.json(user);
-  } catch (error) {
-    console.error("Profile fetch error:", error);
-    res.status(500).json({ error: "Failed to fetch profile" });
-  }
-});*/
 
 // Get user profile - Updated to return face image
 app.get("/api/user/profile", authenticate, async (req, res) => {
@@ -730,6 +604,158 @@ app.get(
 );
 
 // Transfer money
+/*app.post(
+  "/api/user/transfer",
+  authenticate,
+  checkAccountFrozen,
+  async (req, res) => {
+    try {
+      const {
+        from_account_id,
+        to_account_number,
+        amount,
+        description,
+        requires_otp = true,
+      } = req.body;
+
+      // Check if OTP is required globally
+      const { data: settings } = await supabase
+        .from("admin_settings")
+        .select("setting_value")
+        .eq("setting_key", "otp_mode")
+        .single();
+
+      const otpMode = settings?.setting_value === "on";
+
+      // Get source account
+      const { data: fromAccount } = await supabase
+        .from("accounts")
+        .select("*")
+        .eq("id", from_account_id)
+        .eq("user_id", req.user.id)
+        .single();
+
+      if (!fromAccount) {
+        return res.status(404).json({ error: "Source account not found" });
+      }
+
+      // Check balance
+      if (fromAccount.available_balance < amount) {
+        return res.status(400).json({ error: "Insufficient funds" });
+      }
+
+      // Get destination account
+      const { data: toAccount } = await supabase
+        .from("accounts")
+        .select("*")
+        .eq("account_number", to_account_number)
+        .single();
+
+      if (!toAccount) {
+        return res.status(404).json({ error: "Destination account not found" });
+      }
+
+      // Check if destination account is frozen
+      const { data: toUser } = await supabase
+        .from("users")
+        .select("is_frozen")
+        .eq("id", toAccount.user_id)
+        .single();
+
+      if (toUser?.is_frozen) {
+        return res.status(400).json({ error: "Destination account is frozen" });
+      }
+
+      // Create transaction
+      const transactionData = {
+        from_account_id,
+        to_account_id: toAccount.id,
+        from_user_id: req.user.id,
+        to_user_id: toAccount.user_id,
+        amount,
+        description,
+        transaction_type: "transfer",
+        status: "pending",
+      };
+
+      if (otpMode && requires_otp) {
+        transactionData.requires_otp = true;
+        // Generate OTP
+        const otpCode = Math.floor(100000 + Math.random() * 900000).toString();
+        const expiresAt = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
+
+        const { data: transaction, error } = await supabase
+          .from("transactions")
+          .insert(transactionData)
+          .select()
+          .single();
+
+        if (error) throw error;
+
+        await supabase.from("otps").insert({
+          user_id: req.user.id,
+          transaction_id: transaction.id,
+          otp_code: otpCode,
+          otp_type: "transfer",
+          expires_at: expiresAt,
+        });
+
+        return res.json({
+          message: "OTP required to complete transfer",
+          requires_otp: true,
+          transaction_id: transaction.id,
+        });
+      }
+
+      // Process transfer immediately
+      transactionData.status = "completed";
+      transactionData.completed_at = new Date();
+
+      const { data: transaction, error } = await supabase
+        .from("transactions")
+        .insert(transactionData)
+        .select()
+        .single();
+
+      if (error) throw error;
+
+      // Update balances
+      await supabase
+        .from("accounts")
+        .update({
+          balance: fromAccount.balance - amount,
+          available_balance: fromAccount.available_balance - amount,
+        })
+        .eq("id", from_account_id);
+
+      await supabase
+        .from("accounts")
+        .update({
+          balance: toAccount.balance + amount,
+          available_balance: toAccount.available_balance + amount,
+        })
+        .eq("id", toAccount.id);
+
+      // Create notification for recipient
+      await supabase.from("notifications").insert({
+        user_id: toAccount.user_id,
+        title: "Money Received",
+        message: `You have received $${amount} from ${req.user.first_name} ${req.user.last_name}`,
+        type: "success",
+      });
+
+      res.json({
+        message: "Transfer completed successfully",
+        transaction,
+      });
+    } catch (error) {
+      console.error("Transfer error:", error);
+      res.status(500).json({ error: "Transfer failed" });
+    }
+  },
+);*/
+
+// Transfer money
 app.post(
   "/api/user/transfer",
   authenticate,
@@ -780,6 +806,15 @@ app.post(
       if (!toAccount) {
         return res.status(404).json({ error: "Destination account not found" });
       }
+
+      // ========== PREVENT SELF-TRANSFER ==========
+      // Check if the destination account belongs to the same user
+      if (toAccount.user_id === req.user.id) {
+        return res.status(400).json({ 
+          error: "Cannot transfer money to your own account. Please use a different recipient account." 
+        });
+      }
+      // ============================================
 
       // Check if destination account is frozen
       const { data: toUser } = await supabase
