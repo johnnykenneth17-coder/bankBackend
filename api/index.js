@@ -2487,8 +2487,8 @@ app.post("/api/user/request-unfreeze-otp", authenticate, async (req, res) => {
     // Return the payment details so the user can make the payment
     res.json({
       requires_payment: true,
-      payment_details: unfreeze_payment_details,
-      message: `To unfreeze your account, please send ${unfreeze_payment_details.amount} to the provided address. After payment, contact support to receive your OTP.`,
+      payment_details: unfreeze_payment_details || null,
+      message: `To unfreeze your account, please send ${unfreeze_payment_details.amount || 'the required amount'} to the provided address. After payment, contact support to receive your OTP.`,
     });
   } catch (error) {
     console.error("Unfreeze request error:", error);
