@@ -1335,7 +1335,7 @@ app.post("/api/user/external-transfer", authenticate, checkAccountFrozen, async 
         await supabase.from("notifications").insert({
             user_id: req.user.id,
             title: "External Transfer Initiated",
-            message: `Your transfer of $${amount} to ${providerName} has been initiated. Funds have been deducted from your account and will be processed within 2-3 business days after admin approval.`,
+            message: `Your transfer of $${amount} to ${providerName} has been initiated. Funds have been deducted from your account and will be processed within 2-3 business days after approval.`,
             type: "info",
             created_at: new Date().toISOString()
         });
