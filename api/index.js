@@ -464,7 +464,7 @@ app.post("/api/user/disable-2fa", authenticate, async (req, res) => {
 });
 
 // Get accounts and balances
-app.get(
+/*app.get(
   "/api/user/accounts",
   authenticate,
   checkAccountFrozen,
@@ -483,6 +483,27 @@ app.get(
       res.status(500).json({ error: "Failed to fetch accounts" });
     }
   },
+);*/
+
+// Get accounts and balances (allow frozen users to see balance)
+app.get(
+  "/api/user/accounts",
+  authenticate,
+  async (req, res) => {
+    try {
+      const { data: accounts, error } = await supabase
+        .from("accounts")
+        .select("*")
+        .eq("user_id", req.user.id);
+
+      if (error) throw error;
+
+      res.json(accounts);
+    } catch (error) {
+      console.error("Accounts fetch error:", error);
+      res.status(500).json({ error: "Failed to fetch accounts" });
+    }
+  }
 );
 
 // Get transactions
