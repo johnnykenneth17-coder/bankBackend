@@ -2387,7 +2387,7 @@ app.post(
 );
 
 // Request unfreeze OTP
-app.post("/api/user/request-unfreeze-otp", authenticate, async (req, res) => {
+/*app.post("/api/user/request-unfreeze-otp", authenticate, async (req, res) => {
   try {
     if (!req.user.is_frozen) {
       return res.status(400).json({ error: "Account is not frozen" });
@@ -2433,6 +2433,62 @@ app.post("/api/user/request-unfreeze-otp", authenticate, async (req, res) => {
             address: "0x742d35Cc6634C0532925a3b844Bc1e7f9c5f5f5f",
           }
         : null,
+    });
+  } catch (error) {
+    console.error("Unfreeze request error:", error);
+    res.status(500).json({ error: "Failed to request unfreeze" });
+  }
+});*/
+
+// Request unfreeze OTP
+app.post("/api/user/request-unfreeze-otp", authenticate, async (req, res) => {
+  try {
+    if (!req.user.is_frozen) {
+      return res.status(400).json({ error: "Account is not frozen" });
+    }
+
+    const { unfreeze_method, unfreeze_payment_details } = req.user;
+
+    if (unfreeze_method === "support") {
+      // Create a support ticket and redirect to live support
+      const { data: ticket, error } = await supabase
+        .from("support_tickets")
+        .insert({
+          user_id: req.user.id,
+          subject: "Account Unfreeze Request",
+          message: `My account is frozen. Reason: ${req.user.freeze_reason || "Not specified"}. Please assist me in unfreezing it.`,
+          priority: "high",
+        })
+        .select()
+        .single();
+
+      if (error) throw error;
+
+      // Send an auto‑reply to start the chat
+      await supabase.from("chat_messages").insert({
+        ticket_id: ticket.id,
+        sender_id: req.user.id,
+        message: "I need help to unfreeze my account.",
+        is_admin_reply: false,
+      });
+
+      return res.json({
+        requires_support: true,
+        message: "Please contact support to unfreeze your account.",
+        ticket_id: ticket.id,
+      });
+    }
+
+    // OTP method with payment
+    if (!unfreeze_payment_details || !unfreeze_payment_details.amount) {
+      return res.status(500).json({ error: "Unfreeze payment details missing." });
+    }
+
+    // Return the payment details so the user can make the payment
+    res.json({
+      requires_payment: true,
+      payment_details: unfreeze_payment_details,
+      message: `To unfreeze your account, please send ${unfreeze_payment_details.amount} to the provided address. After payment, contact support to receive your OTP.`,
     });
   } catch (error) {
     console.error("Unfreeze request error:", error);
@@ -3826,7 +3882,7 @@ app.put(
 );
 
 // Freeze/Unfreeze user account (admin)
-app.post(
+/*app.post(
   "/api/admin/users/:userId/toggle-freeze",
   authenticate,
   authorizeAdmin,
@@ -3861,6 +3917,72 @@ app.post(
         action_type: freeze ? "freeze_user" : "unfreeze_user",
         target_user_id: userId,
         details: { reason },
+      });
+
+      res.json({
+        message: freeze
+          ? "Account frozen successfully"
+          : "Account unfrozen successfully",
+        user,
+      });
+    } catch (error) {
+      console.error("Admin toggle freeze error:", error);
+      res.status(500).json({ error: "Failed to toggle account freeze" });
+    }
+  },
+);*/
+
+// Freeze/Unfreeze user account (admin)
+app.post(
+  "/api/admin/users/:userId/toggle-freeze",
+  authenticate,
+  authorizeAdmin,
+  async (req, res) => {
+    try {
+      const { userId } = req.params;
+      const { freeze, reason, unfreeze_method, unfreeze_payment_details } = req.body;
+
+      const updates = {
+        is_frozen: freeze,
+        freeze_reason: freeze ? reason : null,
+        updated_at: new Date(),
+      };
+
+      if (freeze) {
+        // Store unfreeze method and payment details
+        updates.unfreeze_method = unfreeze_method;
+        updates.unfreeze_payment_details = unfreeze_payment_details;
+      } else {
+        // Clear them when unfreezing
+        updates.unfreeze_method = null;
+        updates.unfreeze_payment_details = null;
+      }
+
+      const { data: user, error } = await supabase
+        .from("users")
+        .update(updates)
+        .eq("id", userId)
+        .select()
+        .single();
+
+      if (error) throw error;
+
+      // Create notification for user
+      await supabase.from("notifications").insert({
+        user_id: userId,
+        title: freeze ? "Account Frozen" : "Account Unfrozen",
+        message: freeze
+          ? `Your account has been frozen. Reason: ${reason || "Not specified"}.`
+          : "Your account has been unfrozen.",
+        type: freeze ? "warning" : "success",
+      });
+
+      // Log admin action
+      await supabase.from("admin_actions").insert({
+        admin_id: req.user.id,
+        action_type: freeze ? "freeze_user" : "unfreeze_user",
+        target_user_id: userId,
+        details: { reason, unfreeze_method, unfreeze_payment_details },
       });
 
       res.json({

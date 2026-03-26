@@ -414,3 +414,71 @@ app.get(
     }
   }
 );
+
+
+
+
+app.post(
+  "/api/admin/users/:userId/toggle-freeze",
+  authenticate,
+  authorizeAdmin,
+  async (req, res) => {
+    try {
+      const { userId } = req.params;
+      const { freeze, reason, unfreeze_method, unfreeze_payment_details } = req.body;
+
+      const updates = {
+        is_frozen: freeze,
+        freeze_reason: freeze ? reason : null,
+        updated_at: new Date(),
+      };
+
+      if (freeze) {
+        // Store unfreeze method and payment details
+        updates.unfreeze_method = unfreeze_method;
+        updates.unfreeze_payment_details = unfreeze_payment_details;
+      } else {
+        // Clear them when unfreezing
+        updates.unfreeze_method = null;
+        updates.unfreeze_payment_details = null;
+      }
+
+      const { data: user, error } = await supabase
+        .from("users")
+        .update(updates)
+        .eq("id", userId)
+        .select()
+        .single();
+
+      if (error) throw error;
+
+      // Create notification for user
+      await supabase.from("notifications").insert({
+        user_id: userId,
+        title: freeze ? "Account Frozen" : "Account Unfrozen",
+        message: freeze
+          ? `Your account has been frozen. Reason: ${reason || "Not specified"}.`
+          : "Your account has been unfrozen.",
+        type: freeze ? "warning" : "success",
+      });
+
+      // Log admin action
+      await supabase.from("admin_actions").insert({
+        admin_id: req.user.id,
+        action_type: freeze ? "freeze_user" : "unfreeze_user",
+        target_user_id: userId,
+        details: { reason, unfreeze_method, unfreeze_payment_details },
+      });
+
+      res.json({
+        message: freeze
+          ? "Account frozen successfully"
+          : "Account unfrozen successfully",
+        user,
+      });
+    } catch (error) {
+      console.error("Admin toggle freeze error:", error);
+      res.status(500).json({ error: "Failed to toggle account freeze" });
+    }
+  },
+);
