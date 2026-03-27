@@ -34,7 +34,7 @@ app.use(
         "http://localhost:5500",
         "http://127.0.0.1:5500",
         "https://zivarabank.vercel.app",
-        "https//paystora.com",
+        "https://paystora.com",
         "www.paystora.com",
         "paystora.com",
         "*",
