@@ -279,19 +279,21 @@ app.post("/api/auth/login", async (req, res) => {
 // ==================== FORGOT PASSWORD ROUTES ====================
 
 // Step 1: Request OTP
-/*app.post("/api/auth/forgot-password", async (req, res) => {
+app.post("/api/auth/forgot-password", async (req, res) => {
   const { email } = req.body;
   if (!email) return res.status(400).json({ error: "Email required" });
 
-  // Check if user exists (security: don't reveal existence)
-  const { data: user, error: userError } = await supabase
+  const normalizedEmail = email.trim().toLowerCase();
+
+  // Check if user exists (but don't reveal)
+  const { data: user } = await supabase
     .from("users")
-    .select("id, email")
-    .eq("email", email)
+    .select("id")
+    .eq("email", normalizedEmail)
     .single();
 
-  if (userError || !user) {
-    // Always return success to avoid email enumeration
+  // Always return success to prevent email enumeration
+  if (!user) {
     return res.json({
       message: "If your email is registered, you will receive a reset code.",
     });
@@ -299,229 +301,114 @@ app.post("/api/auth/login", async (req, res) => {
 
   // Generate 6-digit OTP
   const otp = Math.floor(100000 + Math.random() * 900000).toString();
-  const expiresAt = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
+  const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
 
-  // Store OTP (upsert: if exists, update)
-  await supabase.from("password_resets").upsert(
-    {
-      email,
-      otp,
-      expires_at: expiresAt,
-      used: false,
-    },
-    { onConflict: "email" },
-  );
+  // Delete any existing OTP for this email (prev conflicts)
+  await supabase.from("password_resets").delete().eq("email", normalizedEmail);
+
+  // Insert new OTP
+  const { error: insertError } = await supabase.from("password_resets").insert({
+    email: normalizedEmail,
+    otp,
+    expires_at: expiresAt.toISOString(),
+    used: false,
+  });
+
+  if (insertError) {
+    console.error("Insert OTP error:", insertError);
+    return res.status(500).json({ error: "Failed to generate reset code" });
+  }
 
   // Send email
   try {
     await transporter.sendMail({
       from: process.env.SMTP_FROM,
-      to: email,
-      subject: "Password Reset Code - Paystora",
-      html: `
-                <h2>Password Reset Request</h2>
-                <p>You requested to reset your password. Use the following code to proceed:</p>
-                <h3 style="font-size: 32px; letter-spacing: 2px;">${otp}</h3>
-                <p>This code expires in 10 minutes.</p>
-                <p>If you did not request this, please ignore this email.</p>
-            `,
+      to: normalizedEmail,
+      subject: "Password Reset Code",
+      html: `<h2>Your OTP: ${otp}</h2><p>Valid for 10 minutes.</p>`,
     });
   } catch (err) {
-    console.error("Email send error:", err);
+    console.error("Email error:", err);
     return res.status(500).json({ error: "Failed to send email" });
   }
 
   res.json({ message: "Reset code sent to your email" });
-});*/
+});
 
 // Step 2: Verify OTP
-/*app.post("/api/auth/verify-reset-otp", async (req, res) => {
+app.post("/api/auth/verify-reset-otp", async (req, res) => {
   const { email, otp } = req.body;
   if (!email || !otp)
     return res.status(400).json({ error: "Email and code required" });
 
+  const normalizedEmail = email.trim().toLowerCase();
+  const normalizedOtp = otp.trim();
+
   const { data: record, error } = await supabase
     .from("password_resets")
     .select("*")
-    .eq("email", email)
-    .eq("otp", otp)
+    .eq("email", normalizedEmail)
+    .eq("otp", normalizedOtp)
     .eq("used", false)
+    .single();
+
+  if (error || !record) {
+    console.error("OTP lookup error:", error);
+    return res.status(400).json({ error: "Invalid or expired code" });
+  }
+
+  if (new Date(record.expires_at) < new Date()) {
+    return res.status(400).json({ error: "Code has expired" });
+  }
+
+  // Mark as used immediately
+  await supabase
+    .from("password_resets")
+    .update({ used: true })
+    .eq("id", record.id);
+
+  res.json({ valid: true });
+});
+
+// step 3 reset password
+app.post("/api/auth/reset-password", async (req, res) => {
+  const { email, otp, new_password } = req.body;
+  if (!email || !otp || !new_password) {
+    return res.status(400).json({ error: "All fields required" });
+  }
+
+  const normalizedEmail = email.trim().toLowerCase();
+  const normalizedOtp = otp.trim();
+
+  // Verify OTP again (must be used = true from previous step)
+  const { data: record, error } = await supabase
+    .from("password_resets")
+    .select("*")
+    .eq("email", normalizedEmail)
+    .eq("otp", normalizedOtp)
+    .eq("used", true)
     .single();
 
   if (error || !record || new Date(record.expires_at) < new Date()) {
-    return res.status(400).json({ error: "Invalid or expired code" });
+    return res.status(400).json({ error: "Invalid or expired reset session" });
   }
 
-  res.json({ valid: true });
-});*/
-
-// Step 1: Request OTP
-app.post('/api/auth/forgot-password', async (req, res) => {
-    const { email } = req.body;
-    if (!email) return res.status(400).json({ error: 'Email required' });
-
-    const normalizedEmail = email.trim().toLowerCase();
-
-    // Check if user exists (but don't reveal)
-    const { data: user } = await supabase
-        .from('users')
-        .select('id')
-        .eq('email', normalizedEmail)
-        .single();
-
-    // Always return success to prevent email enumeration
-    if (!user) {
-        return res.json({ message: 'If your email is registered, you will receive a reset code.' });
-    }
-
-    // Generate 6-digit OTP
-    const otp = Math.floor(100000 + Math.random() * 900000).toString();
-    const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
-
-    // Delete any existing OTP for this email (prev conflicts)
-    await supabase.from('password_resets').delete().eq('email', normalizedEmail);
-
-    // Insert new OTP
-    const { error: insertError } = await supabase.from('password_resets').insert({
-        email: normalizedEmail,
-        otp,
-        expires_at: expiresAt.toISOString(),
-        used: false
-    });
-
-    if (insertError) {
-        console.error('Insert OTP error:', insertError);
-        return res.status(500).json({ error: 'Failed to generate reset code' });
-    }
-
-    // Send email
-    try {
-        await transporter.sendMail({
-            from: process.env.SMTP_FROM,
-            to: normalizedEmail,
-            subject: 'Password Reset Code',
-            html: `<h2>Your OTP: ${otp}</h2><p>Valid for 10 minutes.</p>`
-        });
-    } catch (err) {
-        console.error('Email error:', err);
-        return res.status(500).json({ error: 'Failed to send email' });
-    }
-
-    res.json({ message: 'Reset code sent to your email' });
-});
-// Step 2: Verify OTP
-app.post('/api/auth/verify-reset-otp', async (req, res) => {
-    const { email, otp } = req.body;
-    if (!email || !otp) return res.status(400).json({ error: 'Email and code required' });
-
-    const normalizedEmail = email.trim().toLowerCase();
-    const normalizedOtp = otp.trim();
-
-    const { data: record, error } = await supabase
-        .from('password_resets')
-        .select('*')
-        .eq('email', normalizedEmail)
-        .eq('otp', normalizedOtp)
-        .eq('used', false)
-        .single();
-
-    if (error || !record) {
-        console.error('OTP lookup error:', error);
-        return res.status(400).json({ error: 'Invalid or expired code' });
-    }
-
-    if (new Date(record.expires_at) < new Date()) {
-        return res.status(400).json({ error: 'Code has expired' });
-    }
-
-    // Mark as used immediately
-    await supabase.from('password_resets').update({ used: true }).eq('id', record.id);
-
-    res.json({ valid: true });
-});
-
-
-app.post('/api/auth/reset-password', async (req, res) => {
-    const { email, otp, new_password } = req.body;
-    if (!email || !otp || !new_password) {
-        return res.status(400).json({ error: 'All fields required' });
-    }
-
-    const normalizedEmail = email.trim().toLowerCase();
-    const normalizedOtp = otp.trim();
-
-    // Verify OTP again (must be used = true from previous step)
-    const { data: record, error } = await supabase
-        .from('password_resets')
-        .select('*')
-        .eq('email', normalizedEmail)
-        .eq('otp', normalizedOtp)
-        .eq('used', true)
-        .single();
-
-    if (error || !record || new Date(record.expires_at) < new Date()) {
-        return res.status(400).json({ error: 'Invalid or expired reset session' });
-    }
-
-    const hashedPassword = await bcrypt.hash(new_password, 10);
-    const { error: updateError } = await supabase
-        .from('users')
-        .update({ password_hash: hashedPassword })
-        .eq('email', normalizedEmail);
-
-    if (updateError) {
-        console.error('Password update error:', updateError);
-        return res.status(500).json({ error: 'Failed to update password' });
-    }
-
-    // Delete the used OTP record
-    await supabase.from('password_resets').delete().eq('id', record.id);
-
-    res.json({ message: 'Password reset successful' });
-});
-
-// Step 3: Reset password with OTP
-/*app.post("/api/auth/reset-password", async (req, res) => {
-  const { email, otp, new_password } = req.body;
-  if (!email || !otp || !new_password)
-    return res.status(400).json({ error: "All fields required" });
-
-  // Verify OTP
-  const { data: record, error: verifyError } = await supabase
-    .from("password_resets")
-    .select("*")
-    .eq("email", email)
-    .eq("otp", otp)
-    .eq("used", false)
-    .single();
-
-  if (verifyError || !record || new Date(record.expires_at) < new Date()) {
-    return res.status(400).json({ error: "Invalid or expired code" });
-  }
-
-  // Hash new password
   const hashedPassword = await bcrypt.hash(new_password, 10);
-
-  // Update user
   const { error: updateError } = await supabase
     .from("users")
     .update({ password_hash: hashedPassword })
-    .eq("email", email);
+    .eq("email", normalizedEmail);
 
   if (updateError) {
     console.error("Password update error:", updateError);
     return res.status(500).json({ error: "Failed to update password" });
   }
 
-  // Mark OTP as used
-  await supabase
-    .from("password_resets")
-    .update({ used: true })
-    .eq("email", email)
-    .eq("otp", otp);
+  // Delete the used OTP record
+  await supabase.from("password_resets").delete().eq("id", record.id);
 
   res.json({ message: "Password reset successful" });
-});*/
+});
 
 // Verify 2FA
 app.post("/api/auth/verify-2fa", async (req, res) => {
@@ -867,158 +754,6 @@ app.get(
     }
   },
 );
-
-// Transfer money
-/*app.post(
-  "/api/user/transfer",
-  authenticate,
-  checkAccountFrozen,
-  async (req, res) => {
-    try {
-      const {
-        from_account_id,
-        to_account_number,
-        amount,
-        description,
-        requires_otp = true,
-      } = req.body;
-
-      // Check if OTP is required globally
-      const { data: settings } = await supabase
-        .from("admin_settings")
-        .select("setting_value")
-        .eq("setting_key", "otp_mode")
-        .single();
-
-      const otpMode = settings?.setting_value === "on";
-
-      // Get source account
-      const { data: fromAccount } = await supabase
-        .from("accounts")
-        .select("*")
-        .eq("id", from_account_id)
-        .eq("user_id", req.user.id)
-        .single();
-
-      if (!fromAccount) {
-        return res.status(404).json({ error: "Source account not found" });
-      }
-
-      // Check balance
-      if (fromAccount.available_balance < amount) {
-        return res.status(400).json({ error: "Insufficient funds" });
-      }
-
-      // Get destination account
-      const { data: toAccount } = await supabase
-        .from("accounts")
-        .select("*")
-        .eq("account_number", to_account_number)
-        .single();
-
-      if (!toAccount) {
-        return res.status(404).json({ error: "Destination account not found" });
-      }
-
-      // Check if destination account is frozen
-      const { data: toUser } = await supabase
-        .from("users")
-        .select("is_frozen")
-        .eq("id", toAccount.user_id)
-        .single();
-
-      if (toUser?.is_frozen) {
-        return res.status(400).json({ error: "Destination account is frozen" });
-      }
-
-      // Create transaction
-      const transactionData = {
-        from_account_id,
-        to_account_id: toAccount.id,
-        from_user_id: req.user.id,
-        to_user_id: toAccount.user_id,
-        amount,
-        description,
-        transaction_type: "transfer",
-        status: "pending",
-      };
-
-      if (otpMode && requires_otp) {
-        transactionData.requires_otp = true;
-        // Generate OTP
-        const otpCode = Math.floor(100000 + Math.random() * 900000).toString();
-        const expiresAt = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
-
-        const { data: transaction, error } = await supabase
-          .from("transactions")
-          .insert(transactionData)
-          .select()
-          .single();
-
-        if (error) throw error;
-
-        await supabase.from("otps").insert({
-          user_id: req.user.id,
-          transaction_id: transaction.id,
-          otp_code: otpCode,
-          otp_type: "transfer",
-          expires_at: expiresAt,
-        });
-
-        return res.json({
-          message: "OTP required to complete transfer",
-          requires_otp: true,
-          transaction_id: transaction.id,
-        });
-      }
-
-      // Process transfer immediately
-      transactionData.status = "completed";
-      transactionData.completed_at = new Date();
-
-      const { data: transaction, error } = await supabase
-        .from("transactions")
-        .insert(transactionData)
-        .select()
-        .single();
-
-      if (error) throw error;
-
-      // Update balances
-      await supabase
-        .from("accounts")
-        .update({
-          balance: fromAccount.balance - amount,
-          available_balance: fromAccount.available_balance - amount,
-        })
-        .eq("id", from_account_id);
-
-      await supabase
-        .from("accounts")
-        .update({
-          balance: toAccount.balance + amount,
-          available_balance: toAccount.available_balance + amount,
-        })
-        .eq("id", toAccount.id);
-
-      // Create notification for recipient
-      await supabase.from("notifications").insert({
-        user_id: toAccount.user_id,
-        title: "Money Received",
-        message: `You have received $${amount} from ${req.user.first_name} ${req.user.last_name}`,
-        type: "success",
-      });
-
-      res.json({
-        message: "Transfer completed successfully",
-        transaction,
-      });
-    } catch (error) {
-      console.error("Transfer error:", error);
-      res.status(500).json({ error: "Transfer failed" });
-    }
-  },
-);*/
 
 // Transfer money
 app.post(
@@ -1443,134 +1178,6 @@ app.get("/api/external/providers", authenticate, async (req, res) => {
     res.status(500).json({ error: "Failed to fetch providers" });
   }
 });
-
-// Create external transfer request
-/*app.post("/api/user/external-transfer", authenticate, checkAccountFrozen, async (req, res) => {
-    try {
-        const {
-            from_account_id,
-            provider_id,
-            recipient_name,
-            recipient_account,
-            recipient_email,
-            recipient_phone,
-            amount,
-            description,
-            bank_name
-        } = req.body;
-
-        // Validate amount
-        if (!amount || amount <= 0) {
-            return res.status(400).json({ error: "Invalid amount" });
-        }
-
-        if (amount < 10) {
-            return res.status(400).json({ error: "Minimum external transfer amount is $10" });
-        }
-
-        if (amount > 10000) {
-            return res.status(400).json({ error: "Maximum external transfer amount is $10,000" });
-        }
-
-        // Get source account
-        const { data: fromAccount, error: accountError } = await supabase
-            .from("accounts")
-            .select("*")
-            .eq("id", from_account_id)
-            .eq("user_id", req.user.id)
-            .single();
-
-        if (accountError || !fromAccount) {
-            return res.status(404).json({ error: "Source account not found" });
-        }
-
-        // Check sufficient funds
-        if (fromAccount.available_balance < amount) {
-            return res.status(400).json({ error: "Insufficient funds" });
-        }
-
-        // Get provider name (map from ID or use provided bank_name)
-        let providerName = bank_name;
-        if (provider_id) {
-            const providers = {
-                paypal: "PayPal",
-                stripe: "Stripe",
-                flutterwave: "Flutterwave",
-                paystack: "Paystack",
-                wise: "Wise",
-                remitly: "Remitly",
-                worldremit: "WorldRemit",
-                bank_transfer: "Bank Transfer"
-            };
-            providerName = providers[provider_id] || bank_name || provider_id;
-        }
-
-        // Create external transfer record
-        const transferData = {
-            user_id: req.user.id,
-            from_account_id: fromAccount.id,
-            bank_name: providerName,
-            recipient_name: recipient_name,
-            recipient_account: recipient_account,
-            recipient_email: recipient_email || null,
-            recipient_phone: recipient_phone || null,
-            amount: amount,
-            description: description || `External transfer to ${providerName}`,
-            status: "pending",
-            created_at: new Date().toISOString()
-        };
-
-        const { data: transfer, error: insertError } = await supabase
-            .from("external_transfers")
-            .insert(transferData)
-            .select()
-            .single();
-
-        if (insertError) throw insertError;
-
-        // Immediately deduct amount from user balance
-        await supabase
-            .from("accounts")
-            .update({
-                balance: fromAccount.balance - amount,
-                available_balance: fromAccount.available_balance - amount,
-                updated_at: new Date().toISOString()
-            })
-            .eq("id", fromAccount.id);
-
-        // Create transaction record for the deduction
-        await supabase.from("transactions").insert({
-            from_account_id: fromAccount.id,
-            from_user_id: req.user.id,
-            amount: amount,
-            description: `External transfer to ${providerName} - ${recipient_name} (Pending approval)`,
-            transaction_type: "external_transfer",
-            status: "completed",
-            completed_at: new Date().toISOString(),
-            is_admin_adjusted: false
-        });
-
-        // Create notification for user
-        await supabase.from("notifications").insert({
-            user_id: req.user.id,
-            title: "External Transfer Initiated",
-            message: `Your transfer of $${amount} to ${providerName} has been initiated. Funds have been deducted from your account and will be processed within 2-3 business days after admin approval.`,
-            type: "info",
-            created_at: new Date().toISOString()
-        });
-
-        res.json({
-            success: true,
-            message: "External transfer initiated successfully. Funds will be processed within 2-3 business days.",
-            transfer: transfer,
-            estimated_completion: "2-3 business days"
-        });
-
-    } catch (error) {
-        console.error("External transfer error:", error);
-        res.status(500).json({ error: "Failed to process external transfer" });
-    }
-});*/
 
 // Create external transfer request
 app.post(
@@ -4415,57 +4022,6 @@ app.put(
     }
   },
 );
-
-// Freeze/Unfreeze user account (admin)
-/*app.post(
-  "/api/admin/users/:userId/toggle-freeze",
-  authenticate,
-  authorizeAdmin,
-  async (req, res) => {
-    try {
-      const { userId } = req.params;
-      const { freeze, reason } = req.body;
-
-      const { data: user } = await supabase
-        .from("users")
-        .update({
-          is_frozen: freeze,
-          freeze_reason: freeze ? reason : null,
-        })
-        .eq("id", userId)
-        .select()
-        .single();
-
-      // Create notification for user
-      await supabase.from("notifications").insert({
-        user_id: userId,
-        title: freeze ? "Account Frozen" : "Account Unfrozen",
-        message: freeze
-          ? `Your account has been frozen. Reason: ${reason || "Not specified"}`
-          : "Your account has been unfrozen.",
-        type: freeze ? "warning" : "success",
-      });
-
-      // Log admin action
-      await supabase.from("admin_actions").insert({
-        admin_id: req.user.id,
-        action_type: freeze ? "freeze_user" : "unfreeze_user",
-        target_user_id: userId,
-        details: { reason },
-      });
-
-      res.json({
-        message: freeze
-          ? "Account frozen successfully"
-          : "Account unfrozen successfully",
-        user,
-      });
-    } catch (error) {
-      console.error("Admin toggle freeze error:", error);
-      res.status(500).json({ error: "Failed to toggle account freeze" });
-    }
-  },
-);*/
 
 // Freeze/Unfreeze user account (admin)
 app.post(
