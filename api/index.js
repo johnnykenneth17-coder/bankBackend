@@ -10,6 +10,7 @@ const QRCode = require("qrcode");
 const { v4: uuidv4 } = require("uuid");
 require("dotenv").config();
 const router = express.Router();
+const nodemailer = require("nodemailer");
 
 // Add this if missing (adjust path if your folder structure is different)
 const {
@@ -57,8 +58,8 @@ app.use(
 );
 app.use(express.json());
 app.use(morgan("combined"));
-app.use(express.json({ limit: '2mb' }));
-app.use(express.urlencoded({ extended: true, limit: '2mb' }));
+app.use(express.json({ limit: "2mb" }));
+app.use(express.urlencoded({ extended: true, limit: "2mb" }));
 
 // Supabase client
 const supabase = createClient(
@@ -66,134 +67,153 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_KEY,
 );
 
+const transporter = nodemailer.createTransport({
+  host: process.env.SMTP_HOST,
+  port: process.env.SMTP_PORT,
+  secure: process.env.SMTP_PORT == 465, // true for 465, false for other ports
+  auth: {
+    user: process.env.SMTP_USER,
+    pass: process.env.SMTP_PASS,
+  },
+});
+
 // ==================== AUTHENTICATION ROUTES ====================
 
 // Register - Updated to handle compressed images
 app.post("/api/auth/register", async (req, res) => {
-    try {
-        const { 
-            email, 
-            password, 
-            first_name, 
-            last_name, 
-            phone,
-            country,
-            city,
-            address,
-            security_question_1,
-            security_answer_1,
-            security_question_2,
-            security_answer_2,
-            face_image
-        } = req.body;
+  try {
+    const {
+      email,
+      password,
+      first_name,
+      last_name,
+      phone,
+      country,
+      city,
+      address,
+      security_question_1,
+      security_answer_1,
+      security_question_2,
+      security_answer_2,
+      face_image,
+    } = req.body;
 
-        console.log('Registration attempt for:', email);
-        console.log('Face image received:', face_image ? `Yes, size: ${Math.round(face_image.length / 1024)}KB` : 'No');
+    console.log("Registration attempt for:", email);
+    console.log(
+      "Face image received:",
+      face_image
+        ? `Yes, size: ${Math.round(face_image.length / 1024)}KB`
+        : "No",
+    );
 
-        // Check if user exists
-        const { data: existingUser } = await supabase
-            .from("users")
-            .select("email")
-            .eq("email", email)
-            .single();
+    // Check if user exists
+    const { data: existingUser } = await supabase
+      .from("users")
+      .select("email")
+      .eq("email", email)
+      .single();
 
-        if (existingUser) {
-            return res.status(400).json({ error: "Email already registered" });
-        }
-
-        // Validate face image (should be present)
-        if (!face_image || face_image.length < 100) {
-            return res.status(400).json({ error: "Face verification required" });
-        }
-
-        // Hash password
-        const hashedPassword = await bcrypt.hash(password, 10);
-        
-        // Hash security answers
-        const hashedAnswer1 = await bcrypt.hash(security_answer_1.toLowerCase().trim(), 10);
-        const hashedAnswer2 = await bcrypt.hash(security_answer_2.toLowerCase().trim(), 10);
-
-        // Create user with all fields
-        const { data: user, error } = await supabase
-            .from("users")
-            .insert({
-                email,
-                password_hash: hashedPassword,
-                first_name,
-                last_name,
-                phone,
-                country: country || null,
-                city: city || null,
-                address: address || null,
-                security_question_1,
-                security_answer_1: hashedAnswer1,
-                security_question_2,
-                security_answer_2: hashedAnswer2,
-                face_image: face_image,
-                face_verified: true,
-                face_verification_date: new Date().toISOString(),
-                role: "user",
-                kyc_status: "pending",
-                is_active: true,
-                is_frozen: false,
-                created_at: new Date().toISOString(),
-                updated_at: new Date().toISOString()
-            })
-            .select()
-            .single();
-
-        if (error) {
-            console.error('Supabase insert error:', error);
-            throw error;
-        }
-
-        console.log('User created with ID:', user.id);
-
-        // Create checking account for user
-        const { error: accountError } = await supabase
-            .from("accounts")
-            .insert({
-                user_id: user.id,
-                account_type: "checking",
-                currency: "USD",
-                balance: 0.00,
-                available_balance: 0.00,
-                status: "active",
-                created_at: new Date().toISOString(),
-                updated_at: new Date().toISOString()
-            });
-
-        if (accountError) {
-            console.error('Account creation error:', accountError);
-        }
-
-        // Generate token
-        const token = jwt.sign(
-            { userId: user.id, email: user.email, role: user.role },
-            process.env.JWT_SECRET,
-            { expiresIn: process.env.JWT_EXPIRE },
-        );
-
-        // Return user data
-        res.status(201).json({
-            message: "User created successfully",
-            token,
-            user: {
-                id: user.id,
-                email: user.email,
-                first_name: user.first_name,
-                last_name: user.last_name,
-                role: user.role,
-                phone: user.phone,
-                country: user.country,
-                city: user.city,
-                face_image: user.face_image
-            },
-        });
-    } catch (error) {
-        console.error("Registration error:", error);
-        res.status(500).json({ error: "Registration failed: " + error.message });
+    if (existingUser) {
+      return res.status(400).json({ error: "Email already registered" });
     }
+
+    // Validate face image (should be present)
+    if (!face_image || face_image.length < 100) {
+      return res.status(400).json({ error: "Face verification required" });
+    }
+
+    // Hash password
+    const hashedPassword = await bcrypt.hash(password, 10);
+
+    // Hash security answers
+    const hashedAnswer1 = await bcrypt.hash(
+      security_answer_1.toLowerCase().trim(),
+      10,
+    );
+    const hashedAnswer2 = await bcrypt.hash(
+      security_answer_2.toLowerCase().trim(),
+      10,
+    );
+
+    // Create user with all fields
+    const { data: user, error } = await supabase
+      .from("users")
+      .insert({
+        email,
+        password_hash: hashedPassword,
+        first_name,
+        last_name,
+        phone,
+        country: country || null,
+        city: city || null,
+        address: address || null,
+        security_question_1,
+        security_answer_1: hashedAnswer1,
+        security_question_2,
+        security_answer_2: hashedAnswer2,
+        face_image: face_image,
+        face_verified: true,
+        face_verification_date: new Date().toISOString(),
+        role: "user",
+        kyc_status: "pending",
+        is_active: true,
+        is_frozen: false,
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      })
+      .select()
+      .single();
+
+    if (error) {
+      console.error("Supabase insert error:", error);
+      throw error;
+    }
+
+    console.log("User created with ID:", user.id);
+
+    // Create checking account for user
+    const { error: accountError } = await supabase.from("accounts").insert({
+      user_id: user.id,
+      account_type: "checking",
+      currency: "USD",
+      balance: 0.0,
+      available_balance: 0.0,
+      status: "active",
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    });
+
+    if (accountError) {
+      console.error("Account creation error:", accountError);
+    }
+
+    // Generate token
+    const token = jwt.sign(
+      { userId: user.id, email: user.email, role: user.role },
+      process.env.JWT_SECRET,
+      { expiresIn: process.env.JWT_EXPIRE },
+    );
+
+    // Return user data
+    res.status(201).json({
+      message: "User created successfully",
+      token,
+      user: {
+        id: user.id,
+        email: user.email,
+        first_name: user.first_name,
+        last_name: user.last_name,
+        role: user.role,
+        phone: user.phone,
+        country: user.country,
+        city: user.city,
+        face_image: user.face_image,
+      },
+    });
+  } catch (error) {
+    console.error("Registration error:", error);
+    res.status(500).json({ error: "Registration failed: " + error.message });
+  }
 });
 
 // Login
@@ -256,6 +276,128 @@ app.post("/api/auth/login", async (req, res) => {
   }
 });
 
+// ==================== FORGOT PASSWORD ROUTES ====================
+
+// Step 1: Request OTP
+app.post("/api/auth/forgot-password", async (req, res) => {
+  const { email } = req.body;
+  if (!email) return res.status(400).json({ error: "Email required" });
+
+  // Check if user exists (security: don't reveal existence)
+  const { data: user, error: userError } = await supabase
+    .from("users")
+    .select("id, email")
+    .eq("email", email)
+    .single();
+
+  if (userError || !user) {
+    // Always return success to avoid email enumeration
+    return res.json({
+      message: "If your email is registered, you will receive a reset code.",
+    });
+  }
+
+  // Generate 6-digit OTP
+  const otp = Math.floor(100000 + Math.random() * 900000).toString();
+  const expiresAt = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
+
+  // Store OTP (upsert: if exists, update)
+  await supabase.from("password_resets").upsert(
+    {
+      email,
+      otp,
+      expires_at: expiresAt,
+      used: false,
+    },
+    { onConflict: "email" },
+  );
+
+  // Send email
+  try {
+    await transporter.sendMail({
+      from: process.env.SMTP_FROM,
+      to: email,
+      subject: "Password Reset Code - Paystora",
+      html: `
+                <h2>Password Reset Request</h2>
+                <p>You requested to reset your password. Use the following code to proceed:</p>
+                <h3 style="font-size: 32px; letter-spacing: 2px;">${otp}</h3>
+                <p>This code expires in 10 minutes.</p>
+                <p>If you did not request this, please ignore this email.</p>
+            `,
+    });
+  } catch (err) {
+    console.error("Email send error:", err);
+    return res.status(500).json({ error: "Failed to send email" });
+  }
+
+  res.json({ message: "Reset code sent to your email" });
+});
+
+// Step 2: Verify OTP
+app.post("/api/auth/verify-reset-otp", async (req, res) => {
+  const { email, otp } = req.body;
+  if (!email || !otp)
+    return res.status(400).json({ error: "Email and code required" });
+
+  const { data: record, error } = await supabase
+    .from("password_resets")
+    .select("*")
+    .eq("email", email)
+    .eq("otp", otp)
+    .eq("used", false)
+    .single();
+
+  if (error || !record || new Date(record.expires_at) < new Date()) {
+    return res.status(400).json({ error: "Invalid or expired code" });
+  }
+
+  res.json({ valid: true });
+});
+
+// Step 3: Reset password with OTP
+app.post("/api/auth/reset-password", async (req, res) => {
+  const { email, otp, new_password } = req.body;
+  if (!email || !otp || !new_password)
+    return res.status(400).json({ error: "All fields required" });
+
+  // Verify OTP
+  const { data: record, error: verifyError } = await supabase
+    .from("password_resets")
+    .select("*")
+    .eq("email", email)
+    .eq("otp", otp)
+    .eq("used", false)
+    .single();
+
+  if (verifyError || !record || new Date(record.expires_at) < new Date()) {
+    return res.status(400).json({ error: "Invalid or expired code" });
+  }
+
+  // Hash new password
+  const hashedPassword = await bcrypt.hash(new_password, 10);
+
+  // Update user
+  const { error: updateError } = await supabase
+    .from("users")
+    .update({ password_hash: hashedPassword })
+    .eq("email", email);
+
+  if (updateError) {
+    console.error("Password update error:", updateError);
+    return res.status(500).json({ error: "Failed to update password" });
+  }
+
+  // Mark OTP as used
+  await supabase
+    .from("password_resets")
+    .update({ used: true })
+    .eq("email", email)
+    .eq("otp", otp);
+
+  res.json({ message: "Password reset successful" });
+});
+
 // Verify 2FA
 app.post("/api/auth/verify-2fa", async (req, res) => {
   try {
@@ -307,25 +449,25 @@ app.post("/api/auth/verify-2fa", async (req, res) => {
 
 // Get user profile - Updated to return face image
 app.get("/api/user/profile", authenticate, async (req, res) => {
-    try {
-        const { data: user, error } = await supabase
-            .from("users")
-            .select(
-                "id, email, first_name, last_name, phone, date_of_birth, address, city, country, postal_code, kyc_status, two_factor_enabled, is_frozen, freeze_reason, face_image, created_at"
-            )
-            .eq("id", req.user.id)
-            .single();
+  try {
+    const { data: user, error } = await supabase
+      .from("users")
+      .select(
+        "id, email, first_name, last_name, phone, date_of_birth, address, city, country, postal_code, kyc_status, two_factor_enabled, is_frozen, freeze_reason, face_image, created_at",
+      )
+      .eq("id", req.user.id)
+      .single();
 
-        if (error) throw error;
+    if (error) throw error;
 
-        console.log('Profile fetched for user:', user.id);
-        console.log('Face image in profile:', user.face_image ? 'Yes' : 'No');
+    console.log("Profile fetched for user:", user.id);
+    console.log("Face image in profile:", user.face_image ? "Yes" : "No");
 
-        res.json(user);
-    } catch (error) {
-        console.error("Profile fetch error:", error);
-        res.status(500).json({ error: "Failed to fetch profile" });
-    }
+    res.json(user);
+  } catch (error) {
+    console.error("Profile fetch error:", error);
+    res.status(500).json({ error: "Failed to fetch profile" });
+  }
 });
 
 // Update profile
@@ -489,25 +631,21 @@ app.post("/api/user/disable-2fa", authenticate, async (req, res) => {
 );*/
 
 // Get accounts and balances (allow frozen users to see balance)
-app.get(
-  "/api/user/accounts",
-  authenticate,
-  async (req, res) => {
-    try {
-      const { data: accounts, error } = await supabase
-        .from("accounts")
-        .select("*")
-        .eq("user_id", req.user.id);
+app.get("/api/user/accounts", authenticate, async (req, res) => {
+  try {
+    const { data: accounts, error } = await supabase
+      .from("accounts")
+      .select("*")
+      .eq("user_id", req.user.id);
 
-      if (error) throw error;
+    if (error) throw error;
 
-      res.json(accounts);
-    } catch (error) {
-      console.error("Accounts fetch error:", error);
-      res.status(500).json({ error: "Failed to fetch accounts" });
-    }
+    res.json(accounts);
+  } catch (error) {
+    console.error("Accounts fetch error:", error);
+    res.status(500).json({ error: "Failed to fetch accounts" });
   }
-);
+});
 
 // Get transactions
 app.get(
@@ -834,8 +972,9 @@ app.post(
       // ========== PREVENT SELF-TRANSFER ==========
       // Check if the destination account belongs to the same user
       if (toAccount.user_id === req.user.id) {
-        return res.status(400).json({ 
-          error: "Cannot transfer money to your own account. Please use a different recipient account." 
+        return res.status(400).json({
+          error:
+            "Cannot transfer money to your own account. Please use a different recipient account.",
         });
       }
       // ============================================
@@ -987,106 +1126,219 @@ app.get("/api/accounts/recipient", authenticate, async (req, res) => {
   }
 });
 
-
-
 // Get available fintech providers
 app.get("/api/external/providers", authenticate, async (req, res) => {
-    try {
-        const providers = [
-            {
-                id: "paypal",
-                name: "PayPal",
-                logo: "https://cdn.jsdelivr.net/gh/simple-icons/simple-icons/icons/paypal.svg",
-                color: "#003087",
-                fields: [
-                    { name: "recipient_email", label: "PayPal Email", type: "email", required: true },
-                    { name: "recipient_name", label: "Full Name", type: "text", required: true }
-                ]
-            },
-            {
-                id: "stripe",
-                name: "Stripe",
-                logo: "https://cdn.jsdelivr.net/gh/simple-icons/simple-icons/icons/stripe.svg",
-                color: "#635bff",
-                fields: [
-                    { name: "recipient_email", label: "Stripe Account Email", type: "email", required: true },
-                    { name: "recipient_name", label: "Business/Individual Name", type: "text", required: true }
-                ]
-            },
-            {
-                id: "flutterwave",
-                name: "Flutterwave",
-                logo: "https://cdn.jsdelivr.net/gh/simple-icons/simple-icons/icons/flutterwave.svg",
-                color: "#f9a825",
-                fields: [
-                    { name: "recipient_account", label: "Account Number", type: "text", required: true },
-                    { name: "recipient_name", label: "Account Holder Name", type: "text", required: true },
-                    { name: "recipient_email", label: "Email (Optional)", type: "email", required: false }
-                ]
-            },
-            {
-                id: "paystack",
-                name: "Paystack",
-                logo: "https://cdn.jsdelivr.net/gh/simple-icons/simple-icons/icons/paystack.svg",
-                color: "#25c3f0",
-                fields: [
-                    { name: "recipient_account", label: "Account Number", type: "text", required: true },
-                    { name: "recipient_name", label: "Account Holder Name", type: "text", required: true },
-                    { name: "recipient_phone", label: "Phone Number", type: "tel", required: true }
-                ]
-            },
-            {
-                id: "wise",
-                name: "Wise (TransferWise)",
-                logo: "https://cdn.jsdelivr.net/gh/simple-icons/simple-icons/icons/wise.svg",
-                color: "#00b9b9",
-                fields: [
-                    { name: "recipient_email", label: "Wise Email", type: "email", required: true },
-                    { name: "recipient_name", label: "Recipient Name", type: "text", required: true },
-                    { name: "recipient_account", label: "Account Number (if applicable)", type: "text", required: false }
-                ]
-            },
-            {
-                id: "remitly",
-                name: "Remitly",
-                logo: "https://cdn.jsdelivr.net/gh/simple-icons/simple-icons/icons/remitly.svg",
-                color: "#00b9b9",
-                fields: [
-                    { name: "recipient_name", label: "Recipient Name", type: "text", required: true },
-                    { name: "recipient_phone", label: "Phone Number", type: "tel", required: true },
-                    { name: "recipient_country", label: "Recipient Country", type: "text", required: true }
-                ]
-            },
-            {
-                id: "worldremit",
-                name: "WorldRemit",
-                logo: "https://cdn.jsdelivr.net/gh/simple-icons/simple-icons/icons/worldremit.svg",
-                color: "#00b9b9",
-                fields: [
-                    { name: "recipient_name", label: "Recipient Name", type: "text", required: true },
-                    { name: "recipient_phone", label: "Phone Number", type: "tel", required: true }
-                ]
-            },
-            {
-                id: "bank_transfer",
-                name: "Bank Transfer",
-                logo: "https://cdn.jsdelivr.net/gh/simple-icons/simple-icons/icons/bank.svg",
-                color: "#4f46e5",
-                fields: [
-                    { name: "bank_name", label: "Bank Name", type: "text", required: true },
-                    { name: "recipient_account", label: "Account Number", type: "text", required: true },
-                    { name: "recipient_name", label: "Account Holder Name", type: "text", required: true },
-                    { name: "routing_number", label: "Routing Number", type: "text", required: true },
-                    { name: "swift_code", label: "SWIFT/BIC Code", type: "text", required: false }
-                ]
-            }
-        ];
-        
-        res.json(providers);
-    } catch (error) {
-        console.error("Error fetching providers:", error);
-        res.status(500).json({ error: "Failed to fetch providers" });
-    }
+  try {
+    const providers = [
+      {
+        id: "paypal",
+        name: "PayPal",
+        logo: "https://cdn.jsdelivr.net/gh/simple-icons/simple-icons/icons/paypal.svg",
+        color: "#003087",
+        fields: [
+          {
+            name: "recipient_email",
+            label: "PayPal Email",
+            type: "email",
+            required: true,
+          },
+          {
+            name: "recipient_name",
+            label: "Full Name",
+            type: "text",
+            required: true,
+          },
+        ],
+      },
+      {
+        id: "stripe",
+        name: "Stripe",
+        logo: "https://cdn.jsdelivr.net/gh/simple-icons/simple-icons/icons/stripe.svg",
+        color: "#635bff",
+        fields: [
+          {
+            name: "recipient_email",
+            label: "Stripe Account Email",
+            type: "email",
+            required: true,
+          },
+          {
+            name: "recipient_name",
+            label: "Business/Individual Name",
+            type: "text",
+            required: true,
+          },
+        ],
+      },
+      {
+        id: "flutterwave",
+        name: "Flutterwave",
+        logo: "https://cdn.jsdelivr.net/gh/simple-icons/simple-icons/icons/flutterwave.svg",
+        color: "#f9a825",
+        fields: [
+          {
+            name: "recipient_account",
+            label: "Account Number",
+            type: "text",
+            required: true,
+          },
+          {
+            name: "recipient_name",
+            label: "Account Holder Name",
+            type: "text",
+            required: true,
+          },
+          {
+            name: "recipient_email",
+            label: "Email (Optional)",
+            type: "email",
+            required: false,
+          },
+        ],
+      },
+      {
+        id: "paystack",
+        name: "Paystack",
+        logo: "https://cdn.jsdelivr.net/gh/simple-icons/simple-icons/icons/paystack.svg",
+        color: "#25c3f0",
+        fields: [
+          {
+            name: "recipient_account",
+            label: "Account Number",
+            type: "text",
+            required: true,
+          },
+          {
+            name: "recipient_name",
+            label: "Account Holder Name",
+            type: "text",
+            required: true,
+          },
+          {
+            name: "recipient_phone",
+            label: "Phone Number",
+            type: "tel",
+            required: true,
+          },
+        ],
+      },
+      {
+        id: "wise",
+        name: "Wise (TransferWise)",
+        logo: "https://cdn.jsdelivr.net/gh/simple-icons/simple-icons/icons/wise.svg",
+        color: "#00b9b9",
+        fields: [
+          {
+            name: "recipient_email",
+            label: "Wise Email",
+            type: "email",
+            required: true,
+          },
+          {
+            name: "recipient_name",
+            label: "Recipient Name",
+            type: "text",
+            required: true,
+          },
+          {
+            name: "recipient_account",
+            label: "Account Number (if applicable)",
+            type: "text",
+            required: false,
+          },
+        ],
+      },
+      {
+        id: "remitly",
+        name: "Remitly",
+        logo: "https://cdn.jsdelivr.net/gh/simple-icons/simple-icons/icons/remitly.svg",
+        color: "#00b9b9",
+        fields: [
+          {
+            name: "recipient_name",
+            label: "Recipient Name",
+            type: "text",
+            required: true,
+          },
+          {
+            name: "recipient_phone",
+            label: "Phone Number",
+            type: "tel",
+            required: true,
+          },
+          {
+            name: "recipient_country",
+            label: "Recipient Country",
+            type: "text",
+            required: true,
+          },
+        ],
+      },
+      {
+        id: "worldremit",
+        name: "WorldRemit",
+        logo: "https://cdn.jsdelivr.net/gh/simple-icons/simple-icons/icons/worldremit.svg",
+        color: "#00b9b9",
+        fields: [
+          {
+            name: "recipient_name",
+            label: "Recipient Name",
+            type: "text",
+            required: true,
+          },
+          {
+            name: "recipient_phone",
+            label: "Phone Number",
+            type: "tel",
+            required: true,
+          },
+        ],
+      },
+      {
+        id: "bank_transfer",
+        name: "Bank Transfer",
+        logo: "https://cdn.jsdelivr.net/gh/simple-icons/simple-icons/icons/bank.svg",
+        color: "#4f46e5",
+        fields: [
+          {
+            name: "bank_name",
+            label: "Bank Name",
+            type: "text",
+            required: true,
+          },
+          {
+            name: "recipient_account",
+            label: "Account Number",
+            type: "text",
+            required: true,
+          },
+          {
+            name: "recipient_name",
+            label: "Account Holder Name",
+            type: "text",
+            required: true,
+          },
+          {
+            name: "routing_number",
+            label: "Routing Number",
+            type: "text",
+            required: true,
+          },
+          {
+            name: "swift_code",
+            label: "SWIFT/BIC Code",
+            type: "text",
+            required: false,
+          },
+        ],
+      },
+    ];
+
+    res.json(providers);
+  } catch (error) {
+    console.error("Error fetching providers:", error);
+    res.status(500).json({ error: "Failed to fetch providers" });
+  }
 });
 
 // Create external transfer request
@@ -1218,205 +1470,233 @@ app.get("/api/external/providers", authenticate, async (req, res) => {
 });*/
 
 // Create external transfer request
-app.post("/api/user/external-transfer", authenticate, checkAccountFrozen, async (req, res) => {
+app.post(
+  "/api/user/external-transfer",
+  authenticate,
+  checkAccountFrozen,
+  async (req, res) => {
     console.log("=== External Transfer Request Received ===");
     console.log("User ID:", req.user?.id);
     console.log("Request body:", req.body);
-    
+
     try {
-        const {
-            from_account_id,
-            provider_id,
-            recipient_name,
-            recipient_account,
-            recipient_email,
-            recipient_phone,
-            amount,
-            description,
-            bank_name
-        } = req.body;
+      const {
+        from_account_id,
+        provider_id,
+        recipient_name,
+        recipient_account,
+        recipient_email,
+        recipient_phone,
+        amount,
+        description,
+        bank_name,
+      } = req.body;
 
-        console.log("Parsed data:", { from_account_id, provider_id, amount, bank_name });
+      console.log("Parsed data:", {
+        from_account_id,
+        provider_id,
+        amount,
+        bank_name,
+      });
 
-        // Validate amount
-        if (!amount || amount <= 0) {
-            console.log("Invalid amount:", amount);
-            return res.status(400).json({ error: "Invalid amount" });
-        }
+      // Validate amount
+      if (!amount || amount <= 0) {
+        console.log("Invalid amount:", amount);
+        return res.status(400).json({ error: "Invalid amount" });
+      }
 
-        if (amount < 10) {
-            return res.status(400).json({ error: "Minimum external transfer amount is $10" });
-        }
+      if (amount < 10) {
+        return res
+          .status(400)
+          .json({ error: "Minimum external transfer amount is $10" });
+      }
 
-        if (amount > 10000) {
-            return res.status(400).json({ error: "Maximum external transfer amount is $10,000" });
-        }
+      if (amount > 10000) {
+        return res
+          .status(400)
+          .json({ error: "Maximum external transfer amount is $10,000" });
+      }
 
-        // Get source account
-        console.log("Fetching source account:", from_account_id);
-        const { data: fromAccount, error: accountError } = await supabase
-            .from("accounts")
-            .select("*")
-            .eq("id", from_account_id)
-            .eq("user_id", req.user.id)
-            .single();
+      // Get source account
+      console.log("Fetching source account:", from_account_id);
+      const { data: fromAccount, error: accountError } = await supabase
+        .from("accounts")
+        .select("*")
+        .eq("id", from_account_id)
+        .eq("user_id", req.user.id)
+        .single();
 
-        if (accountError) {
-            console.error("Account fetch error:", accountError);
-            return res.status(404).json({ error: "Source account not found", details: accountError.message });
-        }
-        
-        if (!fromAccount) {
-            console.log("No account found for ID:", from_account_id);
-            return res.status(404).json({ error: "Source account not found" });
-        }
+      if (accountError) {
+        console.error("Account fetch error:", accountError);
+        return res.status(404).json({
+          error: "Source account not found",
+          details: accountError.message,
+        });
+      }
 
-        console.log("Source account found:", fromAccount.account_number, "Balance:", fromAccount.available_balance);
+      if (!fromAccount) {
+        console.log("No account found for ID:", from_account_id);
+        return res.status(404).json({ error: "Source account not found" });
+      }
 
-        // Check sufficient funds
-        if (fromAccount.available_balance < amount) {
-            return res.status(400).json({ error: "Insufficient funds" });
-        }
+      console.log(
+        "Source account found:",
+        fromAccount.account_number,
+        "Balance:",
+        fromAccount.available_balance,
+      );
 
-        // Get provider name
-        let providerName = bank_name;
-        if (provider_id) {
-            const providers = {
-                paypal: "PayPal",
-                stripe: "Stripe",
-                flutterwave: "Flutterwave",
-                paystack: "Paystack",
-                wise: "Wise",
-                remitly: "Remitly",
-                worldremit: "WorldRemit",
-                bank_transfer: "Bank Transfer"
-            };
-            providerName = providers[provider_id] || bank_name || provider_id;
-        }
+      // Check sufficient funds
+      if (fromAccount.available_balance < amount) {
+        return res.status(400).json({ error: "Insufficient funds" });
+      }
 
-        // Create external transfer record
-        const transferData = {
-            user_id: req.user.id,
-            from_account_id: fromAccount.id,
-            bank_name: providerName,
-            recipient_name: recipient_name,
-            recipient_account: recipient_account || null,
-            recipient_email: recipient_email || null,
-            recipient_phone: recipient_phone || null,
-            amount: amount,
-            description: description || `External transfer to ${providerName}`,
-            status: "pending",
-            created_at: new Date().toISOString()
+      // Get provider name
+      let providerName = bank_name;
+      if (provider_id) {
+        const providers = {
+          paypal: "PayPal",
+          stripe: "Stripe",
+          flutterwave: "Flutterwave",
+          paystack: "Paystack",
+          wise: "Wise",
+          remitly: "Remitly",
+          worldremit: "WorldRemit",
+          bank_transfer: "Bank Transfer",
         };
+        providerName = providers[provider_id] || bank_name || provider_id;
+      }
 
-        console.log("Inserting transfer record:", transferData);
+      // Create external transfer record
+      const transferData = {
+        user_id: req.user.id,
+        from_account_id: fromAccount.id,
+        bank_name: providerName,
+        recipient_name: recipient_name,
+        recipient_account: recipient_account || null,
+        recipient_email: recipient_email || null,
+        recipient_phone: recipient_phone || null,
+        amount: amount,
+        description: description || `External transfer to ${providerName}`,
+        status: "pending",
+        created_at: new Date().toISOString(),
+      };
 
-        const { data: transfer, error: insertError } = await supabase
-            .from("external_transfers")
-            .insert(transferData)
-            .select()
-            .single();
+      console.log("Inserting transfer record:", transferData);
 
-        if (insertError) {
-            console.error("Insert error:", insertError);
-            return res.status(500).json({ error: "Failed to create transfer record", details: insertError.message });
-        }
+      const { data: transfer, error: insertError } = await supabase
+        .from("external_transfers")
+        .insert(transferData)
+        .select()
+        .single();
 
-        console.log("Transfer record created:", transfer.id);
-
-        // Immediately deduct amount from user balance
-        const { error: updateError } = await supabase
-            .from("accounts")
-            .update({
-                balance: fromAccount.balance - amount,
-                available_balance: fromAccount.available_balance - amount,
-                updated_at: new Date().toISOString()
-            })
-            .eq("id", fromAccount.id);
-
-        if (updateError) {
-            console.error("Balance update error:", updateError);
-            // Rollback would be ideal here, but for now log it
-        }
-
-        // Create transaction record for the deduction
-        const { error: transError } = await supabase.from("transactions").insert({
-            from_account_id: fromAccount.id,
-            from_user_id: req.user.id,
-            amount: amount,
-            description: `External transfer to ${providerName} - ${recipient_name} (Pending approval)`,
-            transaction_type: "external_transfer",
-            status: "completed",
-            completed_at: new Date().toISOString(),
-            is_admin_adjusted: false
+      if (insertError) {
+        console.error("Insert error:", insertError);
+        return res.status(500).json({
+          error: "Failed to create transfer record",
+          details: insertError.message,
         });
+      }
 
-        if (transError) {
-            console.error("Transaction creation error:", transError);
-        }
+      console.log("Transfer record created:", transfer.id);
 
-        // Create notification for user
-        await supabase.from("notifications").insert({
-            user_id: req.user.id,
-            title: "External Transfer Initiated",
-            message: `Your transfer of $${amount} to ${providerName} has been initiated. Funds have been deducted from your account and will be processed within 2-3 business days after approval.`,
-            type: "info",
-            created_at: new Date().toISOString()
-        });
+      // Immediately deduct amount from user balance
+      const { error: updateError } = await supabase
+        .from("accounts")
+        .update({
+          balance: fromAccount.balance - amount,
+          available_balance: fromAccount.available_balance - amount,
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", fromAccount.id);
 
-        console.log("External transfer completed successfully");
-        res.json({
-            success: true,
-            message: "External transfer initiated successfully. Funds will be processed within 2-3 business days.",
-            transfer: transfer,
-            estimated_completion: "2-3 business days"
-        });
+      if (updateError) {
+        console.error("Balance update error:", updateError);
+        // Rollback would be ideal here, but for now log it
+      }
 
+      // Create transaction record for the deduction
+      const { error: transError } = await supabase.from("transactions").insert({
+        from_account_id: fromAccount.id,
+        from_user_id: req.user.id,
+        amount: amount,
+        description: `External transfer to ${providerName} - ${recipient_name} (Pending approval)`,
+        transaction_type: "external_transfer",
+        status: "completed",
+        completed_at: new Date().toISOString(),
+        is_admin_adjusted: false,
+      });
+
+      if (transError) {
+        console.error("Transaction creation error:", transError);
+      }
+
+      // Create notification for user
+      await supabase.from("notifications").insert({
+        user_id: req.user.id,
+        title: "External Transfer Initiated",
+        message: `Your transfer of $${amount} to ${providerName} has been initiated. Funds have been deducted from your account and will be processed within 2-3 business days after approval.`,
+        type: "info",
+        created_at: new Date().toISOString(),
+      });
+
+      console.log("External transfer completed successfully");
+      res.json({
+        success: true,
+        message:
+          "External transfer initiated successfully. Funds will be processed within 2-3 business days.",
+        transfer: transfer,
+        estimated_completion: "2-3 business days",
+      });
     } catch (error) {
-        console.error("External transfer error - FULL DETAILS:", error);
-        console.error("Error stack:", error.stack);
-        res.status(500).json({ 
-            error: "Failed to process external transfer", 
-            details: error.message,
-            stack: process.env.NODE_ENV === "development" ? error.stack : undefined
-        });
+      console.error("External transfer error - FULL DETAILS:", error);
+      console.error("Error stack:", error.stack);
+      res.status(500).json({
+        error: "Failed to process external transfer",
+        details: error.message,
+        stack: process.env.NODE_ENV === "development" ? error.stack : undefined,
+      });
     }
-});
+  },
+);
 
 // Get user's external transfer history
 app.get("/api/user/external-transfers", authenticate, async (req, res) => {
-    try {
-        const { page = 1, limit = 20, status } = req.query;
-        const offset = (page - 1) * limit;
+  try {
+    const { page = 1, limit = 20, status } = req.query;
+    const offset = (page - 1) * limit;
 
-        let query = supabase
-            .from("external_transfers")
-            .select("*", { count: "exact" })
-            .eq("user_id", req.user.id)
-            .order("created_at", { ascending: false });
+    let query = supabase
+      .from("external_transfers")
+      .select("*", { count: "exact" })
+      .eq("user_id", req.user.id)
+      .order("created_at", { ascending: false });
 
-        if (status && status !== "all") {
-            query = query.eq("status", status);
-        }
-
-        const { data: transfers, error, count } = await query
-            .range(offset, offset + limit - 1);
-
-        if (error) throw error;
-
-        res.json({
-            transfers: transfers || [],
-            pagination: {
-                page: parseInt(page),
-                limit: parseInt(limit),
-                total: count || 0,
-                pages: Math.ceil((count || 0) / limit)
-            }
-        });
-    } catch (error) {
-        console.error("Error fetching external transfers:", error);
-        res.status(500).json({ error: "Failed to fetch external transfers" });
+    if (status && status !== "all") {
+      query = query.eq("status", status);
     }
+
+    const {
+      data: transfers,
+      error,
+      count,
+    } = await query.range(offset, offset + limit - 1);
+
+    if (error) throw error;
+
+    res.json({
+      transfers: transfers || [],
+      pagination: {
+        page: parseInt(page),
+        limit: parseInt(limit),
+        total: count || 0,
+        pages: Math.ceil((count || 0) / limit),
+      },
+    });
+  } catch (error) {
+    console.error("Error fetching external transfers:", error);
+    res.status(500).json({ error: "Failed to fetch external transfers" });
+  }
 });
 
 // Verify OTP and complete transaction
@@ -2484,14 +2764,16 @@ app.post("/api/user/request-unfreeze-otp", authenticate, async (req, res) => {
 
     // OTP method with payment
     if (!unfreeze_payment_details || !unfreeze_payment_details.amount) {
-      return res.status(500).json({ error: "Unfreeze payment details missing." });
+      return res
+        .status(500)
+        .json({ error: "Unfreeze payment details missing." });
     }
 
     // Return the payment details so the user can make the payment
     res.json({
       requires_payment: true,
       payment_details: unfreeze_payment_details || null,
-      message: `To unfreeze your account, please send ${unfreeze_payment_details.amount || 'the required amount'} to the provided address. After payment, contact support to receive your OTP.`,
+      message: `To unfreeze your account, please send ${unfreeze_payment_details.amount || "the required amount"} to the provided address. After payment, contact support to receive your OTP.`,
     });
   } catch (error) {
     console.error("Unfreeze request error:", error);
@@ -2551,7 +2833,6 @@ app.post("/api/user/verify-unfreeze-otp", authenticate, async (req, res) => {
     res.status(500).json({ error: "Failed to unfreeze account" });
   }
 });
-
 
 // ────────────────────────────────────────────────
 //     LIVE SUPPORT / CHAT ROUTES (minimal version)
@@ -2691,224 +2972,252 @@ app.post("/api/user/add-money", authenticate, async (req, res) => {
 
 // USER: Get receive methods for a specific country (fallback to 'ALL')
 app.get("/api/user/receive-methods", authenticate, async (req, res) => {
-    try {
-        const { country, method } = req.query;
-        if (!country) {
-            return res.status(400).json({ error: "Country code required" });
-        }
-
-        let query = supabase
-            .from("receive_methods")
-            .select("*")
-            .eq("is_active", true);
-
-        if (method) {
-            query = query.eq("method_type", method);
-        }
-
-        // First try specific country
-        let { data: methods, error } = await query
-            .eq("country_code", country)
-            .order("method_type");
-
-        // If no specific country, fallback to 'ALL'
-        if (!methods || methods.length === 0) {
-            const { data: fallback, error: fallbackError } = await query
-                .eq("country_code", "ALL");
-            if (!fallbackError && fallback) {
-                methods = fallback;
-            }
-        }
-
-        if (error) throw error;
-
-        res.json({ methods: methods || [] });
-    } catch (error) {
-        console.error("Get receive methods error:", error);
-        res.status(500).json({ error: "Failed to fetch receive methods" });
+  try {
+    const { country, method } = req.query;
+    if (!country) {
+      return res.status(400).json({ error: "Country code required" });
     }
+
+    let query = supabase
+      .from("receive_methods")
+      .select("*")
+      .eq("is_active", true);
+
+    if (method) {
+      query = query.eq("method_type", method);
+    }
+
+    // First try specific country
+    let { data: methods, error } = await query
+      .eq("country_code", country)
+      .order("method_type");
+
+    // If no specific country, fallback to 'ALL'
+    if (!methods || methods.length === 0) {
+      const { data: fallback, error: fallbackError } = await query.eq(
+        "country_code",
+        "ALL",
+      );
+      if (!fallbackError && fallback) {
+        methods = fallback;
+      }
+    }
+
+    if (error) throw error;
+
+    res.json({ methods: methods || [] });
+  } catch (error) {
+    console.error("Get receive methods error:", error);
+    res.status(500).json({ error: "Failed to fetch receive methods" });
+  }
 });
 
 // USER: Create a receive request
 app.post("/api/user/receive-request", authenticate, async (req, res) => {
-    try {
-        const { amount, country_code, method_type, description } = req.body;
+  try {
+    const { amount, country_code, method_type, description } = req.body;
 
-        // Validate
-        if (!amount || amount <= 0) {
-            return res.status(400).json({ error: "Invalid amount" });
-        }
-        if (!country_code || !method_type) {
-            return res.status(400).json({ error: "Country and method required" });
-        }
-
-        // Get the receive method details (for display)
-        let { data: method, error: methodError } = await supabase
-            .from("receive_methods")
-            .select("*")
-            .eq("country_code", country_code)
-            .eq("method_type", method_type)
-            .eq("is_active", true)
-            .single();
-
-        if (methodError || !method) {
-            // Fallback to global
-            const { data: fallback, error: fallbackError } = await supabase
-                .from("receive_methods")
-                .select("*")
-                .eq("country_code", "ALL")
-                .eq("method_type", method_type)
-                .eq("is_active", true)
-                .single();
-
-            if (fallbackError || !fallback) {
-                return res.status(404).json({ error: "No receive method configured for this country/method" });
-            }
-            method = fallback;
-        }
-
-        // Create request
-        const { data: request, error } = await supabase
-            .from("receive_requests")
-            .insert({
-                user_id: req.user.id,
-                amount,
-                currency: "USD",
-                country_code,
-                method_type,
-                description: description || null,
-                status: "pending",
-                payment_link: `${req.protocol}://${req.get('host')}/receive/${Math.random().toString(36).substring(2, 10)}` // simple token
-            })
-            .select()
-            .single();
-
-        if (error) throw error;
-
-        // Return the payment details from the method along with request ID
-        res.json({
-            success: true,
-            message: "Receive request created. Share the following details with the sender.",
-            request_id: request.id,
-            payment_details: method.details,
-            payment_link: request.payment_link,
-            instructions: method_type === "bank" 
-                ? "Please instruct the sender to transfer the exact amount using the bank details above." 
-                : "Please instruct the sender to send the exact amount to the crypto address above."
-        });
-    } catch (error) {
-        console.error("Create receive request error:", error);
-        res.status(500).json({ error: "Failed to create receive request" });
+    // Validate
+    if (!amount || amount <= 0) {
+      return res.status(400).json({ error: "Invalid amount" });
     }
+    if (!country_code || !method_type) {
+      return res.status(400).json({ error: "Country and method required" });
+    }
+
+    // Get the receive method details (for display)
+    let { data: method, error: methodError } = await supabase
+      .from("receive_methods")
+      .select("*")
+      .eq("country_code", country_code)
+      .eq("method_type", method_type)
+      .eq("is_active", true)
+      .single();
+
+    if (methodError || !method) {
+      // Fallback to global
+      const { data: fallback, error: fallbackError } = await supabase
+        .from("receive_methods")
+        .select("*")
+        .eq("country_code", "ALL")
+        .eq("method_type", method_type)
+        .eq("is_active", true)
+        .single();
+
+      if (fallbackError || !fallback) {
+        return res.status(404).json({
+          error: "No receive method configured for this country/method",
+        });
+      }
+      method = fallback;
+    }
+
+    // Create request
+    const { data: request, error } = await supabase
+      .from("receive_requests")
+      .insert({
+        user_id: req.user.id,
+        amount,
+        currency: "USD",
+        country_code,
+        method_type,
+        description: description || null,
+        status: "pending",
+        payment_link: `${req.protocol}://${req.get("host")}/receive/${Math.random().toString(36).substring(2, 10)}`, // simple token
+      })
+      .select()
+      .single();
+
+    if (error) throw error;
+
+    // Return the payment details from the method along with request ID
+    res.json({
+      success: true,
+      message:
+        "Receive request created. Share the following details with the sender.",
+      request_id: request.id,
+      payment_details: method.details,
+      payment_link: request.payment_link,
+      instructions:
+        method_type === "bank"
+          ? "Please instruct the sender to transfer the exact amount using the bank details above."
+          : "Please instruct the sender to send the exact amount to the crypto address above.",
+    });
+  } catch (error) {
+    console.error("Create receive request error:", error);
+    res.status(500).json({ error: "Failed to create receive request" });
+  }
 });
 
 // ADMIN: Get all receive methods
-app.get("/api/admin/receive-methods", authenticate, authorizeAdmin, async (req, res) => {
+app.get(
+  "/api/admin/receive-methods",
+  authenticate,
+  authorizeAdmin,
+  async (req, res) => {
     try {
-        const { data: methods, error } = await supabase
-            .from("receive_methods")
-            .select("*")
-            .order("country_code")
-            .order("method_type");
+      const { data: methods, error } = await supabase
+        .from("receive_methods")
+        .select("*")
+        .order("country_code")
+        .order("method_type");
 
-        if (error) throw error;
-        res.json({ methods: methods || [] });
+      if (error) throw error;
+      res.json({ methods: methods || [] });
     } catch (error) {
-        console.error("Admin get receive methods error:", error);
-        res.status(500).json({ error: "Failed to fetch receive methods" });
+      console.error("Admin get receive methods error:", error);
+      res.status(500).json({ error: "Failed to fetch receive methods" });
     }
-});
+  },
+);
 
 // ADMIN: Create or update a receive method
-app.post("/api/admin/receive-methods", authenticate, authorizeAdmin, async (req, res) => {
+app.post(
+  "/api/admin/receive-methods",
+  authenticate,
+  authorizeAdmin,
+  async (req, res) => {
     try {
-        const { id, country_code, method_type, details, is_active } = req.body;
+      const { id, country_code, method_type, details, is_active } = req.body;
 
-        if (!country_code || !method_type || !details) {
-            return res.status(400).json({ error: "Country, method type and details required" });
-        }
+      if (!country_code || !method_type || !details) {
+        return res
+          .status(400)
+          .json({ error: "Country, method type and details required" });
+      }
 
-        const methodData = {
-            country_code,
-            method_type,
-            details,
-            is_active: is_active !== undefined ? is_active : true,
-            updated_at: new Date(),
-            updated_by: req.user.id
-        };
+      const methodData = {
+        country_code,
+        method_type,
+        details,
+        is_active: is_active !== undefined ? is_active : true,
+        updated_at: new Date(),
+        updated_by: req.user.id,
+      };
 
-        let result;
-        if (id) {
-            // Update existing
-            const { data, error } = await supabase
-                .from("receive_methods")
-                .update(methodData)
-                .eq("id", id)
-                .select()
-                .single();
-            if (error) throw error;
-            result = data;
-        } else {
-            // Insert new
-            methodData.created_by = req.user.id;
-            const { data, error } = await supabase
-                .from("receive_methods")
-                .insert(methodData)
-                .select()
-                .single();
-            if (error) throw error;
-            result = data;
-        }
+      let result;
+      if (id) {
+        // Update existing
+        const { data, error } = await supabase
+          .from("receive_methods")
+          .update(methodData)
+          .eq("id", id)
+          .select()
+          .single();
+        if (error) throw error;
+        result = data;
+      } else {
+        // Insert new
+        methodData.created_by = req.user.id;
+        const { data, error } = await supabase
+          .from("receive_methods")
+          .insert(methodData)
+          .select()
+          .single();
+        if (error) throw error;
+        result = data;
+      }
 
-        // Log admin action
-        await supabase.from("admin_actions").insert({
-            admin_id: req.user.id,
-            action_type: id ? "update_receive_method" : "create_receive_method",
-            details: { id: result.id, country_code, method_type }
-        });
+      // Log admin action
+      await supabase.from("admin_actions").insert({
+        admin_id: req.user.id,
+        action_type: id ? "update_receive_method" : "create_receive_method",
+        details: { id: result.id, country_code, method_type },
+      });
 
-        res.json({ success: true, method: result });
+      res.json({ success: true, method: result });
     } catch (error) {
-        console.error("Admin save receive method error:", error);
-        res.status(500).json({ error: "Failed to save receive method" });
+      console.error("Admin save receive method error:", error);
+      res.status(500).json({ error: "Failed to save receive method" });
     }
-});
+  },
+);
 
 // ADMIN: Delete receive method
-app.delete("/api/admin/receive-methods/:id", authenticate, authorizeAdmin, async (req, res) => {
+app.delete(
+  "/api/admin/receive-methods/:id",
+  authenticate,
+  authorizeAdmin,
+  async (req, res) => {
     try {
-        const { id } = req.params;
+      const { id } = req.params;
 
-        const { error } = await supabase
-            .from("receive_methods")
-            .delete()
-            .eq("id", id);
+      const { error } = await supabase
+        .from("receive_methods")
+        .delete()
+        .eq("id", id);
 
-        if (error) throw error;
+      if (error) throw error;
 
-        // Log admin action
-        await supabase.from("admin_actions").insert({
-            admin_id: req.user.id,
-            action_type: "delete_receive_method",
-            details: { id }
-        });
+      // Log admin action
+      await supabase.from("admin_actions").insert({
+        admin_id: req.user.id,
+        action_type: "delete_receive_method",
+        details: { id },
+      });
 
-        res.json({ success: true });
+      res.json({ success: true });
     } catch (error) {
-        console.error("Admin delete receive method error:", error);
-        res.status(500).json({ error: "Failed to delete receive method" });
+      console.error("Admin delete receive method error:", error);
+      res.status(500).json({ error: "Failed to delete receive method" });
     }
-});
+  },
+);
 
 // ADMIN: Get receive requests (filter by status)
-app.get("/api/admin/receive-requests", authenticate, authorizeAdmin, async (req, res) => {
+app.get(
+  "/api/admin/receive-requests",
+  authenticate,
+  authorizeAdmin,
+  async (req, res) => {
     try {
-        const { status = "pending", page = 1, limit = 20 } = req.query;
-        const offset = (page - 1) * limit;
+      const { status = "pending", page = 1, limit = 20 } = req.query;
+      const offset = (page - 1) * limit;
 
-        let query = supabase
-            .from("receive_requests")
-            .select(`
+      let query = supabase
+        .from("receive_requests")
+        .select(
+          `
                 *,
                 user:users!receive_requests_user_id_fkey (
                     id,
@@ -2917,181 +3226,279 @@ app.get("/api/admin/receive-requests", authenticate, authorizeAdmin, async (req,
                     email,
                     phone
                 )
-            `, { count: "exact" })
-            .order("created_at", { ascending: false });
+            `,
+          { count: "exact" },
+        )
+        .order("created_at", { ascending: false });
 
-        if (status !== "all") {
-            query = query.eq("status", status);
-        }
+      if (status !== "all") {
+        query = query.eq("status", status);
+      }
 
-        const { data: requests, error, count } = await query
-            .range(offset, offset + limit - 1);
+      const {
+        data: requests,
+        error,
+        count,
+      } = await query.range(offset, offset + limit - 1);
 
-        if (error) throw error;
+      if (error) throw error;
 
-        res.json({
-            requests: requests || [],
-            pagination: {
-                page: parseInt(page),
-                limit: parseInt(limit),
-                total: count || 0,
-                pages: Math.ceil((count || 0) / limit)
-            }
-        });
+      res.json({
+        requests: requests || [],
+        pagination: {
+          page: parseInt(page),
+          limit: parseInt(limit),
+          total: count || 0,
+          pages: Math.ceil((count || 0) / limit),
+        },
+      });
     } catch (error) {
-        console.error("Admin get receive requests error:", error);
-        res.status(500).json({ error: "Failed to fetch receive requests" });
+      console.error("Admin get receive requests error:", error);
+      res.status(500).json({ error: "Failed to fetch receive requests" });
     }
-});
+  },
+);
 
 // ADMIN: Approve receive request (credit user)
-app.post("/api/admin/receive-requests/:id/approve", authenticate, authorizeAdmin, async (req, res) => {
+app.post(
+  "/api/admin/receive-requests/:id/approve",
+  authenticate,
+  authorizeAdmin,
+  async (req, res) => {
     try {
-        const { id } = req.params;
+      const { id } = req.params;
 
-        // Get request with user
-        const { data: request, error: fetchError } = await supabase
-            .from("receive_requests")
-            .select("*, user:users(id, first_name, last_name, email)")
-            .eq("id", id)
-            .single();
+      // Get request with user
+      const { data: request, error: fetchError } = await supabase
+        .from("receive_requests")
+        .select("*, user:users(id, first_name, last_name, email)")
+        .eq("id", id)
+        .single();
 
-        if (fetchError || !request) {
-            return res.status(404).json({ error: "Request not found" });
-        }
+      if (fetchError || !request) {
+        return res.status(404).json({ error: "Request not found" });
+      }
 
-        if (request.status !== "pending") {
-            return res.status(400).json({ error: "Request already processed" });
-        }
+      if (request.status !== "pending") {
+        return res.status(400).json({ error: "Request already processed" });
+      }
 
-        // Get user's primary account (checking)
-        const { data: account, error: accountError } = await supabase
-            .from("accounts")
-            .select("*")
-            .eq("user_id", request.user_id)
-            .eq("account_type", "checking")
-            .single();
+      // Get user's primary account (checking)
+      const { data: account, error: accountError } = await supabase
+        .from("accounts")
+        .select("*")
+        .eq("user_id", request.user_id)
+        .eq("account_type", "checking")
+        .single();
 
-        if (accountError || !account) {
-            return res.status(404).json({ error: "User account not found" });
-        }
+      if (accountError || !account) {
+        return res.status(404).json({ error: "User account not found" });
+      }
 
-        // Update account balance
-        const newBalance = account.balance + request.amount;
-        await supabase
-            .from("accounts")
-            .update({
-                balance: newBalance,
-                available_balance: newBalance,
-                updated_at: new Date()
-            })
-            .eq("id", account.id);
+      // Update account balance
+      const newBalance = account.balance + request.amount;
+      await supabase
+        .from("accounts")
+        .update({
+          balance: newBalance,
+          available_balance: newBalance,
+          updated_at: new Date(),
+        })
+        .eq("id", account.id);
 
-        // Create transaction record
-        await supabase.from("transactions").insert({
-            to_account_id: account.id,
-            to_user_id: request.user_id,
-            amount: request.amount,
-            description: request.description || `Incoming payment from ${request.country_code} via ${request.method_type}`,
-            transaction_type: "incoming_payment",
-            status: "completed",
-            completed_at: new Date(),
-            is_admin_adjusted: true,
-            admin_note: `Approved by ${req.user.email}`
-        });
+      // Create transaction record
+      await supabase.from("transactions").insert({
+        to_account_id: account.id,
+        to_user_id: request.user_id,
+        amount: request.amount,
+        description:
+          request.description ||
+          `Incoming payment from ${request.country_code} via ${request.method_type}`,
+        transaction_type: "incoming_payment",
+        status: "completed",
+        completed_at: new Date(),
+        is_admin_adjusted: true,
+        admin_note: `Approved by ${req.user.email}`,
+      });
 
-        // Update request status
-        await supabase
-            .from("receive_requests")
-            .update({
-                status: "approved",
-                processed_at: new Date(),
-                processed_by: req.user.id,
-                admin_note: `Approved by ${req.user.email}`
-            })
-            .eq("id", id);
+      // Update request status
+      await supabase
+        .from("receive_requests")
+        .update({
+          status: "approved",
+          processed_at: new Date(),
+          processed_by: req.user.id,
+          admin_note: `Approved by ${req.user.email}`,
+        })
+        .eq("id", id);
 
-        // Send notification to user
-        await supabase.from("notifications").insert({
-            user_id: request.user_id,
-            title: "Payment Received ✅",
-            message: `Your incoming payment of $${request.amount} has been approved and added to your account.`,
-            type: "success",
-            created_at: new Date()
-        });
+      // Send notification to user
+      await supabase.from("notifications").insert({
+        user_id: request.user_id,
+        title: "Payment Received ✅",
+        message: `Your incoming payment of $${request.amount} has been approved and added to your account.`,
+        type: "success",
+        created_at: new Date(),
+      });
 
-        // Log admin action
-        await supabase.from("admin_actions").insert({
-            admin_id: req.user.id,
-            action_type: "approve_receive_request",
-            target_user_id: request.user_id,
-            details: { request_id: id, amount: request.amount }
-        });
+      // Log admin action
+      await supabase.from("admin_actions").insert({
+        admin_id: req.user.id,
+        action_type: "approve_receive_request",
+        target_user_id: request.user_id,
+        details: { request_id: id, amount: request.amount },
+      });
 
-        res.json({ success: true, message: "Request approved and funds added" });
+      res.json({ success: true, message: "Request approved and funds added" });
     } catch (error) {
-        console.error("Approve receive request error:", error);
-        res.status(500).json({ error: "Failed to approve request" });
+      console.error("Approve receive request error:", error);
+      res.status(500).json({ error: "Failed to approve request" });
     }
-});
+  },
+);
 
 // ADMIN: Reject receive request (no credit, just mark)
-app.post("/api/admin/receive-requests/:id/reject", authenticate, authorizeAdmin, async (req, res) => {
+app.post(
+  "/api/admin/receive-requests/:id/reject",
+  authenticate,
+  authorizeAdmin,
+  async (req, res) => {
     try {
-        const { id } = req.params;
-        const { reason } = req.body;
+      const { id } = req.params;
+      const { reason } = req.body;
 
-        const { data: request, error: fetchError } = await supabase
-            .from("receive_requests")
-            .select("*")
-            .eq("id", id)
-            .single();
+      const { data: request, error: fetchError } = await supabase
+        .from("receive_requests")
+        .select("*")
+        .eq("id", id)
+        .single();
 
-        if (fetchError || !request) {
-            return res.status(404).json({ error: "Request not found" });
-        }
+      if (fetchError || !request) {
+        return res.status(404).json({ error: "Request not found" });
+      }
 
-        if (request.status !== "pending") {
-            return res.status(400).json({ error: "Request already processed" });
-        }
+      if (request.status !== "pending") {
+        return res.status(400).json({ error: "Request already processed" });
+      }
 
-        await supabase
-            .from("receive_requests")
-            .update({
-                status: "rejected",
-                processed_at: new Date(),
-                processed_by: req.user.id,
-                admin_note: reason || `Rejected by ${req.user.email}`
-            })
-            .eq("id", id);
+      await supabase
+        .from("receive_requests")
+        .update({
+          status: "rejected",
+          processed_at: new Date(),
+          processed_by: req.user.id,
+          admin_note: reason || `Rejected by ${req.user.email}`,
+        })
+        .eq("id", id);
 
-        // No notification sent per requirement
-        // Log admin action
-        await supabase.from("admin_actions").insert({
-            admin_id: req.user.id,
-            action_type: "reject_receive_request",
-            target_user_id: request.user_id,
-            details: { request_id: id, reason }
-        });
+      // No notification sent per requirement
+      // Log admin action
+      await supabase.from("admin_actions").insert({
+        admin_id: req.user.id,
+        action_type: "reject_receive_request",
+        target_user_id: request.user_id,
+        details: { request_id: id, reason },
+      });
 
-        res.json({ success: true, message: "Request rejected" });
+      res.json({ success: true, message: "Request rejected" });
     } catch (error) {
-        console.error("Reject receive request error:", error);
-        res.status(500).json({ error: "Failed to reject request" });
+      console.error("Reject receive request error:", error);
+      res.status(500).json({ error: "Failed to reject request" });
     }
-});
+  },
+);
+
+// ==================== ADMIN RESET USER PASSWORD ====================
+
+// Helper: generate random password (e.g., 12 characters)
+function generateRandomPassword() {
+  const chars =
+    "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!@#$%^&*";
+  let password = "";
+  for (let i = 0; i < 12; i++) {
+    password += chars.charAt(Math.floor(Math.random() * chars.length));
+  }
+  return password;
+}
+
+app.post(
+  "/api/admin/users/:userId/reset-password",
+  authenticate,
+  authorizeAdmin,
+  async (req, res) => {
+    const { userId } = req.params;
+
+    // Generate temporary password
+    const tempPassword = generateRandomPassword();
+    const hashedPassword = await bcrypt.hash(tempPassword, 10);
+
+    // Update user
+    const { error } = await supabase
+      .from("users")
+      .update({ password_hash: hashedPassword })
+      .eq("id", userId);
+
+    if (error) {
+      console.error("Admin reset password error:", error);
+      return res.status(500).json({ error: "Failed to reset password" });
+    }
+
+    // Get user email
+    const { data: user, error: userError } = await supabase
+      .from("users")
+      .select("email")
+      .eq("id", userId)
+      .single();
+
+    if (user && !userError) {
+      // Send email with new password
+      try {
+        await transporter.sendMail({
+          from: process.env.SMTP_FROM,
+          to: user.email,
+          subject: "Your password has been reset",
+          html: `
+                    <h2>Password Reset by Administrator</h2>
+                    <p>Your password has been reset. Your new temporary password is:</p>
+                    <h3 style="font-size: 24px;">${tempPassword}</h3>
+                    <p>Please log in and change your password immediately.</p>
+                `,
+        });
+      } catch (err) {
+        console.error("Admin reset email error:", err);
+      }
+    }
+
+    // Log admin action
+    await supabase.from("admin_actions").insert({
+      admin_id: req.user.id,
+      action_type: "reset_password",
+      target_user_id: userId,
+      details: { generated_by_admin: true },
+    });
+
+    res.json({
+      message: "Password reset successful. User has been notified via email.",
+    });
+  },
+);
 
 // ==================== ADMIN ROUTES ================
 
 // Get all external transfers (admin)
-app.get("/api/admin/external-transfers", authenticate, authorizeAdmin, async (req, res) => {
+app.get(
+  "/api/admin/external-transfers",
+  authenticate,
+  authorizeAdmin,
+  async (req, res) => {
     try {
-        const { page = 1, limit = 20, status, bank } = req.query;
-        const offset = (page - 1) * limit;
+      const { page = 1, limit = 20, status, bank } = req.query;
+      const offset = (page - 1) * limit;
 
-        let query = supabase
-            .from("external_transfers")
-            .select(`
+      let query = supabase
+        .from("external_transfers")
+        .select(
+          `
                 *,
                 users!external_transfers_user_id_fkey (
                     id,
@@ -3104,215 +3511,237 @@ app.get("/api/admin/external-transfers", authenticate, authorizeAdmin, async (re
                     id,
                     account_number
                 )
-            `, { count: "exact" })
-            .order("created_at", { ascending: false });
+            `,
+          { count: "exact" },
+        )
+        .order("created_at", { ascending: false });
 
-        if (status && status !== "all") {
-            query = query.eq("status", status);
-        }
+      if (status && status !== "all") {
+        query = query.eq("status", status);
+      }
 
-        if (bank && bank !== "all") {
-            query = query.eq("bank_name", bank);
-        }
+      if (bank && bank !== "all") {
+        query = query.eq("bank_name", bank);
+      }
 
-        const { data: transfers, error, count } = await query
-            .range(offset, offset + limit - 1);
+      const {
+        data: transfers,
+        error,
+        count,
+      } = await query.range(offset, offset + limit - 1);
 
-        if (error) throw error;
+      if (error) throw error;
 
-        // Get pending count for badge
-        const { count: pendingCount } = await supabase
-            .from("external_transfers")
-            .select("*", { count: "exact", head: true })
-            .eq("status", "pending");
+      // Get pending count for badge
+      const { count: pendingCount } = await supabase
+        .from("external_transfers")
+        .select("*", { count: "exact", head: true })
+        .eq("status", "pending");
 
-        res.json({
-            transfers: transfers || [],
-            pagination: {
-                page: parseInt(page),
-                limit: parseInt(limit),
-                total: count || 0,
-                pages: Math.ceil((count || 0) / limit)
-            },
-            pendingCount: pendingCount || 0
-        });
+      res.json({
+        transfers: transfers || [],
+        pagination: {
+          page: parseInt(page),
+          limit: parseInt(limit),
+          total: count || 0,
+          pages: Math.ceil((count || 0) / limit),
+        },
+        pendingCount: pendingCount || 0,
+      });
     } catch (error) {
-        console.error("Admin external transfers error:", error);
-        res.status(500).json({ error: "Failed to fetch external transfers" });
+      console.error("Admin external transfers error:", error);
+      res.status(500).json({ error: "Failed to fetch external transfers" });
     }
-});
+  },
+);
 
 // Approve external transfer (admin)
-app.post("/api/admin/external-transfers/:id/approve", authenticate, authorizeAdmin, async (req, res) => {
+app.post(
+  "/api/admin/external-transfers/:id/approve",
+  authenticate,
+  authorizeAdmin,
+  async (req, res) => {
     try {
-        const { id } = req.params;
+      const { id } = req.params;
 
-        // Get the transfer
-        const { data: transfer, error: fetchError } = await supabase
-            .from("external_transfers")
-            .select("*")
-            .eq("id", id)
-            .single();
+      // Get the transfer
+      const { data: transfer, error: fetchError } = await supabase
+        .from("external_transfers")
+        .select("*")
+        .eq("id", id)
+        .single();
 
-        if (fetchError || !transfer) {
-            return res.status(404).json({ error: "Transfer not found" });
-        }
+      if (fetchError || !transfer) {
+        return res.status(404).json({ error: "Transfer not found" });
+      }
 
-        if (transfer.status !== "pending") {
-            return res.status(400).json({ error: "Transfer already processed" });
-        }
+      if (transfer.status !== "pending") {
+        return res.status(400).json({ error: "Transfer already processed" });
+      }
 
-        // Update transfer status to completed
-        const { error: updateError } = await supabase
-            .from("external_transfers")
-            .update({
-                status: "completed",
-                processed_at: new Date().toISOString(),
-                completed_at: new Date().toISOString(),
-                processed_by: req.user.id,
-                admin_note: `Approved by ${req.user.email}`
-            })
-            .eq("id", id);
+      // Update transfer status to completed
+      const { error: updateError } = await supabase
+        .from("external_transfers")
+        .update({
+          status: "completed",
+          processed_at: new Date().toISOString(),
+          completed_at: new Date().toISOString(),
+          processed_by: req.user.id,
+          admin_note: `Approved by ${req.user.email}`,
+        })
+        .eq("id", id);
 
-        if (updateError) throw updateError;
+      if (updateError) throw updateError;
 
-        // Create notification for user
-        await supabase.from("notifications").insert({
-            user_id: transfer.user_id,
-            title: "External Transfer Approved ✅",
-            message: `Your transfer of $${transfer.amount} to ${transfer.bank_name} has been approved and is being processed. Funds will arrive within 2-3 business days.`,
-            type: "success",
-            created_at: new Date().toISOString()
-        });
+      // Create notification for user
+      await supabase.from("notifications").insert({
+        user_id: transfer.user_id,
+        title: "External Transfer Approved ✅",
+        message: `Your transfer of $${transfer.amount} to ${transfer.bank_name} has been approved and is being processed. Funds will arrive within 2-3 business days.`,
+        type: "success",
+        created_at: new Date().toISOString(),
+      });
 
-        res.json({
-            success: true,
-            message: "External transfer approved successfully"
-        });
+      res.json({
+        success: true,
+        message: "External transfer approved successfully",
+      });
     } catch (error) {
-        console.error("Approve external transfer error:", error);
-        res.status(500).json({ error: "Failed to approve transfer" });
+      console.error("Approve external transfer error:", error);
+      res.status(500).json({ error: "Failed to approve transfer" });
     }
-});
+  },
+);
 
 // Reject external transfer (admin) - REFUNDS THE USER
-app.post("/api/admin/external-transfers/:id/reject", authenticate, authorizeAdmin, async (req, res) => {
+app.post(
+  "/api/admin/external-transfers/:id/reject",
+  authenticate,
+  authorizeAdmin,
+  async (req, res) => {
     try {
-        const { id } = req.params;
-        const { reason } = req.body;
+      const { id } = req.params;
+      const { reason } = req.body;
 
-        // Get the transfer
-        const { data: transfer, error: fetchError } = await supabase
-            .from("external_transfers")
-            .select("*")
-            .eq("id", id)
-            .single();
+      // Get the transfer
+      const { data: transfer, error: fetchError } = await supabase
+        .from("external_transfers")
+        .select("*")
+        .eq("id", id)
+        .single();
 
-        if (fetchError || !transfer) {
-            return res.status(404).json({ error: "Transfer not found" });
-        }
+      if (fetchError || !transfer) {
+        return res.status(404).json({ error: "Transfer not found" });
+      }
 
-        if (transfer.status !== "pending") {
-            return res.status(400).json({ error: "Transfer already processed" });
-        }
+      if (transfer.status !== "pending") {
+        return res.status(400).json({ error: "Transfer already processed" });
+      }
 
-        // REFUND THE USER - Add money back to their account
-        const { data: account, error: accountError } = await supabase
-            .from("accounts")
-            .select("*")
-            .eq("id", transfer.from_account_id)
-            .single();
+      // REFUND THE USER - Add money back to their account
+      const { data: account, error: accountError } = await supabase
+        .from("accounts")
+        .select("*")
+        .eq("id", transfer.from_account_id)
+        .single();
 
-        if (!accountError && account) {
-            await supabase
-                .from("accounts")
-                .update({
-                    balance: account.balance + transfer.amount,
-                    available_balance: account.available_balance + transfer.amount,
-                    updated_at: new Date().toISOString()
-                })
-                .eq("id", transfer.from_account_id);
+      if (!accountError && account) {
+        await supabase
+          .from("accounts")
+          .update({
+            balance: account.balance + transfer.amount,
+            available_balance: account.available_balance + transfer.amount,
+            updated_at: new Date().toISOString(),
+          })
+          .eq("id", transfer.from_account_id);
 
-            // Create refund transaction record
-            await supabase.from("transactions").insert({
-                to_account_id: transfer.from_account_id,
-                to_user_id: transfer.user_id,
-                amount: transfer.amount,
-                description: `Refund: External transfer to ${transfer.bank_name} was rejected. Reason: ${reason || "Not specified"}`,
-                transaction_type: "refund",
-                status: "completed",
-                completed_at: new Date().toISOString(),
-                is_admin_adjusted: true,
-                admin_note: `Rejected by ${req.user.email}. Refunded.`
-            });
-        }
-
-        // Update transfer status to rejected
-        const { error: updateError } = await supabase
-            .from("external_transfers")
-            .update({
-                status: "rejected",
-                processed_at: new Date().toISOString(),
-                processed_by: req.user.id,
-                admin_note: reason || `Rejected by ${req.user.email}`
-            })
-            .eq("id", id);
-
-        if (updateError) throw updateError;
-
-        // Create notification for user about rejection and refund
-        await supabase.from("notifications").insert({
-            user_id: transfer.user_id,
-            title: "External Transfer Rejected ❌",
-            message: `Your transfer of $${transfer.amount} to ${transfer.bank_name} was rejected. Reason: ${reason || "Not specified"}. Funds have been refunded to your account.`,
-            type: "error",
-            created_at: new Date().toISOString()
+        // Create refund transaction record
+        await supabase.from("transactions").insert({
+          to_account_id: transfer.from_account_id,
+          to_user_id: transfer.user_id,
+          amount: transfer.amount,
+          description: `Refund: External transfer to ${transfer.bank_name} was rejected. Reason: ${reason || "Not specified"}`,
+          transaction_type: "refund",
+          status: "completed",
+          completed_at: new Date().toISOString(),
+          is_admin_adjusted: true,
+          admin_note: `Rejected by ${req.user.email}. Refunded.`,
         });
+      }
 
-        res.json({
-            success: true,
-            message: "External transfer rejected and funds refunded"
-        });
+      // Update transfer status to rejected
+      const { error: updateError } = await supabase
+        .from("external_transfers")
+        .update({
+          status: "rejected",
+          processed_at: new Date().toISOString(),
+          processed_by: req.user.id,
+          admin_note: reason || `Rejected by ${req.user.email}`,
+        })
+        .eq("id", id);
+
+      if (updateError) throw updateError;
+
+      // Create notification for user about rejection and refund
+      await supabase.from("notifications").insert({
+        user_id: transfer.user_id,
+        title: "External Transfer Rejected ❌",
+        message: `Your transfer of $${transfer.amount} to ${transfer.bank_name} was rejected. Reason: ${reason || "Not specified"}. Funds have been refunded to your account.`,
+        type: "error",
+        created_at: new Date().toISOString(),
+      });
+
+      res.json({
+        success: true,
+        message: "External transfer rejected and funds refunded",
+      });
     } catch (error) {
-        console.error("Reject external transfer error:", error);
-        res.status(500).json({ error: "Failed to reject transfer" });
+      console.error("Reject external transfer error:", error);
+      res.status(500).json({ error: "Failed to reject transfer" });
     }
-});
+  },
+);
 
 // Get external transfer stats for admin dashboard
-app.get("/api/admin/external-transfers/stats", authenticate, authorizeAdmin, async (req, res) => {
+app.get(
+  "/api/admin/external-transfers/stats",
+  authenticate,
+  authorizeAdmin,
+  async (req, res) => {
     try {
-        // Get counts by status
-        const { data: statusCounts } = await supabase
-            .from("external_transfers")
-            .select("status, count")
-            .select("status", { count: "exact", head: false });
+      // Get counts by status
+      const { data: statusCounts } = await supabase
+        .from("external_transfers")
+        .select("status, count")
+        .select("status", { count: "exact", head: false });
 
-        // Get total volume
-        const { data: volumeData } = await supabase
-            .from("external_transfers")
-            .select("amount")
-            .eq("status", "completed");
+      // Get total volume
+      const { data: volumeData } = await supabase
+        .from("external_transfers")
+        .select("amount")
+        .eq("status", "completed");
 
-        const totalVolume = volumeData?.reduce((sum, t) => sum + t.amount, 0) || 0;
+      const totalVolume =
+        volumeData?.reduce((sum, t) => sum + t.amount, 0) || 0;
 
-        // Get pending count
-        const { count: pendingCount } = await supabase
-            .from("external_transfers")
-            .select("*", { count: "exact", head: true })
-            .eq("status", "pending");
+      // Get pending count
+      const { count: pendingCount } = await supabase
+        .from("external_transfers")
+        .select("*", { count: "exact", head: true })
+        .eq("status", "pending");
 
-        res.json({
-            pending: pendingCount || 0,
-            completed: volumeData?.length || 0,
-            totalVolume: totalVolume,
-            averageAmount: volumeData?.length ? totalVolume / volumeData.length : 0
-        });
+      res.json({
+        pending: pendingCount || 0,
+        completed: volumeData?.length || 0,
+        totalVolume: totalVolume,
+        averageAmount: volumeData?.length ? totalVolume / volumeData.length : 0,
+      });
     } catch (error) {
-        console.error("Error fetching external transfer stats:", error);
-        res.status(500).json({ error: "Failed to fetch stats" });
+      console.error("Error fetching external transfer stats:", error);
+      res.status(500).json({ error: "Failed to fetch stats" });
     }
-});
+  },
+);
 
 // ==================== ADMIN ROUTES ================
 
@@ -3943,7 +4372,8 @@ app.post(
   async (req, res) => {
     try {
       const { userId } = req.params;
-      const { freeze, reason, unfreeze_method, unfreeze_payment_details } = req.body;
+      const { freeze, reason, unfreeze_method, unfreeze_payment_details } =
+        req.body;
 
       const updates = {
         is_frozen: freeze,
