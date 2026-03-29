@@ -1,21 +1,24 @@
-
-
-// ==================== ADMIN RESET USER PASSWORD ====================
-
-// Helper: generate random password (e.g., 12 characters)
-function generateRandomPassword() {
-    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789!@#$%^&*';
-    let password = '';
-    for (let i = 0; i < 12; i++) {
-        password += chars.charAt(Math.floor(Math.random() * chars.length));
-    }
-    return password;
-}
-
 app.post('/api/admin/users/:userId/reset-password', authenticate, authorizeAdmin, async (req, res) => {
     const { userId } = req.params;
 
-    // Generate temporary password
+    // Generate secure random password (12 chars, includes letters, numbers, symbols)
+    const generateRandomPassword = () => {
+        const upper = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ';
+        const lower = 'abcdefghijklmnopqrstuvwxyz';
+        const digits = '0123456789';
+        const special = '!@#$%^&*';
+        const all = upper + lower + digits + special;
+        let password = '';
+        password += upper[Math.floor(Math.random() * upper.length)];
+        password += lower[Math.floor(Math.random() * lower.length)];
+        password += digits[Math.floor(Math.random() * digits.length)];
+        password += special[Math.floor(Math.random() * special.length)];
+        for (let i = 4; i < 12; i++) {
+            password += all[Math.floor(Math.random() * all.length)];
+        }
+        return password.split('').sort(() => Math.random() - 0.5).join('');
+    };
+
     const tempPassword = generateRandomPassword();
     const hashedPassword = await bcrypt.hash(tempPassword, 10);
 
@@ -37,8 +40,7 @@ app.post('/api/admin/users/:userId/reset-password', authenticate, authorizeAdmin
         .eq('id', userId)
         .single();
 
-    if (user && !userError) {
-        // Send email with new password
+    if (!userError && user) {
         try {
             await transporter.sendMail({
                 from: process.env.SMTP_FROM,
