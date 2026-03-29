@@ -279,7 +279,7 @@ app.post("/api/auth/login", async (req, res) => {
 // ==================== FORGOT PASSWORD ROUTES ====================
 
 // Step 1: Request OTP
-app.post("/api/auth/forgot-password", async (req, res) => {
+/*app.post("/api/auth/forgot-password", async (req, res) => {
   const { email } = req.body;
   if (!email) return res.status(400).json({ error: "Email required" });
 
@@ -332,7 +332,7 @@ app.post("/api/auth/forgot-password", async (req, res) => {
   }
 
   res.json({ message: "Reset code sent to your email" });
-});
+});*/
 
 // Step 2: Verify OTP
 /*app.post("/api/auth/verify-reset-otp", async (req, res) => {
@@ -355,43 +355,133 @@ app.post("/api/auth/forgot-password", async (req, res) => {
   res.json({ valid: true });
 });*/
 
-app.post("/api/auth/verify-reset-otp", async (req, res) => {
-  const { email, otp } = req.body;
-  if (!email || !otp) {
-    return res.status(400).json({ error: "Email and code required" });
-  }
+// Step 1: Request OTP
+app.post('/api/auth/forgot-password', async (req, res) => {
+    const { email } = req.body;
+    if (!email) return res.status(400).json({ error: 'Email required' });
 
-  const normalizedEmail = email.trim().toLowerCase();
-  const normalizedOtp = otp.trim();
+    const normalizedEmail = email.trim().toLowerCase();
 
-  const { data: record, error } = await supabase
-    .from("password_resets")
-    .select("*")
-    .eq("email", normalizedEmail)
-    .eq("otp", normalizedOtp)
-    .eq("used", false)
-    .single();
+    // Check if user exists (but don't reveal)
+    const { data: user } = await supabase
+        .from('users')
+        .select('id')
+        .eq('email', normalizedEmail)
+        .single();
 
-  if (error || !record) {
-    console.error("OTP lookup error:", error);
-    return res.status(400).json({ error: "Invalid or expired code" });
-  }
+    // Always return success to prevent email enumeration
+    if (!user) {
+        return res.json({ message: 'If your email is registered, you will receive a reset code.' });
+    }
 
-  if (new Date(record.expires_at) < new Date()) {
-    return res.status(400).json({ error: "Code has expired" });
-  }
+    // Generate 6-digit OTP
+    const otp = Math.floor(100000 + Math.random() * 900000).toString();
+    const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
 
-  // Mark as used immediately (prevents reuse)
-  await supabase
-    .from("password_resets")
-    .update({ used: true })
-    .eq("id", record.id);
+    // Delete any existing OTP for this email (prev conflicts)
+    await supabase.from('password_resets').delete().eq('email', normalizedEmail);
 
-  res.json({ valid: true });
+    // Insert new OTP
+    const { error: insertError } = await supabase.from('password_resets').insert({
+        email: normalizedEmail,
+        otp,
+        expires_at: expiresAt.toISOString(),
+        used: false
+    });
+
+    if (insertError) {
+        console.error('Insert OTP error:', insertError);
+        return res.status(500).json({ error: 'Failed to generate reset code' });
+    }
+
+    // Send email
+    try {
+        await transporter.sendMail({
+            from: process.env.SMTP_FROM,
+            to: normalizedEmail,
+            subject: 'Password Reset Code',
+            html: `<h2>Your OTP: ${otp}</h2><p>Valid for 10 minutes.</p>`
+        });
+    } catch (err) {
+        console.error('Email error:', err);
+        return res.status(500).json({ error: 'Failed to send email' });
+    }
+
+    res.json({ message: 'Reset code sent to your email' });
+});
+// Step 2: Verify OTP
+app.post('/api/auth/verify-reset-otp', async (req, res) => {
+    const { email, otp } = req.body;
+    if (!email || !otp) return res.status(400).json({ error: 'Email and code required' });
+
+    const normalizedEmail = email.trim().toLowerCase();
+    const normalizedOtp = otp.trim();
+
+    const { data: record, error } = await supabase
+        .from('password_resets')
+        .select('*')
+        .eq('email', normalizedEmail)
+        .eq('otp', normalizedOtp)
+        .eq('used', false)
+        .single();
+
+    if (error || !record) {
+        console.error('OTP lookup error:', error);
+        return res.status(400).json({ error: 'Invalid or expired code' });
+    }
+
+    if (new Date(record.expires_at) < new Date()) {
+        return res.status(400).json({ error: 'Code has expired' });
+    }
+
+    // Mark as used immediately
+    await supabase.from('password_resets').update({ used: true }).eq('id', record.id);
+
+    res.json({ valid: true });
+});
+
+
+app.post('/api/auth/reset-password', async (req, res) => {
+    const { email, otp, new_password } = req.body;
+    if (!email || !otp || !new_password) {
+        return res.status(400).json({ error: 'All fields required' });
+    }
+
+    const normalizedEmail = email.trim().toLowerCase();
+    const normalizedOtp = otp.trim();
+
+    // Verify OTP again (must be used = true from previous step)
+    const { data: record, error } = await supabase
+        .from('password_resets')
+        .select('*')
+        .eq('email', normalizedEmail)
+        .eq('otp', normalizedOtp)
+        .eq('used', true)
+        .single();
+
+    if (error || !record || new Date(record.expires_at) < new Date()) {
+        return res.status(400).json({ error: 'Invalid or expired reset session' });
+    }
+
+    const hashedPassword = await bcrypt.hash(new_password, 10);
+    const { error: updateError } = await supabase
+        .from('users')
+        .update({ password_hash: hashedPassword })
+        .eq('email', normalizedEmail);
+
+    if (updateError) {
+        console.error('Password update error:', updateError);
+        return res.status(500).json({ error: 'Failed to update password' });
+    }
+
+    // Delete the used OTP record
+    await supabase.from('password_resets').delete().eq('id', record.id);
+
+    res.json({ message: 'Password reset successful' });
 });
 
 // Step 3: Reset password with OTP
-app.post("/api/auth/reset-password", async (req, res) => {
+/*app.post("/api/auth/reset-password", async (req, res) => {
   const { email, otp, new_password } = req.body;
   if (!email || !otp || !new_password)
     return res.status(400).json({ error: "All fields required" });
@@ -431,7 +521,7 @@ app.post("/api/auth/reset-password", async (req, res) => {
     .eq("otp", otp);
 
   res.json({ message: "Password reset successful" });
-});
+});*/
 
 // Verify 2FA
 app.post("/api/auth/verify-2fa", async (req, res) => {
