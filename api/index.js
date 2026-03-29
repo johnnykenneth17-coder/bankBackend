@@ -5760,6 +5760,8 @@ const createDefaultAdmin = async () => {
   }
 };
 
+
+
 createDefaultAdmin();
 
 // Add this instead (required for Vercel)
