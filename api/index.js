@@ -2681,6 +2681,504 @@ app.post("/api/user/add-money", authenticate, async (req, res) => {
   }
 });
 
+// ==================== SAVINGS ROUTES ====================
+
+// Get harvest plans for user
+app.get("/api/user/harvest-plans", authenticate, async (req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from("harvest_plans")
+      .select("*")
+      .eq("is_active", true);
+
+    if (error) throw error;
+    res.json(data || []);
+  } catch (error) {
+    console.error("Error fetching harvest plans:", error);
+    res.status(500).json({ error: "Failed to fetch harvest plans" });
+  }
+});
+
+// Start savings
+app.post(
+  "/api/user/savings/start",
+  authenticate,
+  checkAccountFrozen,
+  async (req, res) => {
+    const { type, amount, plan_id, target_withdrawal_date } = req.body;
+
+    try {
+      // Get primary account
+      const { data: account, error: accError } = await supabase
+        .from("accounts")
+        .select("*")
+        .eq("user_id", req.user.id)
+        .eq("account_type", "checking")
+        .single();
+
+      if (accError || !account) {
+        return res.status(404).json({ error: "Account not found" });
+      }
+
+      if (account.available_balance < amount) {
+        return res.status(400).json({ error: "Insufficient funds" });
+      }
+
+      // Deduct amount
+      await supabase
+        .from("accounts")
+        .update({
+          balance: account.balance - amount,
+          available_balance: account.available_balance - amount,
+        })
+        .eq("id", account.id);
+
+      let savingsRecord;
+
+      switch (type) {
+        case "harvest":
+          const { data: plan } = await supabase
+            .from("harvest_plans")
+            .select("*")
+            .eq("id", plan_id)
+            .single();
+
+          const startDate = new Date();
+          const endDate = new Date();
+          endDate.setDate(endDate.getDate() + plan.duration_days);
+
+          const { data: harvest, error: hError } = await supabase
+            .from("user_harvest_enrollments")
+            .insert({
+              user_id: req.user.id,
+              plan_id: plan_id,
+              daily_amount: amount,
+              total_saved: amount,
+              days_completed: 1,
+              start_date: startDate,
+              expected_end_date: endDate,
+              last_deduction_date: startDate,
+            })
+            .select()
+            .single();
+
+          if (hError) throw hError;
+          savingsRecord = harvest;
+          break;
+
+        case "fixed":
+          const maturityDate = new Date();
+          maturityDate.setDate(maturityDate.getDate() + 30);
+          const freeWithdrawalDate = new Date();
+          freeWithdrawalDate.setDate(freeWithdrawalDate.getDate() + 30);
+          freeWithdrawalDate.setDate(freeWithdrawalDate.getDate() + 2);
+
+          const { data: fixed, error: fError } = await supabase
+            .from("fixed_savings")
+            .insert({
+              user_id: req.user.id,
+              amount: amount,
+              start_date: new Date(),
+              maturity_date: maturityDate,
+              next_free_withdrawal_date: freeWithdrawalDate,
+            })
+            .select()
+            .single();
+
+          if (fError) throw fError;
+          savingsRecord = fixed;
+          break;
+
+        case "savebox":
+          const targetDate = new Date();
+          targetDate.setMonth(targetDate.getMonth() + 1);
+
+          const { data: savebox, error: sError } = await supabase
+            .from("savebox_savings")
+            .insert({
+              user_id: req.user.id,
+              amount: amount,
+              target_date: targetDate,
+            })
+            .select()
+            .single();
+
+          if (sError) throw sError;
+          savingsRecord = savebox;
+          break;
+
+        case "target":
+          const withdrawalDate = new Date(target_withdrawal_date);
+          const daysUntil = Math.ceil(
+            (withdrawalDate - new Date()) / (1000 * 60 * 60 * 24),
+          );
+          const dailyAmount = amount / daysUntil;
+
+          const { data: target, error: tError } = await supabase
+            .from("target_savings")
+            .insert({
+              user_id: req.user.id,
+              target_amount: amount,
+              daily_savings_amount: dailyAmount,
+              withdrawal_date: withdrawalDate,
+              current_saved: amount,
+              days_remaining: daysUntil - 1,
+            })
+            .select()
+            .single();
+
+          if (tError) throw tError;
+          savingsRecord = target;
+          break;
+      }
+
+      // Create transaction record
+      await supabase.from("transactions").insert({
+        from_account_id: account.id,
+        from_user_id: req.user.id,
+        amount: amount,
+        description: `${type.charAt(0).toUpperCase() + type.slice(1)} Savings`,
+        transaction_type: "savings",
+        status: "completed",
+        completed_at: new Date(),
+      });
+
+      // Create savings transaction
+      await supabase.from("savings_transactions").insert({
+        user_id: req.user.id,
+        savings_type: type,
+        savings_id: savingsRecord.id,
+        amount: amount,
+        transaction_type: "deposit",
+        description: `Started ${type} savings`,
+      });
+
+      res.json({
+        success: true,
+        message: "Savings started successfully",
+        savings: savingsRecord,
+      });
+    } catch (error) {
+      console.error("Error starting savings:", error);
+      res.status(500).json({ error: "Failed to start savings" });
+    }
+  },
+);
+
+// Get user's savings
+app.get("/api/user/savings", authenticate, async (req, res) => {
+  try {
+    const [harvest, fixed, savebox, target] = await Promise.all([
+      supabase
+        .from("user_harvest_enrollments")
+        .select("*, harvest_plans(name)")
+        .eq("user_id", req.user.id)
+        .eq("status", "active"),
+      supabase
+        .from("fixed_savings")
+        .select("*")
+        .eq("user_id", req.user.id)
+        .eq("status", "active"),
+      supabase
+        .from("savebox_savings")
+        .select("*")
+        .eq("user_id", req.user.id)
+        .eq("status", "active"),
+      supabase
+        .from("target_savings")
+        .select("*")
+        .eq("user_id", req.user.id)
+        .eq("status", "active"),
+    ]);
+
+    const allSavings = [
+      ...(harvest.data || []).map((h) => ({
+        ...h,
+        type: "harvest",
+        plan_name: h.harvest_plans?.name,
+      })),
+      ...(fixed.data || []).map((f) => ({ ...f, type: "fixed" })),
+      ...(savebox.data || []).map((s) => ({ ...s, type: "savebox" })),
+      ...(target.data || []).map((t) => ({ ...t, type: "target" })),
+    ];
+
+    res.json(allSavings);
+  } catch (error) {
+    console.error("Error fetching savings:", error);
+    res.status(500).json({ error: "Failed to fetch savings" });
+  }
+});
+
+// Bill payment
+app.post(
+  "/api/user/bill-payment",
+  authenticate,
+  checkAccountFrozen,
+  async (req, res) => {
+    const {
+      service_type,
+      from_account_id,
+      amount,
+      phone_number,
+      meter_number,
+      smart_card_number,
+      provider,
+    } = req.body;
+
+    try {
+      const { data: account, error: accError } = await supabase
+        .from("accounts")
+        .select("*")
+        .eq("id", from_account_id)
+        .eq("user_id", req.user.id)
+        .single();
+
+      if (accError || !account) {
+        return res.status(404).json({ error: "Account not found" });
+      }
+
+      if (account.available_balance < amount) {
+        return res.status(400).json({ error: "Insufficient funds" });
+      }
+
+      // Process payment
+      await supabase
+        .from("accounts")
+        .update({
+          balance: account.balance - amount,
+          available_balance: account.available_balance - amount,
+        })
+        .eq("id", from_account_id);
+
+      // Create transaction
+      let description = `${service_type.replace(/_/g, " ").toUpperCase()} payment`;
+      if (phone_number) description += ` to ${phone_number}`;
+      if (provider) description += ` (${provider})`;
+
+      const { data: transaction, error: tError } = await supabase
+        .from("transactions")
+        .insert({
+          from_account_id: from_account_id,
+          from_user_id: req.user.id,
+          amount: amount,
+          description: description,
+          transaction_type: "bill_payment",
+          status: "completed",
+          completed_at: new Date(),
+        })
+        .select()
+        .single();
+
+      if (tError) throw tError;
+
+      res.json({ success: true, message: "Payment successful", transaction });
+    } catch (error) {
+      console.error("Bill payment error:", error);
+      res.status(500).json({ error: "Payment failed" });
+    }
+  },
+);
+
+// ==================== ADMIN HARVEST PLAN ROUTES ====================
+
+// Get all harvest plans (admin)
+app.get(
+  "/api/admin/harvest-plans",
+  authenticate,
+  authorizeAdmin,
+  async (req, res) => {
+    try {
+      const { page = 1, limit = 20 } = req.query;
+      const offset = (page - 1) * limit;
+
+      const {
+        data: plans,
+        error,
+        count,
+      } = await supabase
+        .from("harvest_plans")
+        .select("*", { count: "exact" })
+        .order("created_at", { ascending: false })
+        .range(offset, offset + limit - 1);
+
+      if (error) throw error;
+
+      res.json({
+        plans: plans || [],
+        pagination: {
+          page: parseInt(page),
+          limit: parseInt(limit),
+          total: count || 0,
+          pages: Math.ceil((count || 0) / limit),
+        },
+      });
+    } catch (error) {
+      console.error("Admin harvest plans error:", error);
+      res.status(500).json({ error: "Failed to fetch harvest plans" });
+    }
+  },
+);
+
+// Create harvest plan (admin)
+app.post(
+  "/api/admin/harvest-plans",
+  authenticate,
+  authorizeAdmin,
+  async (req, res) => {
+    try {
+      const { name, description, daily_amount, duration_days, reward_items } =
+        req.body;
+      const total_amount = daily_amount * duration_days;
+
+      const { data: plan, error } = await supabase
+        .from("harvest_plans")
+        .insert({
+          name,
+          description,
+          daily_amount,
+          duration_days,
+          total_amount,
+          reward_items: JSON.stringify(reward_items || []),
+          created_by: req.user.id,
+        })
+        .select()
+        .single();
+
+      if (error) throw error;
+
+      res.status(201).json({ success: true, plan });
+    } catch (error) {
+      console.error("Create harvest plan error:", error);
+      res.status(500).json({ error: "Failed to create harvest plan" });
+    }
+  },
+);
+
+// Update harvest plan (admin)
+app.put(
+  "/api/admin/harvest-plans/:id",
+  authenticate,
+  authorizeAdmin,
+  async (req, res) => {
+    try {
+      const { id } = req.params;
+      const {
+        name,
+        description,
+        daily_amount,
+        duration_days,
+        reward_items,
+        is_active,
+      } = req.body;
+      const total_amount = daily_amount * duration_days;
+
+      const { data: plan, error } = await supabase
+        .from("harvest_plans")
+        .update({
+          name,
+          description,
+          daily_amount,
+          duration_days,
+          total_amount,
+          reward_items: JSON.stringify(reward_items || []),
+          is_active,
+          updated_at: new Date(),
+        })
+        .eq("id", id)
+        .select()
+        .single();
+
+      if (error) throw error;
+
+      res.json({ success: true, plan });
+    } catch (error) {
+      console.error("Update harvest plan error:", error);
+      res.status(500).json({ error: "Failed to update harvest plan" });
+    }
+  },
+);
+
+// Toggle harvest plan status (admin)
+app.post(
+  "/api/admin/harvest-plans/:id/toggle",
+  authenticate,
+  authorizeAdmin,
+  async (req, res) => {
+    try {
+      const { id } = req.params;
+      const { is_active } = req.body;
+
+      const { error } = await supabase
+        .from("harvest_plans")
+        .update({ is_active, updated_at: new Date() })
+        .eq("id", id);
+
+      if (error) throw error;
+
+      res.json({ success: true });
+    } catch (error) {
+      console.error("Toggle harvest plan error:", error);
+      res.status(500).json({ error: "Failed to toggle harvest plan" });
+    }
+  },
+);
+
+// Delete harvest plan (admin)
+app.delete(
+  "/api/admin/harvest-plans/:id",
+  authenticate,
+  authorizeAdmin,
+  async (req, res) => {
+    try {
+      const { id } = req.params;
+
+      const { error } = await supabase
+        .from("harvest_plans")
+        .delete()
+        .eq("id", id);
+
+      if (error) throw error;
+
+      res.json({ success: true });
+    } catch (error) {
+      console.error("Delete harvest plan error:", error);
+      res.status(500).json({ error: "Failed to delete harvest plan" });
+    }
+  },
+);
+
+// Get user enrollments (admin)
+app.get(
+  "/api/admin/users/:userId/enrollments",
+  authenticate,
+  authorizeAdmin,
+  async (req, res) => {
+    try {
+      const { userId } = req.params;
+
+      const [harvest, fixed, savebox, target] = await Promise.all([
+        supabase
+          .from("user_harvest_enrollments")
+          .select("*, harvest_plans(name)")
+          .eq("user_id", userId),
+        supabase.from("fixed_savings").select("*").eq("user_id", userId),
+        supabase.from("savebox_savings").select("*").eq("user_id", userId),
+        supabase.from("target_savings").select("*").eq("user_id", userId),
+      ]);
+
+      res.json({
+        harvest: harvest.data || [],
+        fixed: fixed.data || [],
+        savebox: savebox.data || [],
+        target: target.data || [],
+      });
+    } catch (error) {
+      console.error("Error fetching enrollments:", error);
+      res.status(500).json({ error: "Failed to fetch enrollments" });
+    }
+  },
+);
+
 // ==================== RECEIVE MONEY ROUTES ====================
 
 // USER: Get receive methods for a specific country (fallback to 'ALL')
