@@ -759,7 +759,7 @@ app.get(
 );
 
 // Transfer money
-app.post(
+/*app.post(
   "/api/user/transfer",
   authenticate,
   checkAccountFrozen,
@@ -830,6 +830,8 @@ app.post(
       if (toUser?.is_frozen) {
         return res.status(400).json({ error: "Destination account is frozen" });
       }
+
+      const transactionId = `TXN${Date.now()}${Math.floor(Math.random() * 1000)}`;
 
       // Create transaction
       const transactionData = {
@@ -918,7 +920,355 @@ app.post(
       res.status(500).json({ error: "Transfer failed" });
     }
   },
+);*/
+
+// Transfer money - COMPLETE FIXED VERSION with double-entry ledger
+app.post(
+  "/api/user/transfer",
+  authenticate,
+  checkAccountFrozen,
+  async (req, res) => {
+    try {
+      const {
+        from_account_id,
+        to_account_number,
+        amount,
+        description,
+        requires_otp = true,
+      } = req.body;
+
+      console.log("=== TRANSFER REQUEST ===");
+      console.log("From Account:", from_account_id);
+      console.log("To Account Number:", to_account_number);
+      console.log("Amount:", amount);
+      console.log("User ID:", req.user.id);
+
+      // Validate amount
+      if (!amount || amount <= 0) {
+        return res.status(400).json({ error: "Invalid amount" });
+      }
+
+      // Check if OTP is required globally
+      const { data: settings } = await supabase
+        .from("admin_settings")
+        .select("setting_value")
+        .eq("setting_key", "otp_mode")
+        .single();
+
+      const otpMode = settings?.setting_value === "on";
+
+      // Get source account
+      const { data: fromAccount, error: fromError } = await supabase
+        .from("accounts")
+        .select("*")
+        .eq("id", from_account_id)
+        .eq("user_id", req.user.id)
+        .single();
+
+      if (fromError || !fromAccount) {
+        console.error("Source account error:", fromError);
+        return res.status(404).json({ error: "Source account not found" });
+      }
+
+      console.log("Source account balance:", fromAccount.available_balance);
+
+      // Check balance
+      if (fromAccount.available_balance < amount) {
+        return res.status(400).json({ error: "Insufficient funds" });
+      }
+
+      // Get destination account
+      const { data: toAccount, error: toError } = await supabase
+        .from("accounts")
+        .select("*, users!inner(id, first_name, last_name, email, is_frozen)")
+        .eq("account_number", to_account_number)
+        .single();
+
+      if (toError || !toAccount) {
+        console.error("Destination account error:", toError);
+        return res.status(404).json({ error: "Destination account not found" });
+      }
+
+      console.log("Destination account found:", toAccount.account_number);
+
+      // PREVENT SELF-TRANSFER
+      if (toAccount.user_id === req.user.id) {
+        return res.status(400).json({
+          error:
+            "Cannot transfer money to your own account. Please use a different recipient account.",
+        });
+      }
+
+      // Check if destination account is frozen
+      if (toAccount.users?.is_frozen) {
+        return res.status(400).json({ error: "Destination account is frozen" });
+      }
+
+      // Calculate fee (0.5% for internal transfers, min $0.50, max $10)
+      let feeAmount = amount * 0.005;
+      feeAmount = Math.min(Math.max(feeAmount, 0.5), 10);
+      const transferAmount = amount;
+      const totalDeduction = transferAmount + feeAmount;
+
+      // Check balance with fee
+      if (fromAccount.available_balance < totalDeduction) {
+        return res.status(400).json({
+          error: `Insufficient funds. Amount: $${amount} + Fee: $${feeAmount.toFixed(2)} = $${totalDeduction.toFixed(2)}`,
+        });
+      }
+
+      // Generate transaction ID
+      const transactionId = `TXN${Date.now()}${Math.floor(Math.random() * 1000)}`;
+
+      // Create transaction record
+      const transactionData = {
+        transaction_id: transactionId,
+        from_account_id,
+        to_account_id: toAccount.id,
+        from_user_id: req.user.id,
+        to_user_id: toAccount.user_id,
+        amount: transferAmount,
+        fee_amount: feeAmount,
+        description: description || `Transfer to ${toAccount.account_number}`,
+        transaction_type: "transfer",
+        status: "pending",
+        created_at: new Date().toISOString(),
+      };
+
+      if (otpMode && requires_otp) {
+        transactionData.requires_otp = true;
+
+        const { data: transaction, error: txError } = await supabase
+          .from("transactions")
+          .insert(transactionData)
+          .select()
+          .single();
+
+        if (txError) throw txError;
+
+        // Generate OTP
+        const otpCode = Math.floor(100000 + Math.random() * 900000).toString();
+        const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
+
+        await supabase.from("otps").insert({
+          user_id: req.user.id,
+          transaction_id: transaction.id,
+          otp_code: otpCode,
+          otp_type: "transfer",
+          expires_at: expiresAt,
+        });
+
+        // Send OTP via email (optional)
+        try {
+          const { data: user } = await supabase
+            .from("users")
+            .select("email")
+            .eq("id", req.user.id)
+            .single();
+
+          if (user?.email) {
+            await transporter.sendMail({
+              from: process.env.SMTP_FROM,
+              to: user.email,
+              subject: "Your Transfer OTP Code",
+              html: `<h2>OTP Code: ${otpCode}</h2><p>Use this code to complete your transfer of $${amount}.</p><p>Valid for 10 minutes.</p>`,
+            });
+          }
+        } catch (emailError) {
+          console.error("Failed to send OTP email:", emailError);
+        }
+
+        return res.json({
+          message: "OTP required to complete transfer",
+          requires_otp: true,
+          transaction_id: transaction.id,
+        });
+      }
+
+      // Process transfer immediately (no OTP required)
+      transactionData.status = "completed";
+      transactionData.completed_at = new Date().toISOString();
+
+      const { data: transaction, error: txError } = await supabase
+        .from("transactions")
+        .insert(transactionData)
+        .select()
+        .single();
+
+      if (txError) throw txError;
+
+      // Update sender's balance
+      const newSenderBalance = fromAccount.balance - totalDeduction;
+      const newSenderAvailable = fromAccount.available_balance - totalDeduction;
+
+      const { error: updateSenderError } = await supabase
+        .from("accounts")
+        .update({
+          balance: newSenderBalance,
+          available_balance: newSenderAvailable,
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", from_account_id);
+
+      if (updateSenderError) throw updateSenderError;
+
+      // Update receiver's balance
+      const newReceiverBalance = toAccount.balance + transferAmount;
+      const newReceiverAvailable = toAccount.available_balance + transferAmount;
+
+      const { error: updateReceiverError } = await supabase
+        .from("accounts")
+        .update({
+          balance: newReceiverBalance,
+          available_balance: newReceiverAvailable,
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", toAccount.id);
+
+      if (updateReceiverError) throw updateReceiverError;
+
+      // ==================== LEDGER ENTRIES ====================
+
+      // Process double-entry for transfer
+      await processDoubleEntry(
+        transaction,
+        req.user,
+        fromAccount,
+        toAccount,
+        transferAmount,
+        description,
+        "transfer",
+        feeAmount,
+      );
+
+      // Update single ledger for sender (Debit)
+      await updateSingleLedger(
+        fromAccount.id,
+        req.user.id,
+        totalDeduction,
+        "transfer",
+        `Transfer to ${toAccount.account_number} (${toAccount.users?.first_name || ""} ${toAccount.users?.last_name || ""})`,
+        "Debit",
+        transaction.id,
+      );
+
+      // Update single ledger for receiver (Credit)
+      await updateSingleLedger(
+        toAccount.id,
+        toAccount.user_id,
+        transferAmount,
+        "transfer",
+        `Transfer from ${fromAccount.account_number} (${req.user.first_name} ${req.user.last_name})`,
+        "Credit",
+        transaction.id,
+      );
+
+      // Create notification for sender
+      await supabase.from("notifications").insert({
+        user_id: req.user.id,
+        title: "Transfer Completed",
+        message: `You have successfully transferred $${transferAmount.toFixed(2)} to account ${toAccount.account_number}. Fee: $${feeAmount.toFixed(2)}`,
+        type: "success",
+        created_at: new Date().toISOString(),
+      });
+
+      // Create notification for recipient
+      await supabase.from("notifications").insert({
+        user_id: toAccount.user_id,
+        title: "Money Received",
+        message: `You have received $${transferAmount.toFixed(2)} from ${req.user.first_name} ${req.user.last_name}`,
+        type: "success",
+        created_at: new Date().toISOString(),
+      });
+
+      // Log admin action for large transfers (over $1000)
+      if (amount > 1000) {
+        await supabase.from("admin_actions").insert({
+          admin_id: null,
+          action_type: "large_transfer",
+          target_user_id: req.user.id,
+          details: {
+            amount,
+            to_user: toAccount.user_id,
+            transaction_id: transaction.id,
+          },
+          created_at: new Date().toISOString(),
+        });
+      }
+
+      console.log("Transfer completed successfully:", transaction.id);
+
+      res.json({
+        message: "Transfer completed successfully",
+        transaction: {
+          id: transaction.id,
+          transaction_id: transaction.transaction_id,
+          amount: transferAmount,
+          fee: feeAmount,
+          total_deducted: totalDeduction,
+          new_balance: newSenderAvailable,
+          description: transaction.description,
+          completed_at: transaction.completed_at,
+        },
+        recipient: {
+          name: `${toAccount.users?.first_name || ""} ${toAccount.users?.last_name || ""}`,
+          account_number: toAccount.account_number,
+        },
+      });
+    } catch (error) {
+      console.error("Transfer error:", error);
+      res.status(500).json({ error: "Transfer failed: " + error.message });
+    }
+  },
 );
+
+// Process fee income for admin (called by transfer route)
+async function processFeeIncome(
+  transaction,
+  feeAmount,
+  fromAccount,
+  toAccount,
+) {
+  try {
+    if (feeAmount <= 0) return;
+
+    // Record fee as revenue
+    const { error: feeError } = await supabase.from("transactions").insert({
+      transaction_id: `FEE${Date.now()}${Math.floor(Math.random() * 1000)}`,
+      from_account_id: fromAccount.id,
+      to_account_id: null,
+      from_user_id: fromAccount.user_id,
+      to_user_id: null,
+      amount: feeAmount,
+      description: `Transfer fee for transaction ${transaction.transaction_id}`,
+      transaction_type: "fee",
+      status: "completed",
+      completed_at: new Date().toISOString(),
+      is_admin_adjusted: true,
+      admin_note: "Auto-generated transfer fee",
+    });
+
+    if (feeError) {
+      console.error("Fee transaction error:", feeError);
+    }
+
+    // Update fee income in ledger
+    await supabase.from("general_ledger").insert({
+      transaction_id: transaction.id,
+      account_code: "4020", // Transfer Fees account
+      account_name: "Transfer Fees",
+      debit_amount: 0,
+      credit_amount: feeAmount,
+      description: `Transfer fee for transaction ${transaction.transaction_id}`,
+      reference: transaction.transaction_id,
+      entry_date: new Date().toISOString(),
+      posted_by: null,
+      posted_at: new Date().toISOString(),
+    });
+  } catch (error) {
+    console.error("Fee processing error:", error);
+  }
+}
 
 // Get recipient name by account number (for transfer confirmation)
 app.get("/api/accounts/recipient", authenticate, async (req, res) => {
@@ -3040,6 +3390,1096 @@ app.post(
     } catch (error) {
       console.error("Bill payment error:", error);
       res.status(500).json({ error: "Payment failed" });
+    }
+  },
+);
+
+// ==================== LEDGER SYSTEM ROUTES ====================
+
+// Process transaction with double entry bookkeeping
+/*async function processDoubleEntry(
+  transaction,
+  user,
+  fromAccount,
+  toAccount,
+  amount,
+  description,
+  transactionType,
+) {
+  const results = [];
+  const now = new Date();
+
+  // Case 1: Transfer between customer accounts
+  if (fromAccount && toAccount && fromAccount.user_id !== toAccount.user_id) {
+    // Debit sender's customer liability account
+    results.push({
+      user_id: fromAccount.user_id,
+      account_code: "2000", // Customer Liabilities
+      account_name: "Customer Liabilities",
+      debit_amount: amount,
+      credit_amount: 0,
+      description: `Debit - Transfer to account ${toAccount.account_number}`,
+      reference: transaction.transaction_id,
+      entry_date: now,
+      transaction_id: transaction.id,
+    });
+
+    // Credit receiver's customer liability account
+    results.push({
+      user_id: toAccount.user_id,
+      account_code: "2000", // Customer Liabilities
+      account_name: "Customer Liabilities",
+      debit_amount: 0,
+      credit_amount: amount,
+      description: `Credit - Transfer from account ${fromAccount.account_number}`,
+      reference: transaction.transaction_id,
+      entry_date: now,
+      transaction_id: transaction.id,
+    });
+
+    // Record fee income if applicable
+    if (transaction.fee_amount > 0) {
+      results.push({
+        user_id: null,
+        account_code: "4020", // Transfer Fees
+        account_name: "Transfer Fees",
+        debit_amount: 0,
+        credit_amount: transaction.fee_amount,
+        description: `Fee for transfer ${transaction.transaction_id}`,
+        reference: transaction.transaction_id,
+        entry_date: now,
+        transaction_id: transaction.id,
+      });
+
+      results.push({
+        user_id: null,
+        account_code: "1030", // Settlement Accounts
+        account_name: "Settlement Accounts",
+        debit_amount: transaction.fee_amount,
+        credit_amount: 0,
+        description: `Settlement for transfer fee`,
+        reference: transaction.transaction_id,
+        entry_date: now,
+        transaction_id: transaction.id,
+      });
+    }
+  }
+
+  // Case 2: Deposit (User adding money)
+  else if (toAccount && !fromAccount) {
+    // Debit settlement account (money coming in)
+    results.push({
+      user_id: null,
+      account_code: "1030", // Settlement Accounts
+      account_name: "Settlement Accounts",
+      debit_amount: amount,
+      credit_amount: 0,
+      description: `Deposit from user ${user.email}`,
+      reference: transaction.transaction_id,
+      entry_date: now,
+      transaction_id: transaction.id,
+    });
+
+    // Credit customer liability (user's balance increases)
+    results.push({
+      user_id: user.id,
+      account_code: "2000", // Customer Liabilities
+      account_name: "Customer Liabilities",
+      debit_amount: 0,
+      credit_amount: amount,
+      description: `Deposit to account ${toAccount.account_number}`,
+      reference: transaction.transaction_id,
+      entry_date: now,
+      transaction_id: transaction.id,
+    });
+  }
+
+  // Case 3: Withdrawal
+  else if (fromAccount && !toAccount) {
+    // Debit customer liability (user's balance decreases)
+    results.push({
+      user_id: user.id,
+      account_code: "2000", // Customer Liabilities
+      account_name: "Customer Liabilities",
+      debit_amount: amount,
+      credit_amount: 0,
+      description: `Withdrawal from account ${fromAccount.account_number}`,
+      reference: transaction.transaction_id,
+      entry_date: now,
+      transaction_id: transaction.id,
+    });
+
+    // Credit settlement account
+    results.push({
+      user_id: null,
+      account_code: "1030", // Settlement Accounts
+      account_name: "Settlement Accounts",
+      debit_amount: 0,
+      credit_amount: amount,
+      description: `Withdrawal payout`,
+      reference: transaction.transaction_id,
+      entry_date: now,
+      transaction_id: transaction.id,
+    });
+  }
+
+  // Insert all ledger entries
+  for (const entry of results) {
+    entry.posted_by = req?.user?.id || null;
+    entry.posted_at = now;
+
+    await supabase.from("general_ledger").insert(entry);
+  }
+
+  return results;
+}*/
+
+// Process transaction with double entry bookkeeping (UPDATED)
+async function processDoubleEntry(
+  transaction,
+  user,
+  fromAccount,
+  toAccount,
+  amount,
+  description,
+  transactionType,
+  feeAmount = 0,
+) {
+  const results = [];
+  const now = new Date();
+
+  // Case 1: Transfer between customer accounts
+  if (fromAccount && toAccount && fromAccount.user_id !== toAccount.user_id) {
+    // Debit sender's customer liability account
+    results.push({
+      user_id: fromAccount.user_id,
+      account_code: "2000", // Customer Liabilities
+      account_name: "Customer Liabilities",
+      debit_amount: amount,
+      credit_amount: 0,
+      description: `Debit - Transfer to account ${toAccount.account_number}`,
+      reference: transaction.transaction_id,
+      entry_date: now,
+      transaction_id: transaction.id,
+      posted_by: null,
+      posted_at: now,
+      is_reconciled: false,
+    });
+
+    // Credit receiver's customer liability account
+    results.push({
+      user_id: toAccount.user_id,
+      account_code: "2000", // Customer Liabilities
+      account_name: "Customer Liabilities",
+      debit_amount: 0,
+      credit_amount: amount,
+      description: `Credit - Transfer from account ${fromAccount.account_number}`,
+      reference: transaction.transaction_id,
+      entry_date: now,
+      transaction_id: transaction.id,
+      posted_by: null,
+      posted_at: now,
+      is_reconciled: false,
+    });
+
+    // Record fee income if applicable
+    if (feeAmount > 0) {
+      // Debit settlement account for fee
+      results.push({
+        user_id: null,
+        account_code: "1030", // Settlement Accounts
+        account_name: "Settlement Accounts",
+        debit_amount: feeAmount,
+        credit_amount: 0,
+        description: `Fee settlement for transfer ${transaction.transaction_id}`,
+        reference: transaction.transaction_id,
+        entry_date: now,
+        transaction_id: transaction.id,
+        posted_by: null,
+        posted_at: now,
+        is_reconciled: false,
+      });
+
+      // Credit transfer fee revenue
+      results.push({
+        user_id: null,
+        account_code: "4020", // Transfer Fees
+        account_name: "Transfer Fees",
+        debit_amount: 0,
+        credit_amount: feeAmount,
+        description: `Transfer fee for transaction ${transaction.transaction_id}`,
+        reference: transaction.transaction_id,
+        entry_date: now,
+        transaction_id: transaction.id,
+        posted_by: null,
+        posted_at: now,
+        is_reconciled: false,
+      });
+    }
+  }
+
+  // Case 2: Deposit (User adding money)
+  else if (toAccount && !fromAccount) {
+    // Debit settlement account (money coming in)
+    results.push({
+      user_id: null,
+      account_code: "1030", // Settlement Accounts
+      account_name: "Settlement Accounts",
+      debit_amount: amount,
+      credit_amount: 0,
+      description: `Deposit from user ${user?.email || "unknown"}`,
+      reference: transaction.transaction_id,
+      entry_date: now,
+      transaction_id: transaction.id,
+      posted_by: null,
+      posted_at: now,
+      is_reconciled: false,
+    });
+
+    // Credit customer liability (user's balance increases)
+    results.push({
+      user_id: user?.id,
+      account_code: "2000", // Customer Liabilities
+      account_name: "Customer Liabilities",
+      debit_amount: 0,
+      credit_amount: amount,
+      description: `Deposit to account ${toAccount.account_number}`,
+      reference: transaction.transaction_id,
+      entry_date: now,
+      transaction_id: transaction.id,
+      posted_by: null,
+      posted_at: now,
+      is_reconciled: false,
+    });
+  }
+
+  // Case 3: Withdrawal
+  else if (fromAccount && !toAccount) {
+    // Debit customer liability (user's balance decreases)
+    results.push({
+      user_id: user?.id,
+      account_code: "2000", // Customer Liabilities
+      account_name: "Customer Liabilities",
+      debit_amount: amount,
+      credit_amount: 0,
+      description: `Withdrawal from account ${fromAccount.account_number}`,
+      reference: transaction.transaction_id,
+      entry_date: now,
+      transaction_id: transaction.id,
+      posted_by: null,
+      posted_at: now,
+      is_reconciled: false,
+    });
+
+    // Credit settlement account
+    results.push({
+      user_id: null,
+      account_code: "1030", // Settlement Accounts
+      account_name: "Settlement Accounts",
+      debit_amount: 0,
+      credit_amount: amount,
+      description: `Withdrawal payout for transaction ${transaction.transaction_id}`,
+      reference: transaction.transaction_id,
+      entry_date: now,
+      transaction_id: transaction.id,
+      posted_by: null,
+      posted_at: now,
+      is_reconciled: false,
+    });
+  }
+
+  // Insert all ledger entries
+  for (const entry of results) {
+    const { error } = await supabase.from("general_ledger").insert(entry);
+
+    if (error) {
+      console.error("Ledger entry error:", error);
+    }
+  }
+
+  return results;
+}
+
+// Update single ledger for user account
+/*async function updateSingleLedger(
+  accountId,
+  userId,
+  amount,
+  transactionType,
+  description,
+  direction,
+  transactionId,
+) {
+  // Get current balance
+  const { data: account } = await supabase
+    .from("accounts")
+    .select("balance, account_number")
+    .eq("id", accountId)
+    .single();
+
+  const balanceBefore = account?.balance || 0;
+  const balanceAfter =
+    direction === "Debit" ? balanceBefore - amount : balanceBefore + amount;
+
+  const { error } = await supabase.from("single_ledger").insert({
+    user_id: userId,
+    account_id: accountId,
+    account_number: account?.account_number,
+    transaction_id: transactionId,
+    transaction_type: transactionType,
+    amount: amount,
+    balance_before: balanceBefore,
+    balance_after: balanceAfter,
+    description: description,
+    direction: direction,
+  });
+
+  if (error) {
+    console.error("Single ledger update error:", error);
+  }
+}*/
+
+// Update single ledger for user account (UPDATED)
+async function updateSingleLedger(
+  accountId,
+  userId,
+  amount,
+  transactionType,
+  description,
+  direction,
+  transactionId,
+) {
+  try {
+    // Get current balance
+    const { data: account, error: accError } = await supabase
+      .from("accounts")
+      .select("balance, account_number")
+      .eq("id", accountId)
+      .single();
+
+    if (accError) {
+      console.error("Account fetch error in single ledger:", accError);
+      return;
+    }
+
+    const balanceBefore = account?.balance || 0;
+    const balanceAfter =
+      direction === "Debit" ? balanceBefore - amount : balanceBefore + amount;
+
+    // Generate ledger ID
+    const ledgerId = `SL${Date.now()}${Math.floor(Math.random() * 10000)}`;
+
+    const { error } = await supabase.from("single_ledger").insert({
+      ledger_id: ledgerId,
+      user_id: userId,
+      account_id: accountId,
+      account_number: account?.account_number,
+      transaction_id: transactionId,
+      transaction_type: transactionType,
+      amount: amount,
+      balance_before: balanceBefore,
+      balance_after: balanceAfter,
+      description: description,
+      direction: direction,
+      created_at: new Date().toISOString(),
+    });
+
+    if (error) {
+      console.error("Single ledger update error:", error);
+    } else {
+      console.log(
+        `Single ledger updated: ${direction} of $${amount} for account ${account?.account_number}`,
+      );
+    }
+  } catch (error) {
+    console.error("updateSingleLedger error:", error);
+  }
+}
+
+// ==================== LEDGER API ROUTES ====================
+
+// Get General Ledger (All entries)
+app.get(
+  "/api/admin/ledger/general",
+  authenticate,
+  authorizeAdmin,
+  async (req, res) => {
+    try {
+      const {
+        page = 1,
+        limit = 50,
+        start_date,
+        end_date,
+        account_code,
+      } = req.query;
+      const offset = (page - 1) * limit;
+
+      let query = supabase
+        .from("general_ledger")
+        .select(
+          `
+                *,
+                users!general_ledger_user_id_fkey (id, first_name, last_name, email),
+                transactions!general_ledger_transaction_id_fkey (transaction_id, status)
+            `,
+          { count: "exact" },
+        )
+        .order("entry_date", { ascending: false });
+
+      if (start_date) {
+        query = query.gte("entry_date", start_date);
+      }
+      if (end_date) {
+        query = query.lte("entry_date", end_date);
+      }
+      if (account_code) {
+        query = query.eq("account_code", account_code);
+      }
+
+      const {
+        data: entries,
+        error,
+        count,
+      } = await query.range(offset, offset + limit - 1);
+
+      if (error) throw error;
+
+      // Get totals
+      const { data: totals } = await supabase
+        .from("general_ledger")
+        .select("debit_amount, credit_amount")
+        .gte("entry_date", start_date || "1970-01-01")
+        .lte("entry_date", end_date || "2099-12-31");
+
+      const totalDebit =
+        totals?.reduce((sum, e) => sum + (e.debit_amount || 0), 0) || 0;
+      const totalCredit =
+        totals?.reduce((sum, e) => sum + (e.credit_amount || 0), 0) || 0;
+
+      res.json({
+        entries: entries || [],
+        pagination: {
+          page: parseInt(page),
+          limit: parseInt(limit),
+          total: count || 0,
+          pages: Math.ceil((count || 0) / limit),
+        },
+        summary: {
+          total_debit: totalDebit,
+          total_credit: totalCredit,
+          difference: totalDebit - totalCredit,
+        },
+      });
+    } catch (error) {
+      console.error("Error fetching general ledger:", error);
+      res.status(500).json({ error: "Failed to fetch general ledger" });
+    }
+  },
+);
+
+// Get Single Ledger (User account transactions)
+app.get(
+  "/api/admin/ledger/single",
+  authenticate,
+  authorizeAdmin,
+  async (req, res) => {
+    try {
+      const {
+        page = 1,
+        limit = 50,
+        user_id,
+        account_id,
+        start_date,
+        end_date,
+      } = req.query;
+      const offset = (page - 1) * limit;
+
+      let query = supabase
+        .from("single_ledger")
+        .select(
+          `
+                *,
+                users!single_ledger_user_id_fkey (id, first_name, last_name, email),
+                accounts!single_ledger_account_id_fkey (account_number, account_type)
+            `,
+          { count: "exact" },
+        )
+        .order("created_at", { ascending: false });
+
+      if (user_id) {
+        query = query.eq("user_id", user_id);
+      }
+      if (account_id) {
+        query = query.eq("account_id", account_id);
+      }
+      if (start_date) {
+        query = query.gte("created_at", start_date);
+      }
+      if (end_date) {
+        query = query.lte("created_at", end_date);
+      }
+
+      const {
+        data: entries,
+        error,
+        count,
+      } = await query.range(offset, offset + limit - 1);
+
+      if (error) throw error;
+
+      res.json({
+        entries: entries || [],
+        pagination: {
+          page: parseInt(page),
+          limit: parseInt(limit),
+          total: count || 0,
+          pages: Math.ceil((count || 0) / limit),
+        },
+      });
+    } catch (error) {
+      console.error("Error fetching single ledger:", error);
+      res.status(500).json({ error: "Failed to fetch single ledger" });
+    }
+  },
+);
+
+// Get Trial Balance
+app.get(
+  "/api/admin/ledger/trial-balance",
+  authenticate,
+  authorizeAdmin,
+  async (req, res) => {
+    try {
+      const { as_of_date } = req.query;
+      const dateFilter = as_of_date || new Date().toISOString().split("T")[0];
+
+      // Get all accounts with their balances
+      const { data: accounts, error: accountsError } = await supabase
+        .from("chart_of_accounts")
+        .select("*")
+        .eq("is_active", true)
+        .order("account_code");
+
+      if (accountsError) throw accountsError;
+
+      // Get ledger entries up to the date
+      const { data: entries } = await supabase
+        .from("general_ledger")
+        .select("*")
+        .lte("entry_date", `${dateFilter} 23:59:59`);
+
+      // Calculate balances for each account
+      const trialBalance = accounts.map((account) => {
+        let debitTotal = 0;
+        let creditTotal = 0;
+
+        (entries || []).forEach((entry) => {
+          if (entry.account_code === account.account_code) {
+            debitTotal += entry.debit_amount || 0;
+            creditTotal += entry.credit_amount || 0;
+          }
+        });
+
+        let balance = 0;
+        if (account.normal_balance === "Debit") {
+          balance = debitTotal - creditTotal;
+        } else {
+          balance = creditTotal - debitTotal;
+        }
+
+        return {
+          account_code: account.account_code,
+          account_name: account.account_name,
+          account_type: account.account_type,
+          normal_balance: account.normal_balance,
+          debit_total: debitTotal,
+          credit_total: creditTotal,
+          balance: Math.abs(balance),
+          balance_type:
+            balance >= 0
+              ? account.normal_balance
+              : account.normal_balance === "Debit"
+                ? "Credit"
+                : "Debit",
+        };
+      });
+
+      // Calculate totals
+      const totalDebit = trialBalance.reduce(
+        (sum, acc) => sum + acc.debit_total,
+        0,
+      );
+      const totalCredit = trialBalance.reduce(
+        (sum, acc) => sum + acc.credit_total,
+        0,
+      );
+
+      res.json({
+        trial_balance: trialBalance,
+        summary: {
+          total_debits: totalDebit,
+          total_credits: totalCredit,
+          is_balanced: Math.abs(totalDebit - totalCredit) < 0.01,
+        },
+        as_of_date: dateFilter,
+      });
+    } catch (error) {
+      console.error("Error generating trial balance:", error);
+      res.status(500).json({ error: "Failed to generate trial balance" });
+    }
+  },
+);
+
+// Get Balance Sheet
+app.get(
+  "/api/admin/ledger/balance-sheet",
+  authenticate,
+  authorizeAdmin,
+  async (req, res) => {
+    try {
+      const { as_of_date } = req.query;
+      const dateFilter = as_of_date || new Date().toISOString().split("T")[0];
+
+      // Get all ledger entries up to date
+      const { data: entries } = await supabase
+        .from("general_ledger")
+        .select("*")
+        .lte("entry_date", `${dateFilter} 23:59:59`);
+
+      // Get chart of accounts
+      const { data: accounts } = await supabase
+        .from("chart_of_accounts")
+        .select("*");
+
+      // Calculate balances by account type
+      const assets = [];
+      const liabilities = [];
+      const equity = [];
+
+      accounts.forEach((account) => {
+        let debitTotal = 0;
+        let creditTotal = 0;
+
+        (entries || []).forEach((entry) => {
+          if (entry.account_code === account.account_code) {
+            debitTotal += entry.debit_amount || 0;
+            creditTotal += entry.credit_amount || 0;
+          }
+        });
+
+        let balance = 0;
+        if (account.normal_balance === "Debit") {
+          balance = debitTotal - creditTotal;
+        } else {
+          balance = creditTotal - debitTotal;
+        }
+
+        const accountData = {
+          account_code: account.account_code,
+          account_name: account.account_name,
+          balance: Math.abs(balance),
+          balance_type:
+            balance >= 0
+              ? account.normal_balance
+              : account.normal_balance === "Debit"
+                ? "Credit"
+                : "Debit",
+        };
+
+        if (account.account_type === "Asset") {
+          assets.push(accountData);
+        } else if (account.account_type === "Liability") {
+          liabilities.push(accountData);
+        } else if (account.account_type === "Equity") {
+          equity.push(accountData);
+        }
+      });
+
+      const totalAssets = assets.reduce((sum, a) => sum + a.balance, 0);
+      const totalLiabilities = liabilities.reduce(
+        (sum, l) => sum + l.balance,
+        0,
+      );
+      const totalEquity = equity.reduce((sum, e) => sum + e.balance, 0);
+
+      res.json({
+        assets: { items: assets, total: totalAssets },
+        liabilities: { items: liabilities, total: totalLiabilities },
+        equity: { items: equity, total: totalEquity },
+        total_liabilities_equity: totalLiabilities + totalEquity,
+        difference: totalAssets - (totalLiabilities + totalEquity),
+        as_of_date: dateFilter,
+      });
+    } catch (error) {
+      console.error("Error generating balance sheet:", error);
+      res.status(500).json({ error: "Failed to generate balance sheet" });
+    }
+  },
+);
+
+// Get Income Statement (Profit & Loss)
+app.get(
+  "/api/admin/ledger/income-statement",
+  authenticate,
+  authorizeAdmin,
+  async (req, res) => {
+    try {
+      const { start_date, end_date } = req.query;
+
+      if (!start_date || !end_date) {
+        return res
+          .status(400)
+          .json({ error: "Start date and end date required" });
+      }
+
+      // Get revenue and expense entries
+      const { data: entries } = await supabase
+        .from("general_ledger")
+        .select("*")
+        .gte("entry_date", start_date)
+        .lte("entry_date", `${end_date} 23:59:59`);
+
+      const { data: revenueAccounts } = await supabase
+        .from("chart_of_accounts")
+        .select("*")
+        .eq("account_type", "Revenue");
+
+      const { data: expenseAccounts } = await supabase
+        .from("chart_of_accounts")
+        .select("*")
+        .eq("account_type", "Expense");
+
+      // Calculate revenue by account
+      const revenues = (revenueAccounts || [])
+        .map((account) => {
+          let creditTotal = 0;
+          (entries || []).forEach((entry) => {
+            if (entry.account_code === account.account_code) {
+              creditTotal += entry.credit_amount || 0;
+            }
+          });
+          return {
+            account_code: account.account_code,
+            account_name: account.account_name,
+            amount: creditTotal,
+          };
+        })
+        .filter((r) => r.amount > 0);
+
+      // Calculate expenses by account
+      const expenses = (expenseAccounts || [])
+        .map((account) => {
+          let debitTotal = 0;
+          (entries || []).forEach((entry) => {
+            if (entry.account_code === account.account_code) {
+              debitTotal += entry.debit_amount || 0;
+            }
+          });
+          return {
+            account_code: account.account_code,
+            account_name: account.account_name,
+            amount: debitTotal,
+          };
+        })
+        .filter((e) => e.amount > 0);
+
+      const totalRevenue = revenues.reduce((sum, r) => sum + r.amount, 0);
+      const totalExpenses = expenses.reduce((sum, e) => sum + e.amount, 0);
+      const netIncome = totalRevenue - totalExpenses;
+
+      res.json({
+        revenues: { items: revenues, total: totalRevenue },
+        expenses: { items: expenses, total: totalExpenses },
+        net_income: netIncome,
+        net_income_type: netIncome >= 0 ? "Profit" : "Loss",
+        period: { start_date, end_date },
+      });
+    } catch (error) {
+      console.error("Error generating income statement:", error);
+      res.status(500).json({ error: "Failed to generate income statement" });
+    }
+  },
+);
+
+// Get Daily Journal
+app.get(
+  "/api/admin/ledger/daily-journal",
+  authenticate,
+  authorizeAdmin,
+  async (req, res) => {
+    try {
+      const { date } = req.query;
+      const targetDate = date || new Date().toISOString().split("T")[0];
+
+      // Get all entries for the date
+      const { data: entries } = await supabase
+        .from("general_ledger")
+        .select(
+          `
+                *,
+                users!general_ledger_user_id_fkey (id, first_name, last_name, email)
+            `,
+        )
+        .gte("entry_date", `${targetDate} 00:00:00`)
+        .lte("entry_date", `${targetDate} 23:59:59`)
+        .order("created_at", { ascending: true });
+
+      // Group by hour or batch
+      const groupedByHour = {};
+      (entries || []).forEach((entry) => {
+        const hour = new Date(entry.entry_date).getHours();
+        if (!groupedByHour[hour]) {
+          groupedByHour[hour] = {
+            entries: [],
+            total_debit: 0,
+            total_credit: 0,
+          };
+        }
+        groupedByHour[hour].entries.push(entry);
+        groupedByHour[hour].total_debit += entry.debit_amount || 0;
+        groupedByHour[hour].total_credit += entry.credit_amount || 0;
+      });
+
+      const totalDebit =
+        entries?.reduce((sum, e) => sum + (e.debit_amount || 0), 0) || 0;
+      const totalCredit =
+        entries?.reduce((sum, e) => sum + (e.credit_amount || 0), 0) || 0;
+
+      res.json({
+        date: targetDate,
+        entries: entries || [],
+        grouped_entries: groupedByHour,
+        summary: {
+          total_entries: entries?.length || 0,
+          total_debit: totalDebit,
+          total_credit: totalCredit,
+          is_balanced: Math.abs(totalDebit - totalCredit) < 0.01,
+        },
+      });
+    } catch (error) {
+      console.error("Error fetching daily journal:", error);
+      res.status(500).json({ error: "Failed to fetch daily journal" });
+    }
+  },
+);
+
+// Get Account Statement (Single Account)
+app.get(
+  "/api/admin/ledger/account-statement/:accountCode",
+  authenticate,
+  authorizeAdmin,
+  async (req, res) => {
+    try {
+      const { accountCode } = req.params;
+      const { start_date, end_date, page = 1, limit = 50 } = req.query;
+      const offset = (page - 1) * limit;
+
+      let query = supabase
+        .from("general_ledger")
+        .select("*", { count: "exact" })
+        .eq("account_code", accountCode)
+        .order("entry_date", { ascending: true });
+
+      if (start_date) {
+        query = query.gte("entry_date", start_date);
+      }
+      if (end_date) {
+        query = query.lte("entry_date", `${end_date} 23:59:59`);
+      }
+
+      const {
+        data: entries,
+        error,
+        count,
+      } = await query.range(offset, offset + limit - 1);
+
+      if (error) throw error;
+
+      // Calculate running balance
+      let runningBalance = 0;
+      const accountInfo = await supabase
+        .from("chart_of_accounts")
+        .select("*")
+        .eq("account_code", accountCode)
+        .single();
+
+      const entriesWithBalance = (entries || []).map((entry) => {
+        if (accountInfo?.data?.normal_balance === "Debit") {
+          runningBalance +=
+            (entry.debit_amount || 0) - (entry.credit_amount || 0);
+        } else {
+          runningBalance +=
+            (entry.credit_amount || 0) - (entry.debit_amount || 0);
+        }
+        return { ...entry, running_balance: runningBalance };
+      });
+
+      res.json({
+        account_info: accountInfo.data,
+        entries: entriesWithBalance,
+        pagination: {
+          page: parseInt(page),
+          limit: parseInt(limit),
+          total: count || 0,
+          pages: Math.ceil((count || 0) / limit),
+        },
+      });
+    } catch (error) {
+      console.error("Error fetching account statement:", error);
+      res.status(500).json({ error: "Failed to fetch account statement" });
+    }
+  },
+);
+
+// Reconcile an account
+app.post(
+  "/api/admin/ledger/reconcile/:entryId",
+  authenticate,
+  authorizeAdmin,
+  async (req, res) => {
+    try {
+      const { entryId } = req.params;
+
+      const { error } = await supabase
+        .from("general_ledger")
+        .update({
+          is_reconciled: true,
+          reconciled_at: new Date(),
+          reconciled_by: req.user.id,
+        })
+        .eq("id", entryId);
+
+      if (error) throw error;
+
+      res.json({ success: true, message: "Entry reconciled successfully" });
+    } catch (error) {
+      console.error("Error reconciling entry:", error);
+      res.status(500).json({ error: "Failed to reconcile entry" });
+    }
+  },
+);
+
+// Get chart of accounts
+app.get(
+  "/api/admin/ledger/chart-of-accounts",
+  authenticate,
+  authorizeAdmin,
+  async (req, res) => {
+    try {
+      const { data: accounts, error } = await supabase
+        .from("chart_of_accounts")
+        .select("*")
+        .order("account_code");
+
+      if (error) throw error;
+      res.json({ accounts: accounts || [] });
+    } catch (error) {
+      console.error("Error fetching chart of accounts:", error);
+      res.status(500).json({ error: "Failed to fetch chart of accounts" });
+    }
+  },
+);
+
+// Create chart of account
+app.post(
+  "/api/admin/ledger/chart-of-accounts",
+  authenticate,
+  authorizeAdmin,
+  async (req, res) => {
+    try {
+      const {
+        account_code,
+        account_name,
+        account_type,
+        normal_balance,
+        description,
+        parent_account_id,
+      } = req.body;
+
+      const { data: account, error } = await supabase
+        .from("chart_of_accounts")
+        .insert({
+          account_code,
+          account_name,
+          account_type,
+          normal_balance,
+          description,
+          parent_account_id,
+          is_active: true,
+        })
+        .select()
+        .single();
+
+      if (error) throw error;
+      res.status(201).json({ success: true, account });
+    } catch (error) {
+      console.error("Error creating account:", error);
+      res.status(500).json({ error: "Failed to create account" });
+    }
+  },
+);
+
+// Export general ledger as CSV
+app.get(
+  "/api/admin/ledger/general/export",
+  authenticate,
+  authorizeAdmin,
+  async (req, res) => {
+    try {
+      const { start_date, end_date } = req.query;
+
+      let query = supabase
+        .from("general_ledger")
+        .select("*")
+        .order("entry_date", { ascending: true });
+
+      if (start_date) query = query.gte("entry_date", start_date);
+      if (end_date) query = query.lte("entry_date", `${end_date} 23:59:59`);
+
+      const { data: entries, error } = await query;
+
+      if (error) throw error;
+
+      // Create CSV
+      const headers = [
+        "Entry ID",
+        "Date",
+        "Account Code",
+        "Account Name",
+        "Description",
+        "Reference",
+        "Debit",
+        "Credit",
+        "User ID",
+        "Reconciled",
+      ];
+      const csvRows = [headers.join(",")];
+
+      entries.forEach((entry) => {
+        const row = [
+          `"${entry.entry_id || ""}"`,
+          `"${entry.entry_date}"`,
+          `"${entry.account_code || ""}"`,
+          `"${entry.account_name || ""}"`,
+          `"${(entry.description || "").replace(/"/g, '""')}"`,
+          `"${entry.reference || ""}"`,
+          entry.debit_amount || 0,
+          entry.credit_amount || 0,
+          `"${entry.user_id || ""}"`,
+          entry.is_reconciled ? "Yes" : "No",
+        ];
+        csvRows.push(row.join(","));
+      });
+
+      res.setHeader("Content-Type", "text/csv");
+      res.setHeader(
+        "Content-Disposition",
+        `attachment; filename=general_ledger_${new Date().toISOString().split("T")[0]}.csv`,
+      );
+      res.send(csvRows.join("\n"));
+    } catch (error) {
+      console.error("Export error:", error);
+      res.status(500).json({ error: "Export failed" });
     }
   },
 );
