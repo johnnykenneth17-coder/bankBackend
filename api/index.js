@@ -178,7 +178,7 @@ app.post("/api/auth/register", async (req, res) => {
     const { error: accountError } = await supabase.from("accounts").insert({
       user_id: user.id,
       account_type: "checking",
-      currency: "USD",
+      currency: "NGN",
       balance: 0.0,
       available_balance: 0.0,
       status: "active",
@@ -1006,7 +1006,7 @@ app.post(
 
       // Calculate fee (0.5% for internal transfers, min $0.50, max $10)
       let feeAmount = amount * 0.005;
-      feeAmount = Math.min(Math.max(feeAmount, 0.5), 10);
+      feeAmount = Math.min(Math.max(feeAmount, 500), 10000);
       const transferAmount = amount;
       const totalDeduction = transferAmount + feeAmount;
 
@@ -1568,16 +1568,16 @@ app.post(
         return res.status(400).json({ error: "Invalid amount" });
       }
 
-      if (amount < 10) {
+      if (amount < 10000) {
         return res
           .status(400)
-          .json({ error: "Minimum external transfer amount is $10" });
+          .json({ error: "Minimum external transfer amount is ₦10,000" });
       }
 
-      if (amount > 10000) {
+      if (amount > 15000000) {
         return res
           .status(400)
-          .json({ error: "Maximum external transfer amount is $10,000" });
+          .json({ error: "Maximum external transfer amount is ₦15,000,000" });
       }
 
       // Get source account
@@ -1878,7 +1878,7 @@ app.post(
         .eq("setting_key", "card_purchase_method")
         .single();
 
-      const cardPrice = 10.0; // Card price
+      const cardPrice = 3000; // Card price
 
       // Generate card details
       const cardNumber =
@@ -4774,7 +4774,7 @@ app.post("/api/user/receive-request", authenticate, async (req, res) => {
       .insert({
         user_id: req.user.id,
         amount,
-        currency: "USD",
+        currency: "NGN",
         country_code,
         method_type,
         description: description || null,
@@ -5396,10 +5396,10 @@ app.get("/api/user/account-limits", authenticate, async (req, res) => {
         const monthlyUsed = monthTxs?.reduce((sum, t) => sum + t.amount, 0) || 0;
         
         res.json({
-            daily_limit: account?.daily_limit || 1000000,
-            weekly_limit: 5000000,
-            monthly_limit: 20000000,
-            single_transaction_limit: 1000000,
+            daily_limit: 1000000,      // ₦1,000,000 (was $1,000)
+            weekly_limit: 5000000,     // ₦5,000,000 (was $5,000)
+            monthly_limit: 20000000,   // ₦20,000,000 (was $20,000)
+            single_transaction_limit: 1000000,  // ₦1,000,000
             daily_used: dailyUsed,
             weekly_used: weeklyUsed,
             monthly_used: monthlyUsed
@@ -6214,7 +6214,7 @@ app.post("/api/admin/users", authenticate, authorizeAdmin, async (req, res) => {
     await supabase.from("accounts").insert({
       user_id: user.id,
       account_type: "checking",
-      currency: "USD",
+      currency: "NGN",
       balance: 0,
       available_balance: 0,
     });
