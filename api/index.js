@@ -758,169 +758,7 @@ app.get(
   },
 );
 
-// Transfer money
-/*app.post(
-  "/api/user/transfer",
-  authenticate,
-  checkAccountFrozen,
-  async (req, res) => {
-    try {
-      const {
-        from_account_id,
-        to_account_number,
-        amount,
-        description,
-        requires_otp = true,
-      } = req.body;
 
-      // Check if OTP is required globally
-      const { data: settings } = await supabase
-        .from("admin_settings")
-        .select("setting_value")
-        .eq("setting_key", "otp_mode")
-        .single();
-
-      const otpMode = settings?.setting_value === "on";
-
-      // Get source account
-      const { data: fromAccount } = await supabase
-        .from("accounts")
-        .select("*")
-        .eq("id", from_account_id)
-        .eq("user_id", req.user.id)
-        .single();
-
-      if (!fromAccount) {
-        return res.status(404).json({ error: "Source account not found" });
-      }
-
-      // Check balance
-      if (fromAccount.available_balance < amount) {
-        return res.status(400).json({ error: "Insufficient funds" });
-      }
-
-      // Get destination account
-      const { data: toAccount } = await supabase
-        .from("accounts")
-        .select("*")
-        .eq("account_number", to_account_number)
-        .single();
-
-      if (!toAccount) {
-        return res.status(404).json({ error: "Destination account not found" });
-      }
-
-      // ========== PREVENT SELF-TRANSFER ==========
-      // Check if the destination account belongs to the same user
-      if (toAccount.user_id === req.user.id) {
-        return res.status(400).json({
-          error:
-            "Cannot transfer money to your own account. Please use a different recipient account.",
-        });
-      }
-      // ============================================
-
-      // Check if destination account is frozen
-      const { data: toUser } = await supabase
-        .from("users")
-        .select("is_frozen")
-        .eq("id", toAccount.user_id)
-        .single();
-
-      if (toUser?.is_frozen) {
-        return res.status(400).json({ error: "Destination account is frozen" });
-      }
-
-      const transactionId = `TXN${Date.now()}${Math.floor(Math.random() * 1000)}`;
-
-      // Create transaction
-      const transactionData = {
-        from_account_id,
-        to_account_id: toAccount.id,
-        from_user_id: req.user.id,
-        to_user_id: toAccount.user_id,
-        amount,
-        description,
-        transaction_type: "transfer",
-        status: "pending",
-      };
-
-      if (otpMode && requires_otp) {
-        transactionData.requires_otp = true;
-        // Generate OTP
-        const otpCode = Math.floor(100000 + Math.random() * 900000).toString();
-        const expiresAt = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
-
-        const { data: transaction, error } = await supabase
-          .from("transactions")
-          .insert(transactionData)
-          .select()
-          .single();
-
-        if (error) throw error;
-
-        await supabase.from("otps").insert({
-          user_id: req.user.id,
-          transaction_id: transaction.id,
-          otp_code: otpCode,
-          otp_type: "transfer",
-          expires_at: expiresAt,
-        });
-
-        return res.json({
-          message: "OTP required to complete transfer",
-          requires_otp: true,
-          transaction_id: transaction.id,
-        });
-      }
-
-      // Process transfer immediately
-      transactionData.status = "completed";
-      transactionData.completed_at = new Date();
-
-      const { data: transaction, error } = await supabase
-        .from("transactions")
-        .insert(transactionData)
-        .select()
-        .single();
-
-      if (error) throw error;
-
-      // Update balances
-      await supabase
-        .from("accounts")
-        .update({
-          balance: fromAccount.balance - amount,
-          available_balance: fromAccount.available_balance - amount,
-        })
-        .eq("id", from_account_id);
-
-      await supabase
-        .from("accounts")
-        .update({
-          balance: toAccount.balance + amount,
-          available_balance: toAccount.available_balance + amount,
-        })
-        .eq("id", toAccount.id);
-
-      // Create notification for recipient
-      await supabase.from("notifications").insert({
-        user_id: toAccount.user_id,
-        title: "Money Received",
-        message: `You have received $${amount} from ${req.user.first_name} ${req.user.last_name}`,
-        type: "success",
-      });
-
-      res.json({
-        message: "Transfer completed successfully",
-        transaction,
-      });
-    } catch (error) {
-      console.error("Transfer error:", error);
-      res.status(500).json({ error: "Transfer failed" });
-    }
-  },
-);*/
 
 // Transfer money - COMPLETE FIXED VERSION with double-entry ledger
 app.post(
@@ -2732,59 +2570,7 @@ app.post(
   },
 );
 
-// Request unfreeze OTP
-/*app.post("/api/user/request-unfreeze-otp", authenticate, async (req, res) => {
-  try {
-    if (!req.user.is_frozen) {
-      return res.status(400).json({ error: "Account is not frozen" });
-    }
 
-    // Create unfreeze request ticket
-    const { data: ticket } = await supabase
-      .from("support_tickets")
-      .insert({
-        user_id: req.user.id,
-        subject: "Account Unfreeze Request",
-        message: `Account frozen reason: ${req.user.freeze_reason || "Not specified"}`,
-        priority: "high",
-      })
-      .select()
-      .single();
-
-    // Create chat message
-    await supabase.from("chat_messages").insert({
-      ticket_id: ticket.id,
-      sender_id: req.user.id,
-      message: "I would like to request an OTP to unfreeze my account",
-      is_admin_reply: false,
-    });
-
-    // Check if payment is required for unfreeze
-    const { data: settings } = await supabase
-      .from("admin_settings")
-      .select("setting_value")
-      .eq("setting_key", "freeze_otp_required")
-      .single();
-
-    const requiresPayment = settings?.setting_value === "true";
-
-    res.json({
-      message: "Unfreeze request sent. Please check chat for OTP code.",
-      ticket_id: ticket.id,
-      requires_payment: requiresPayment,
-      payment_details: requiresPayment
-        ? {
-            amount: 5.0,
-            method: "crypto",
-            address: "0x742d35Cc6634C0532925a3b844Bc1e7f9c5f5f5f",
-          }
-        : null,
-    });
-  } catch (error) {
-    console.error("Unfreeze request error:", error);
-    res.status(500).json({ error: "Failed to request unfreeze" });
-  }
-});*/
 
 // Request unfreeze OTP
 app.post("/api/user/request-unfreeze-otp", authenticate, async (req, res) => {
@@ -3046,6 +2832,69 @@ app.get("/api/user/harvest-plans", authenticate, async (req, res) => {
   } catch (error) {
     console.error("Error fetching harvest plans:", error);
     res.status(500).json({ error: "Failed to fetch harvest plans" });
+  }
+});
+
+// Get savings summary (check if user has active plans)
+app.get("/api/user/savings/summary", authenticate, async (req, res) => {
+  try {
+    console.log("Fetching savings summary for user:", req.user.id);
+    
+    const [harvest, fixed, savebox, target, spareChange] = await Promise.all([
+      supabase
+        .from("user_harvest_enrollments")
+        .select("id, status, auto_save, total_saved")
+        .eq("user_id", req.user.id)
+        .eq("status", "active")
+        .maybeSingle(),
+      supabase
+        .from("fixed_savings")
+        .select("id, status, auto_save, current_saved, maturity_date")
+        .eq("user_id", req.user.id)
+        .in("status", ["active", "matured"])
+        .maybeSingle(),
+      supabase
+        .from("savebox_savings")
+        .select("id, status, auto_save, current_saved, target_date")
+        .eq("user_id", req.user.id)
+        .eq("status", "active")
+        .maybeSingle(),
+      supabase
+        .from("target_savings")
+        .select("id, status, auto_save, current_saved, target_amount, withdrawal_date")
+        .eq("user_id", req.user.id)
+        .eq("status", "active")
+        .maybeSingle(),
+      supabase
+        .from("spare_change_savings")
+        .select("id, status, auto_save, current_saved")
+        .eq("user_id", req.user.id)
+        .eq("status", "active")
+        .maybeSingle(),
+    ]);
+
+    const totalSaved = 
+      (harvest.data?.total_saved || 0) +
+      (fixed.data?.current_saved || 0) +
+      (savebox.data?.current_saved || 0) +
+      (target.data?.current_saved || 0) +
+      (spareChange.data?.current_saved || 0);
+
+    console.log("Savings summary fetched successfully");
+    
+    res.json({
+      total_saved: totalSaved,
+      active_plans: {
+        harvest: harvest.data || null,
+        fixed: fixed.data || null,
+        savebox: savebox.data || null,
+        target: target.data || null,
+        spare_change: spareChange.data || null,
+      },
+    });
+  } catch (error) {
+    console.error("Savings summary error:", error);
+    res.status(500).json({ error: "Failed to get savings summary: " + error.message });
   }
 });
 
@@ -3444,252 +3293,6 @@ app.post(
 
 
 
-// Get user's savings (all types)
-/*app.get('/api/user/savings', authenticate, async (req, res) => {
-    try {
-        console.log('Fetching all savings for user:', req.user.id);
-        
-        const [harvest, fixed, savebox, target, spareChange] = await Promise.all([
-            supabase
-                .from('user_harvest_enrollments')
-                .select('*, harvest_plans(name, daily_amount, duration_days)')
-                .eq('user_id', req.user.id)
-                .order('created_at', { ascending: false }),
-            supabase
-                .from('fixed_savings')
-                .select('*')
-                .eq('user_id', req.user.id)
-                .order('created_at', { ascending: false }),
-            supabase
-                .from('savebox_savings')
-                .select('*')
-                .eq('user_id', req.user.id)
-                .order('created_at', { ascending: false }),
-            supabase
-                .from('target_savings')
-                .select('*')
-                .eq('user_id', req.user.id)
-                .order('created_at', { ascending: false }),
-            supabase
-                .from('spare_change_savings')
-                .select('*')
-                .eq('user_id', req.user.id)
-                .order('created_at', { ascending: false })
-        ]);
-        
-        const allSavings = [];
-        
-        // Format harvest
-        (harvest.data || []).forEach(h => {
-            allSavings.push({
-                id: h.id,
-                type: 'harvest',
-                plan_name: h.harvest_plans?.name || 'Harvest Plan',
-                amount: h.total_saved || 0,
-                total_saved: h.total_saved || 0,
-                daily_amount: h.daily_amount,
-                days_completed: h.days_completed || 0,
-                total_days: h.harvest_plans?.duration_days || 0,
-                start_date: h.start_date,
-                expected_end_date: h.expected_end_date,
-                status: h.status,
-                auto_save: h.auto_save || false,
-                created_at: h.created_at
-            });
-        });
-        
-        // Format fixed
-        (fixed.data || []).forEach(f => {
-            const maturityDate = new Date(f.maturity_date);
-            const today = new Date();
-            const isMatured = maturityDate <= today;
-            
-            allSavings.push({
-                id: f.id,
-                type: 'fixed',
-                amount: f.amount || 0,
-                current_saved: f.current_saved || 0,
-                daily_amount: f.daily_amount || (f.amount / 30),
-                interest_rate: f.interest_rate || 5,
-                start_date: f.start_date,
-                maturity_date: f.maturity_date,
-                next_free_withdrawal_date: f.next_free_withdrawal_date,
-                status: isMatured ? 'matured' : f.status,
-                auto_save: f.auto_save || true,
-                created_at: f.created_at
-            });
-        });
-        
-        // Format savebox
-        (savebox.data || []).forEach(s => {
-            allSavings.push({
-                id: s.id,
-                type: 'savebox',
-                amount: s.amount || 0,
-                current_saved: s.current_saved || 0,
-                daily_amount: s.daily_amount || (s.amount / 90),
-                target_date: s.target_date,
-                early_withdrawal_fee_percent: s.early_withdrawal_fee_percent || 4,
-                status: s.status,
-                auto_save: s.auto_save || true,
-                created_at: s.created_at
-            });
-        });
-        
-        // Format target
-        (target.data || []).forEach(t => {
-            const withdrawalDate = new Date(t.withdrawal_date);
-            const today = new Date();
-            const canWithdraw = withdrawalDate <= today && (t.current_saved >= t.target_amount);
-            
-            allSavings.push({
-                id: t.id,
-                type: 'target',
-                target_amount: t.target_amount || 0,
-                current_saved: t.current_saved || 0,
-                daily_savings_amount: t.daily_savings_amount,
-                withdrawal_date: t.withdrawal_date,
-                days_remaining: t.days_remaining || 0,
-                status: canWithdraw ? 'completed' : t.status,
-                auto_save: t.auto_save || true,
-                can_withdraw: canWithdraw,
-                created_at: t.created_at
-            });
-        });
-        
-        // Format spare_change
-        (spareChange.data || []).forEach(s => {
-            allSavings.push({
-                id: s.id,
-                type: 'spare_change',
-                current_saved: s.current_saved || 0,
-                total_saved: s.total_saved || 0,
-                percentage_rate: s.percentage_rate || 3,
-                status: s.status,
-                auto_save: s.auto_save || true,
-                created_at: s.created_at
-            });
-        });
-        
-        res.json(allSavings);
-    } catch (error) {
-        console.error('Get savings error:', error);
-        res.status(500).json({ error: 'Failed to fetch savings: ' + error.message });
-    }
-});
-
-// Get single savings details
-app.get('/api/user/savings/:type/:id', authenticate, async (req, res) => {
-    const { type, id } = req.params;
-    
-    try {
-        console.log(`Fetching ${type} savings ${id} for user:`, req.user.id);
-        
-        let result = null;
-        
-        switch(type) {
-            case 'harvest':
-                const { data: harvest, error: hError } = await supabase
-                    .from('user_harvest_enrollments')
-                    .select('*, harvest_plans(name, daily_amount, duration_days, reward_items)')
-                    .eq('id', id)
-                    .eq('user_id', req.user.id)
-                    .single();
-                if (hError) throw hError;
-                result = {
-                    ...harvest,
-                    type: 'harvest',
-                    plan_name: harvest.harvest_plans?.name,
-                    total_days: harvest.harvest_plans?.duration_days,
-                    reward_items: harvest.harvest_plans?.reward_items
-                };
-                break;
-                
-            case 'fixed':
-                const { data: fixed, error: fError } = await supabase
-                    .from('fixed_savings')
-                    .select('*')
-                    .eq('id', id)
-                    .eq('user_id', req.user.id)
-                    .single();
-                if (fError) throw fError;
-                
-                const maturityDate = new Date(fixed.maturity_date);
-                const today = new Date();
-                const daysUntilMaturity = Math.max(0, Math.ceil((maturityDate - today) / (1000 * 60 * 60 * 24)));
-                const isMatured = maturityDate <= today;
-                const freeWithdrawalDate = new Date(fixed.next_free_withdrawal_date);
-                const isFreeWithdrawal = isMatured && today <= freeWithdrawalDate;
-                const interestEarned = (fixed.current_saved || 0) * (fixed.interest_rate / 100);
-                
-                result = {
-                    ...fixed,
-                    type: 'fixed',
-                    days_until_maturity: daysUntilMaturity,
-                    status: isMatured ? 'matured' : fixed.status,
-                    is_free_withdrawal_available: isFreeWithdrawal,
-                    interest_earned: interestEarned,
-                    total_with_interest: (fixed.current_saved || 0) + interestEarned,
-                    duration_days: 30
-                };
-                break;
-                
-            case 'savebox':
-                const { data: savebox, error: sError } = await supabase
-                    .from('savebox_savings')
-                    .select('*')
-                    .eq('id', id)
-                    .eq('user_id', req.user.id)
-                    .single();
-                if (sError) throw sError;
-                result = { ...savebox, type: 'savebox' };
-                break;
-                
-            case 'target':
-                const { data: target, error: tError } = await supabase
-                    .from('target_savings')
-                    .select('*')
-                    .eq('id', id)
-                    .eq('user_id', req.user.id)
-                    .single();
-                if (tError) throw tError;
-                
-                const withdrawalDate = new Date(target.withdrawal_date);
-                const daysUntilWithdrawal = Math.max(0, Math.ceil((withdrawalDate - today) / (1000 * 60 * 60 * 24)));
-                const percentComplete = target.target_amount > 0 ? (target.current_saved / target.target_amount) * 100 : 0;
-                const canWithdraw = withdrawalDate <= today && target.current_saved >= target.target_amount;
-                
-                result = {
-                    ...target,
-                    type: 'target',
-                    days_until_withdrawal: daysUntilWithdrawal,
-                    percent_complete: percentComplete,
-                    can_withdraw: canWithdraw,
-                    status: canWithdraw ? 'completed' : target.status
-                };
-                break;
-                
-            case 'spare_change':
-                const { data: spare, error: spError } = await supabase
-                    .from('spare_change_savings')
-                    .select('*')
-                    .eq('id', id)
-                    .eq('user_id', req.user.id)
-                    .single();
-                if (spError) throw spError;
-                result = { ...spare, type: 'spare_change' };
-                break;
-                
-            default:
-                return res.status(400).json({ error: 'Invalid savings type' });
-        }
-        
-        res.json(result);
-    } catch (error) {
-        console.error('Get savings detail error:', error);
-        res.status(500).json({ error: 'Failed to fetch savings details: ' + error.message });
-    }
-});*/
 
 // Get all savings for user
 app.get("/api/user/savings", authenticate, async (req, res) => {
@@ -4332,143 +3935,7 @@ app.post(
 
 // ==================== LEDGER SYSTEM ROUTES ====================
 
-// Process transaction with double entry bookkeeping
-/*async function processDoubleEntry(
-  transaction,
-  user,
-  fromAccount,
-  toAccount,
-  amount,
-  description,
-  transactionType,
-) {
-  const results = [];
-  const now = new Date();
 
-  // Case 1: Transfer between customer accounts
-  if (fromAccount && toAccount && fromAccount.user_id !== toAccount.user_id) {
-    // Debit sender's customer liability account
-    results.push({
-      user_id: fromAccount.user_id,
-      account_code: "2000", // Customer Liabilities
-      account_name: "Customer Liabilities",
-      debit_amount: amount,
-      credit_amount: 0,
-      description: `Debit - Transfer to account ${toAccount.account_number}`,
-      reference: transaction.transaction_id,
-      entry_date: now,
-      transaction_id: transaction.id,
-    });
-
-    // Credit receiver's customer liability account
-    results.push({
-      user_id: toAccount.user_id,
-      account_code: "2000", // Customer Liabilities
-      account_name: "Customer Liabilities",
-      debit_amount: 0,
-      credit_amount: amount,
-      description: `Credit - Transfer from account ${fromAccount.account_number}`,
-      reference: transaction.transaction_id,
-      entry_date: now,
-      transaction_id: transaction.id,
-    });
-
-    // Record fee income if applicable
-    if (transaction.fee_amount > 0) {
-      results.push({
-        user_id: null,
-        account_code: "4020", // Transfer Fees
-        account_name: "Transfer Fees",
-        debit_amount: 0,
-        credit_amount: transaction.fee_amount,
-        description: `Fee for transfer ${transaction.transaction_id}`,
-        reference: transaction.transaction_id,
-        entry_date: now,
-        transaction_id: transaction.id,
-      });
-
-      results.push({
-        user_id: null,
-        account_code: "1030", // Settlement Accounts
-        account_name: "Settlement Accounts",
-        debit_amount: transaction.fee_amount,
-        credit_amount: 0,
-        description: `Settlement for transfer fee`,
-        reference: transaction.transaction_id,
-        entry_date: now,
-        transaction_id: transaction.id,
-      });
-    }
-  }
-
-  // Case 2: Deposit (User adding money)
-  else if (toAccount && !fromAccount) {
-    // Debit settlement account (money coming in)
-    results.push({
-      user_id: null,
-      account_code: "1030", // Settlement Accounts
-      account_name: "Settlement Accounts",
-      debit_amount: amount,
-      credit_amount: 0,
-      description: `Deposit from user ${user.email}`,
-      reference: transaction.transaction_id,
-      entry_date: now,
-      transaction_id: transaction.id,
-    });
-
-    // Credit customer liability (user's balance increases)
-    results.push({
-      user_id: user.id,
-      account_code: "2000", // Customer Liabilities
-      account_name: "Customer Liabilities",
-      debit_amount: 0,
-      credit_amount: amount,
-      description: `Deposit to account ${toAccount.account_number}`,
-      reference: transaction.transaction_id,
-      entry_date: now,
-      transaction_id: transaction.id,
-    });
-  }
-
-  // Case 3: Withdrawal
-  else if (fromAccount && !toAccount) {
-    // Debit customer liability (user's balance decreases)
-    results.push({
-      user_id: user.id,
-      account_code: "2000", // Customer Liabilities
-      account_name: "Customer Liabilities",
-      debit_amount: amount,
-      credit_amount: 0,
-      description: `Withdrawal from account ${fromAccount.account_number}`,
-      reference: transaction.transaction_id,
-      entry_date: now,
-      transaction_id: transaction.id,
-    });
-
-    // Credit settlement account
-    results.push({
-      user_id: null,
-      account_code: "1030", // Settlement Accounts
-      account_name: "Settlement Accounts",
-      debit_amount: 0,
-      credit_amount: amount,
-      description: `Withdrawal payout`,
-      reference: transaction.transaction_id,
-      entry_date: now,
-      transaction_id: transaction.id,
-    });
-  }
-
-  // Insert all ledger entries
-  for (const entry of results) {
-    entry.posted_by = req?.user?.id || null;
-    entry.posted_at = now;
-
-    await supabase.from("general_ledger").insert(entry);
-  }
-
-  return results;
-}*/
 
 // Process transaction with double entry bookkeeping (UPDATED)
 async function processDoubleEntry(
@@ -4636,44 +4103,7 @@ async function processDoubleEntry(
   return results;
 }
 
-// Update single ledger for user account
-/*async function updateSingleLedger(
-  accountId,
-  userId,
-  amount,
-  transactionType,
-  description,
-  direction,
-  transactionId,
-) {
-  // Get current balance
-  const { data: account } = await supabase
-    .from("accounts")
-    .select("balance, account_number")
-    .eq("id", accountId)
-    .single();
 
-  const balanceBefore = account?.balance || 0;
-  const balanceAfter =
-    direction === "Debit" ? balanceBefore - amount : balanceBefore + amount;
-
-  const { error } = await supabase.from("single_ledger").insert({
-    user_id: userId,
-    account_id: accountId,
-    account_number: account?.account_number,
-    transaction_id: transactionId,
-    transaction_type: transactionType,
-    amount: amount,
-    balance_before: balanceBefore,
-    balance_after: balanceAfter,
-    description: description,
-    direction: direction,
-  });
-
-  if (error) {
-    console.error("Single ledger update error:", error);
-  }
-}*/
 
 // Update single ledger for user account (UPDATED)
 async function updateSingleLedger(
