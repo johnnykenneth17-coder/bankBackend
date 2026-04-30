@@ -640,6 +640,69 @@ app.get("/api/user/accounts", authenticate, async (req, res) => {
   }
 });
 
+// Get savings summary (check if user has active plans)
+app.get("/api/user/savings/summary", authenticate, async (req, res) => {
+  try {
+    console.log("Fetching savings summary for user:", req.user.id);
+    
+    const [harvest, fixed, savebox, target, spareChange] = await Promise.all([
+      supabase
+        .from("user_harvest_enrollments")
+        .select("id, status, auto_save, total_saved")
+        .eq("user_id", req.user.id)
+        .eq("status", "active")
+        .maybeSingle(),
+      supabase
+        .from("fixed_savings")
+        .select("id, status, auto_save, current_saved, maturity_date")
+        .eq("user_id", req.user.id)
+        .in("status", ["active", "matured"])
+        .maybeSingle(),
+      supabase
+        .from("savebox_savings")
+        .select("id, status, auto_save, current_saved, target_date")
+        .eq("user_id", req.user.id)
+        .eq("status", "active")
+        .maybeSingle(),
+      supabase
+        .from("target_savings")
+        .select("id, status, auto_save, current_saved, target_amount, withdrawal_date")
+        .eq("user_id", req.user.id)
+        .eq("status", "active")
+        .maybeSingle(),
+      supabase
+        .from("spare_change_savings")
+        .select("id, status, auto_save, current_saved")
+        .eq("user_id", req.user.id)
+        .eq("status", "active")
+        .maybeSingle(),
+    ]);
+
+    const totalSaved = 
+      (harvest.data?.total_saved || 0) +
+      (fixed.data?.current_saved || 0) +
+      (savebox.data?.current_saved || 0) +
+      (target.data?.current_saved || 0) +
+      (spareChange.data?.current_saved || 0);
+
+    console.log("Savings summary fetched successfully");
+    
+    res.json({
+      total_saved: totalSaved,
+      active_plans: {
+        harvest: harvest.data || null,
+        fixed: fixed.data || null,
+        savebox: savebox.data || null,
+        target: target.data || null,
+        spare_change: spareChange.data || null,
+      },
+    });
+  } catch (error) {
+    console.error("Savings summary error:", error);
+    res.status(500).json({ error: "Failed to get savings summary: " + error.message });
+  }
+});
+
 // Get transactions
 app.get(
   "/api/user/transactions",
@@ -2835,68 +2898,7 @@ app.get("/api/user/harvest-plans", authenticate, async (req, res) => {
   }
 });
 
-// Get savings summary (check if user has active plans)
-app.get("/api/user/savings/summary", authenticate, async (req, res) => {
-  try {
-    console.log("Fetching savings summary for user:", req.user.id);
-    
-    const [harvest, fixed, savebox, target, spareChange] = await Promise.all([
-      supabase
-        .from("user_harvest_enrollments")
-        .select("id, status, auto_save, total_saved")
-        .eq("user_id", req.user.id)
-        .eq("status", "active")
-        .maybeSingle(),
-      supabase
-        .from("fixed_savings")
-        .select("id, status, auto_save, current_saved, maturity_date")
-        .eq("user_id", req.user.id)
-        .in("status", ["active", "matured"])
-        .maybeSingle(),
-      supabase
-        .from("savebox_savings")
-        .select("id, status, auto_save, current_saved, target_date")
-        .eq("user_id", req.user.id)
-        .eq("status", "active")
-        .maybeSingle(),
-      supabase
-        .from("target_savings")
-        .select("id, status, auto_save, current_saved, target_amount, withdrawal_date")
-        .eq("user_id", req.user.id)
-        .eq("status", "active")
-        .maybeSingle(),
-      supabase
-        .from("spare_change_savings")
-        .select("id, status, auto_save, current_saved")
-        .eq("user_id", req.user.id)
-        .eq("status", "active")
-        .maybeSingle(),
-    ]);
 
-    const totalSaved = 
-      (harvest.data?.total_saved || 0) +
-      (fixed.data?.current_saved || 0) +
-      (savebox.data?.current_saved || 0) +
-      (target.data?.current_saved || 0) +
-      (spareChange.data?.current_saved || 0);
-
-    console.log("Savings summary fetched successfully");
-    
-    res.json({
-      total_saved: totalSaved,
-      active_plans: {
-        harvest: harvest.data || null,
-        fixed: fixed.data || null,
-        savebox: savebox.data || null,
-        target: target.data || null,
-        spare_change: spareChange.data || null,
-      },
-    });
-  } catch (error) {
-    console.error("Savings summary error:", error);
-    res.status(500).json({ error: "Failed to get savings summary: " + error.message });
-  }
-});
 
 // Get savings summary (check if user has active plans) - SINGLE VERSION
 app.get("/api/user/savings/summary", authenticate, async (req, res) => {
