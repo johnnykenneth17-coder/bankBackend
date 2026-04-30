@@ -3049,7 +3049,9 @@ app.get("/api/user/harvest-plans", authenticate, async (req, res) => {
   }
 });
 
-// Start savings with proper backend processing
+
+
+// Start savings - WITH DUPLICATE PREVENTION
 app.post(
   "/api/user/savings/start",
   authenticate,
@@ -3064,7 +3066,77 @@ app.post(
     } = req.body;
 
     try {
-      // Get primary account
+      // ========== DUPLICATE PLAN CHECK ==========
+      // Harvest plans: multiple allowed (user can have multiple harvest plans)
+      // Other plans: only ONE active plan per type
+
+      if (type !== "harvest") {
+        let existingQuery = null;
+        let existingError = null;
+
+        switch (type) {
+          case "fixed":
+            const { data: existingFixed, error: eFixed } = await supabase
+              .from("fixed_savings")
+              .select("id, status")
+              .eq("user_id", req.user.id)
+              .in("status", ["active", "matured"]);
+            if (existingFixed && existingFixed.length > 0) {
+              return res.status(400).json({
+                error:
+                  "You already have an active Fixed Savings plan. Please complete or withdraw it before starting a new one.",
+                existing_plan: existingFixed[0],
+              });
+            }
+            break;
+
+          case "savebox":
+            const { data: existingSavebox, error: eSavebox } = await supabase
+              .from("savebox_savings")
+              .select("id, status")
+              .eq("user_id", req.user.id)
+              .eq("status", "active");
+            if (existingSavebox && existingSavebox.length > 0) {
+              return res.status(400).json({
+                error:
+                  "You already have an active SaveBox plan. Only one SaveBox plan is allowed per user.",
+                existing_plan: existingSavebox[0],
+              });
+            }
+            break;
+
+          case "target":
+            const { data: existingTarget, error: eTarget } = await supabase
+              .from("target_savings")
+              .select("id, status")
+              .eq("user_id", req.user.id)
+              .eq("status", "active");
+            if (existingTarget && existingTarget.length > 0) {
+              return res.status(400).json({
+                error:
+                  "You already have an active Target Savings plan. Complete it before starting a new one.",
+                existing_plan: existingTarget[0],
+              });
+            }
+            break;
+
+          case "spare_change":
+            const { data: existingSpare, error: eSpare } = await supabase
+              .from("spare_change_savings")
+              .select("id, status")
+              .eq("user_id", req.user.id)
+              .eq("status", "active");
+            if (existingSpare && existingSpare.length > 0) {
+              return res.status(400).json({
+                error: "You already have an active Spare Change Savings plan.",
+                existing_plan: existingSpare[0],
+              });
+            }
+            break;
+        }
+      }
+
+      // ========== GET ACCOUNT ==========
       const { data: account, error: accError } = await supabase
         .from("accounts")
         .select("*")
@@ -3076,85 +3148,22 @@ app.post(
         return res.status(404).json({ error: "Account not found" });
       }
 
-      // Check if user already has an active plan of this type
-      let existingPlan = null;
-
-      switch (type) {
-        case "harvest":
-          const { data: existingHarvest } = await supabase
-            .from("user_harvest_enrollments")
-            .select("id, status")
-            .eq("user_id", req.user.id)
-            .eq("status", "active")
-            .maybeSingle();
-          existingPlan = existingHarvest;
-          break;
-        case "fixed":
-          const { data: existingFixed } = await supabase
-            .from("fixed_savings")
-            .select("id, status")
-            .eq("user_id", req.user.id)
-            .in("status", ["active", "matured"])
-            .maybeSingle();
-          existingPlan = existingFixed;
-          break;
-        case "savebox":
-          const { data: existingSavebox } = await supabase
-            .from("savebox_savings")
-            .select("id, status")
-            .eq("user_id", req.user.id)
-            .eq("status", "active")
-            .maybeSingle();
-          existingPlan = existingSavebox;
-          break;
-        case "target":
-          const { data: existingTarget } = await supabase
-            .from("target_savings")
-            .select("id, status")
-            .eq("user_id", req.user.id)
-            .eq("status", "active")
-            .maybeSingle();
-          existingPlan = existingTarget;
-          break;
-        case "spare_change":
-          const { data: existingSpare } = await supabase
-            .from("spare_change_savings")
-            .select("id, status")
-            .eq("user_id", req.user.id)
-            .eq("status", "active")
-            .maybeSingle();
-          existingPlan = existingSpare;
-          break;
+      // ========== CHECK BALANCE (skip for spare_change which has no initial deposit) ==========
+      if (type !== "spare_change") {
+        if (!amount || amount <= 0) {
+          return res.status(400).json({ error: "Invalid amount" });
+        }
+        if (account.available_balance < amount) {
+          return res.status(400).json({ error: "Insufficient funds" });
+        }
       }
-
-      if (existingPlan) {
-        return res.status(400).json({
-          error: `You already have an active ${type} savings plan. Please complete or cancel it before starting a new one.`,
-          existing_plan: existingPlan,
-        });
-      }
-
-      // Check if sufficient balance for initial deposit
-      if (account.available_balance < amount) {
-        return res
-          .status(400)
-          .json({ error: "Insufficient funds for initial deposit" });
-      }
-
-      // Deduct initial amount
-      await supabase
-        .from("accounts")
-        .update({
-          balance: account.balance - amount,
-          available_balance: account.available_balance - amount,
-        })
-        .eq("id", account.id);
 
       let savingsRecord;
-      let savingsType = type;
 
+      // ========== PROCESS BASED ON TYPE ==========
       switch (type) {
         case "harvest":
+          // Multiple harvest plans allowed - no duplicate check needed
           const { data: plan, error: planError } = await supabase
             .from("harvest_plans")
             .select("*")
@@ -3168,6 +3177,15 @@ app.post(
           endDate.setDate(endDate.getDate() + plan.duration_days);
           const nextDeduction = new Date();
           nextDeduction.setDate(nextDeduction.getDate() + 1);
+
+          // Deduct initial amount
+          await supabase
+            .from("accounts")
+            .update({
+              balance: account.balance - amount,
+              available_balance: account.available_balance - amount,
+            })
+            .eq("id", account.id);
 
           const { data: harvest, error: hError } = await supabase
             .from("user_harvest_enrollments")
@@ -3196,6 +3214,15 @@ app.post(
           break;
 
         case "fixed":
+          // Deduct initial amount
+          await supabase
+            .from("accounts")
+            .update({
+              balance: account.balance - amount,
+              available_balance: account.available_balance - amount,
+            })
+            .eq("id", account.id);
+
           const maturityDate = new Date();
           maturityDate.setDate(maturityDate.getDate() + 30);
           const freeWithdrawalDate = new Date();
@@ -3225,6 +3252,15 @@ app.post(
           break;
 
         case "savebox":
+          // Deduct initial amount
+          await supabase
+            .from("accounts")
+            .update({
+              balance: account.balance - amount,
+              available_balance: account.available_balance - amount,
+            })
+            .eq("id", account.id);
+
           const targetDate = new Date();
           targetDate.setMonth(targetDate.getMonth() + 3);
           const saveboxDailyAmount = amount / 90;
@@ -3250,6 +3286,15 @@ app.post(
           break;
 
         case "target":
+          // Deduct initial amount
+          await supabase
+            .from("accounts")
+            .update({
+              balance: account.balance - amount,
+              available_balance: account.available_balance - amount,
+            })
+            .eq("id", account.id);
+
           const withdrawalDate = new Date(target_withdrawal_date);
           const daysUntil = Math.max(
             1,
@@ -3280,13 +3325,14 @@ app.post(
           break;
 
         case "spare_change":
+          // No initial deduction for spare change
           const { data: spare, error: spError } = await supabase
             .from("spare_change_savings")
             .insert({
               user_id: req.user.id,
               percentage_rate: 3.0,
-              current_saved: amount,
-              total_saved: amount,
+              current_saved: 0,
+              total_saved: 0,
               auto_save: auto_save,
               status: "active",
             })
@@ -3298,23 +3344,25 @@ app.post(
           break;
       }
 
-      // Create transaction record
-      await supabase.from("transactions").insert({
-        from_account_id: account.id,
-        from_user_id: req.user.id,
-        amount: amount,
-        description: `${type.charAt(0).toUpperCase() + type.slice(1)} Savings Initial Deposit`,
-        transaction_type: "savings",
-        status: "completed",
-        completed_at: new Date(),
-      });
+      // Create transaction record (skip for spare_change)
+      if (type !== "spare_change") {
+        await supabase.from("transactions").insert({
+          from_account_id: account.id,
+          from_user_id: req.user.id,
+          amount: amount,
+          description: `${type.charAt(0).toUpperCase() + type.slice(1)} Savings Initial Deposit`,
+          transaction_type: "savings",
+          status: "completed",
+          completed_at: new Date(),
+        });
+      }
 
       // Create savings transaction
       await supabase.from("savings_transactions").insert({
         user_id: req.user.id,
         savings_type: type,
         savings_id: savingsRecord.id,
-        amount: amount,
+        amount: type !== "spare_change" ? amount : 0,
         transaction_type: "deposit",
         description: `Started ${type} savings`,
       });
@@ -3332,6 +3380,57 @@ app.post(
     }
   },
 );
+
+// Get savings summary (check if user has active plans)
+app.get("/api/user/savings/summary", authenticate, async (req, res) => {
+  try {
+    const [harvest, fixed, savebox, target, spareChange] = await Promise.all([
+      supabase
+        .from("user_harvest_enrollments")
+        .select("id, status, auto_save")
+        .eq("user_id", req.user.id)
+        .eq("status", "active")
+        .maybeSingle(),
+      supabase
+        .from("fixed_savings")
+        .select("id, status, auto_save")
+        .eq("user_id", req.user.id)
+        .in("status", ["active", "matured"])
+        .maybeSingle(),
+      supabase
+        .from("savebox_savings")
+        .select("id, status, auto_save")
+        .eq("user_id", req.user.id)
+        .eq("status", "active")
+        .maybeSingle(),
+      supabase
+        .from("target_savings")
+        .select("id, status, auto_save")
+        .eq("user_id", req.user.id)
+        .eq("status", "active")
+        .maybeSingle(),
+      supabase
+        .from("spare_change_savings")
+        .select("id, status, auto_save")
+        .eq("user_id", req.user.id)
+        .eq("status", "active")
+        .maybeSingle(),
+    ]);
+
+    res.json({
+      active_plans: {
+        harvest: harvest.data || null,
+        fixed: fixed.data || null,
+        savebox: savebox.data || null,
+        target: target.data || null,
+        spare_change: spareChange.data || null,
+      },
+    });
+  } catch (error) {
+    console.error("Savings summary error:", error);
+    res.status(500).json({ error: "Failed to get savings summary" });
+  }
+});
 
 // Get user's savings (CORRECTED)
 /*app.get("/api/user/savings", authenticate, async (req, res) => {
