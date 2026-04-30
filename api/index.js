@@ -2970,6 +2970,9 @@ app.get("/api/user/savings/summary", authenticate, async (req, res) => {
   }
 });
 
+
+
+
 // Changed from 'summary' to 'status' to avoid keyword conflicts
 app.get("/api/user/savings/status", authenticate, async (req, res) => {
   try {
@@ -3038,6 +3041,8 @@ app.get("/api/user/savings/status", authenticate, async (req, res) => {
     res.status(500).json({ error: "Failed to get savings status: " + error.message });
   }
 });
+
+
 
 // Start savings - WITH DUPLICATE PREVENTION
 app.post(
