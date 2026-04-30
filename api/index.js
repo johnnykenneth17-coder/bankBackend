@@ -80,6 +80,11 @@ const transporter = nodemailer.createTransport({
   },
 });
 
+// TEMPORARY DEBUG ROUTE - Put this FIRST
+app.get("/api/test", (req, res) => {
+    res.json({ message: "Server is working!", time: new Date().toISOString() });
+});
+
 // ==================== AUTHENTICATION ROUTES ====================
 
 // Register - Updated to handle compressed images
