@@ -4006,7 +4006,7 @@ app.post(
 );
 
 // Get savings summary for dashboard
-app.get("/api/user/savings/summary", authenticate, async (req, res) => {
+/*app.get("/api/user/savings/summary", authenticate, async (req, res) => {
   try {
     const [harvest, fixed, savebox, target, spareChange] = await Promise.all([
       supabase
@@ -4059,7 +4059,7 @@ app.get("/api/user/savings/summary", authenticate, async (req, res) => {
     console.error("Savings summary error:", error);
     res.status(500).json({ error: "Failed to get savings summary" });
   }
-});
+});*/
 
 // Bill payment
 app.post(
