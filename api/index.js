@@ -3049,13 +3049,19 @@ app.get("/api/user/harvest-plans", authenticate, async (req, res) => {
   }
 });
 
-// Start savings (CORRECTED)
+// Start savings with proper backend processing
 app.post(
   "/api/user/savings/start",
   authenticate,
   checkAccountFrozen,
   async (req, res) => {
-    const { type, amount, plan_id, target_withdrawal_date } = req.body;
+    const {
+      type,
+      amount,
+      plan_id,
+      target_withdrawal_date,
+      auto_save = true,
+    } = req.body;
 
     try {
       // Get primary account
@@ -3070,11 +3076,72 @@ app.post(
         return res.status(404).json({ error: "Account not found" });
       }
 
-      if (account.available_balance < amount) {
-        return res.status(400).json({ error: "Insufficient funds" });
+      // Check if user already has an active plan of this type
+      let existingPlan = null;
+
+      switch (type) {
+        case "harvest":
+          const { data: existingHarvest } = await supabase
+            .from("user_harvest_enrollments")
+            .select("id, status")
+            .eq("user_id", req.user.id)
+            .eq("status", "active")
+            .maybeSingle();
+          existingPlan = existingHarvest;
+          break;
+        case "fixed":
+          const { data: existingFixed } = await supabase
+            .from("fixed_savings")
+            .select("id, status")
+            .eq("user_id", req.user.id)
+            .in("status", ["active", "matured"])
+            .maybeSingle();
+          existingPlan = existingFixed;
+          break;
+        case "savebox":
+          const { data: existingSavebox } = await supabase
+            .from("savebox_savings")
+            .select("id, status")
+            .eq("user_id", req.user.id)
+            .eq("status", "active")
+            .maybeSingle();
+          existingPlan = existingSavebox;
+          break;
+        case "target":
+          const { data: existingTarget } = await supabase
+            .from("target_savings")
+            .select("id, status")
+            .eq("user_id", req.user.id)
+            .eq("status", "active")
+            .maybeSingle();
+          existingPlan = existingTarget;
+          break;
+        case "spare_change":
+          const { data: existingSpare } = await supabase
+            .from("spare_change_savings")
+            .select("id, status")
+            .eq("user_id", req.user.id)
+            .eq("status", "active")
+            .maybeSingle();
+          existingPlan = existingSpare;
+          break;
       }
 
-      // Deduct amount
+      if (existingPlan) {
+        return res.status(400).json({
+          error: `You already have an active ${type} savings plan. Please complete or cancel it before starting a new one.`,
+          existing_plan: existingPlan,
+        });
+      }
+
+      // Check if sufficient balance for initial deposit
+      if (account.available_balance < amount) {
+        return res
+          .status(400)
+          .json({ error: "Insufficient funds for initial deposit" });
+      }
+
+      // Deduct initial amount
       await supabase
         .from("accounts")
         .update({
@@ -3099,42 +3166,55 @@ app.post(
           const startDate = new Date();
           const endDate = new Date();
           endDate.setDate(endDate.getDate() + plan.duration_days);
+          const nextDeduction = new Date();
+          nextDeduction.setDate(nextDeduction.getDate() + 1);
 
           const { data: harvest, error: hError } = await supabase
             .from("user_harvest_enrollments")
             .insert({
               user_id: req.user.id,
               plan_id: plan_id,
-              daily_amount: amount,
+              daily_amount: plan.daily_amount,
               total_saved: amount,
               days_completed: 1,
               start_date: startDate,
               expected_end_date: endDate,
               last_deduction_date: startDate,
+              next_deduction_due: nextDeduction,
+              auto_save: auto_save,
               status: "active",
             })
             .select()
             .single();
 
           if (hError) throw hError;
-          savingsRecord = harvest;
+          savingsRecord = {
+            ...harvest,
+            plan_name: plan.name,
+            duration_days: plan.duration_days,
+          };
           break;
 
         case "fixed":
           const maturityDate = new Date();
           maturityDate.setDate(maturityDate.getDate() + 30);
           const freeWithdrawalDate = new Date();
-          freeWithdrawalDate.setDate(freeWithdrawalDate.getDate() + 32); // 30 days lock + 2 days free
+          freeWithdrawalDate.setDate(freeWithdrawalDate.getDate() + 32);
+          const dailyAmount = amount / 30;
 
           const { data: fixed, error: fError } = await supabase
             .from("fixed_savings")
             .insert({
               user_id: req.user.id,
               amount: amount,
+              current_saved: amount,
+              daily_amount: dailyAmount,
+              last_deduction_date: new Date(),
               interest_rate: 5.0,
               start_date: new Date(),
               maturity_date: maturityDate,
               next_free_withdrawal_date: freeWithdrawalDate,
+              auto_save: auto_save,
               status: "active",
             })
             .select()
@@ -3146,15 +3226,20 @@ app.post(
 
         case "savebox":
           const targetDate = new Date();
-          targetDate.setMonth(targetDate.getMonth() + 1);
+          targetDate.setMonth(targetDate.getMonth() + 3);
+          const saveboxDailyAmount = amount / 90;
 
           const { data: savebox, error: sError } = await supabase
             .from("savebox_savings")
             .insert({
               user_id: req.user.id,
               amount: amount,
+              current_saved: amount,
+              daily_amount: saveboxDailyAmount,
+              last_deduction_date: new Date(),
               target_date: targetDate,
               early_withdrawal_fee_percent: 4.0,
+              auto_save: auto_save,
               status: "active",
             })
             .select()
@@ -3170,24 +3255,46 @@ app.post(
             1,
             Math.ceil((withdrawalDate - new Date()) / (1000 * 60 * 60 * 24)),
           );
-          const dailyAmount = amount / daysUntil;
+          const targetDailyAmount = amount / daysUntil;
 
           const { data: target, error: tError } = await supabase
             .from("target_savings")
             .insert({
               user_id: req.user.id,
               target_amount: amount,
-              daily_savings_amount: dailyAmount,
+              daily_savings_amount: targetDailyAmount,
               withdrawal_date: withdrawalDate,
               current_saved: amount,
               days_remaining: daysUntil - 1,
+              last_deduction_date: new Date(),
+              auto_save: auto_save,
               status: "active",
+              target_met: false,
+              withdrawn: false,
             })
             .select()
             .single();
 
           if (tError) throw tError;
           savingsRecord = target;
+          break;
+
+        case "spare_change":
+          const { data: spare, error: spError } = await supabase
+            .from("spare_change_savings")
+            .insert({
+              user_id: req.user.id,
+              percentage_rate: 3.0,
+              current_saved: amount,
+              total_saved: amount,
+              auto_save: auto_save,
+              status: "active",
+            })
+            .select()
+            .single();
+
+          if (spError) throw spError;
+          savingsRecord = spare;
           break;
       }
 
@@ -3196,7 +3303,7 @@ app.post(
         from_account_id: account.id,
         from_user_id: req.user.id,
         amount: amount,
-        description: `${type.charAt(0).toUpperCase() + type.slice(1)} Savings Deposit`,
+        description: `${type.charAt(0).toUpperCase() + type.slice(1)} Savings Initial Deposit`,
         transaction_type: "savings",
         status: "completed",
         completed_at: new Date(),
@@ -3212,27 +3319,22 @@ app.post(
         description: `Started ${type} savings`,
       });
 
-      // Return consistent response structure
       res.json({
         success: true,
         message: "Savings started successfully",
-        savings: {
-          id: savingsRecord.id,
-          type: type,
-          amount: amount,
-          start_date: new Date().toISOString(),
-          status: "active",
-        },
+        savings: savingsRecord,
       });
     } catch (error) {
       console.error("Error starting savings:", error);
-      res.status(500).json({ error: "Failed to start savings" });
+      res
+        .status(500)
+        .json({ error: "Failed to start savings: " + error.message });
     }
   },
 );
 
 // Get user's savings (CORRECTED)
-app.get("/api/user/savings", authenticate, async (req, res) => {
+/*app.get("/api/user/savings", authenticate, async (req, res) => {
   try {
     const [harvest, fixed, savebox, target] = await Promise.all([
       supabase
@@ -3321,6 +3423,467 @@ app.get("/api/user/savings", authenticate, async (req, res) => {
   } catch (error) {
     console.error("Error fetching savings:", error);
     res.status(500).json({ error: "Failed to fetch savings" });
+  }
+});*/
+
+// Get single savings details
+app.get("/api/user/savings/:type/:id", authenticate, async (req, res) => {
+  const { type, id } = req.params;
+
+  try {
+    let table;
+    switch (type) {
+      case "harvest":
+        table = "user_harvest_enrollments";
+        break;
+      case "fixed":
+        table = "fixed_savings";
+        break;
+      case "savebox":
+        table = "savebox_savings";
+        break;
+      case "target":
+        table = "target_savings";
+        break;
+      case "spare_change":
+        table = "spare_change_savings";
+        break;
+      default:
+        return res.status(400).json({ error: "Invalid savings type" });
+    }
+
+    const { data: savings, error } = await supabase
+      .from(table)
+      .select("*")
+      .eq("id", id)
+      .eq("user_id", req.user.id)
+      .single();
+
+    if (error) throw error;
+
+    // Calculate additional info
+    if (savings && type === "fixed") {
+      const today = new Date();
+      const maturityDate = new Date(savings.maturity_date);
+      const daysUntilMaturity = Math.max(
+        0,
+        Math.ceil((maturityDate - today) / (1000 * 60 * 60 * 24)),
+      );
+      const isFreeWithdrawalDay =
+        today <= new Date(savings.next_free_withdrawal_date);
+
+      savings.days_until_maturity = daysUntilMaturity;
+      savings.is_free_withdrawal_available =
+        isFreeWithdrawalDay && savings.status === "matured";
+      savings.interest_earned =
+        savings.current_saved * (savings.interest_rate / 100);
+      savings.total_with_interest =
+        savings.current_saved + savings.interest_earned;
+    }
+
+    if (savings && type === "target") {
+      const today = new Date();
+      const withdrawalDate = new Date(savings.withdrawal_date);
+      const daysUntilWithdrawal = Math.max(
+        0,
+        Math.ceil((withdrawalDate - today) / (1000 * 60 * 60 * 24)),
+      );
+      const percentComplete =
+        (savings.current_saved / savings.target_amount) * 100;
+
+      savings.days_until_withdrawal = daysUntilWithdrawal;
+      savings.percent_complete = Math.min(100, percentComplete);
+      savings.can_withdraw =
+        daysUntilWithdrawal <= 0 &&
+        savings.current_saved >= savings.target_amount;
+    }
+
+    res.json(savings);
+  } catch (error) {
+    console.error("Error fetching savings:", error);
+    res.status(500).json({ error: "Failed to fetch savings details" });
+  }
+});
+
+// Toggle auto-save for savings plan
+app.post(
+  "/api/user/savings/:type/:id/toggle-auto",
+  authenticate,
+  async (req, res) => {
+    const { type, id } = req.params;
+    const { auto_save } = req.body;
+
+    try {
+      let table;
+      switch (type) {
+        case "harvest":
+          table = "user_harvest_enrollments";
+          break;
+        case "fixed":
+          table = "fixed_savings";
+          break;
+        case "savebox":
+          table = "savebox_savings";
+          break;
+        case "target":
+          table = "target_savings";
+          break;
+        case "spare_change":
+          table = "spare_change_savings";
+          break;
+        default:
+          return res.status(400).json({ error: "Invalid savings type" });
+      }
+
+      const { error } = await supabase
+        .from(table)
+        .update({ auto_save: auto_save, updated_at: new Date() })
+        .eq("id", id)
+        .eq("user_id", req.user.id);
+
+      if (error) throw error;
+
+      res.json({
+        success: true,
+        message: auto_save ? "Auto-save enabled" : "Auto-save disabled",
+        auto_save: auto_save,
+      });
+    } catch (error) {
+      console.error("Toggle auto-save error:", error);
+      res.status(500).json({ error: "Failed to toggle auto-save" });
+    }
+  },
+);
+
+// Withdraw from savings (with fee calculation for SaveBox)
+app.post(
+  "/api/user/savings/:type/:id/withdraw",
+  authenticate,
+  async (req, res) => {
+    const { type, id } = req.params;
+
+    try {
+      let savingsRecord, account;
+
+      // Get the savings record based on type
+      switch (type) {
+        case "harvest":
+          const { data: harvest, error: hError } = await supabase
+            .from("user_harvest_enrollments")
+            .select("*, users!inner(id, email, first_name, last_name)")
+            .eq("id", id)
+            .eq("user_id", req.user.id)
+            .single();
+          if (hError) throw hError;
+          savingsRecord = harvest;
+          break;
+        case "fixed":
+          const { data: fixed, error: fError } = await supabase
+            .from("fixed_savings")
+            .select("*, users!inner(id, email, first_name, last_name)")
+            .eq("id", id)
+            .eq("user_id", req.user.id)
+            .single();
+          if (fError) throw fError;
+          savingsRecord = fixed;
+          break;
+        case "savebox":
+          const { data: savebox, error: sError } = await supabase
+            .from("savebox_savings")
+            .select("*, users!inner(id, email, first_name, last_name)")
+            .eq("id", id)
+            .eq("user_id", req.user.id)
+            .single();
+          if (sError) throw sError;
+          savingsRecord = savebox;
+          break;
+        case "target":
+          const { data: target, error: tError } = await supabase
+            .from("target_savings")
+            .select("*, users!inner(id, email, first_name, last_name)")
+            .eq("id", id)
+            .eq("user_id", req.user.id)
+            .single();
+          if (tError) throw tError;
+          savingsRecord = target;
+          break;
+        case "spare_change":
+          const { data: spare, error: spError } = await supabase
+            .from("spare_change_savings")
+            .select("*, users!inner(id, email, first_name, last_name)")
+            .eq("id", id)
+            .eq("user_id", req.user.id)
+            .single();
+          if (spError) throw spError;
+          savingsRecord = spare;
+          break;
+        default:
+          return res.status(400).json({ error: "Invalid savings type" });
+      }
+
+      if (!savingsRecord) {
+        return res.status(404).json({ error: "Savings record not found" });
+      }
+
+      // Get user's primary account
+      const { data: userAccount, error: accError } = await supabase
+        .from("accounts")
+        .select("*")
+        .eq("user_id", req.user.id)
+        .eq("account_type", "checking")
+        .single();
+
+      if (accError || !userAccount) {
+        return res.status(404).json({ error: "Account not found" });
+      }
+      account = userAccount;
+
+      let withdrawAmount = 0;
+      let fee = 0;
+      let feePercentage = 0;
+
+      // Calculate withdrawal amount and fee
+      switch (type) {
+        case "harvest":
+          withdrawAmount = savingsRecord.total_saved || 0;
+          break;
+        case "fixed":
+          const interest =
+            savingsRecord.current_saved * (savingsRecord.interest_rate / 100);
+          const today = new Date();
+          const isFreeWithdrawal =
+            savingsRecord.status === "matured" &&
+            today <= new Date(savingsRecord.next_free_withdrawal_date);
+
+          if (isFreeWithdrawal) {
+            withdrawAmount = savingsRecord.current_saved + interest;
+            fee = 0;
+          } else if (savingsRecord.status === "matured") {
+            withdrawAmount = savingsRecord.current_saved + interest;
+            fee = withdrawAmount * 0.02; // 2% fee after free period
+            withdrawAmount -= fee;
+          } else {
+            return res.status(400).json({ error: "Savings not yet matured" });
+          }
+          break;
+        case "savebox":
+          withdrawAmount = savingsRecord.current_saved || 0;
+          const isEarlyWithdrawal =
+            new Date() < new Date(savingsRecord.target_date);
+          if (isEarlyWithdrawal) {
+            feePercentage = savingsRecord.early_withdrawal_fee_percent || 4;
+            fee = withdrawAmount * (feePercentage / 100);
+            withdrawAmount -= fee;
+          }
+          break;
+        case "target":
+          if (
+            !savingsRecord.target_met &&
+            savingsRecord.current_saved < savingsRecord.target_amount
+          ) {
+            return res.status(400).json({ error: "Target not yet reached" });
+          }
+          withdrawAmount = savingsRecord.current_saved || 0;
+          break;
+        case "spare_change":
+          withdrawAmount = savingsRecord.current_saved || 0;
+          break;
+      }
+
+      if (withdrawAmount <= 0) {
+        return res.status(400).json({ error: "No funds to withdraw" });
+      }
+
+      // Update account balance
+      const newBalance = account.balance + withdrawAmount;
+      const newAvailable = account.available_balance + withdrawAmount;
+
+      await supabase
+        .from("accounts")
+        .update({ balance: newBalance, available_balance: newAvailable })
+        .eq("id", account.id);
+
+      // Update savings record status
+      await supabase
+        .from(
+          type === "harvest"
+            ? "user_harvest_enrollments"
+            : type === "fixed"
+              ? "fixed_savings"
+              : type === "savebox"
+                ? "savebox_savings"
+                : type === "target"
+                  ? "target_savings"
+                  : "spare_change_savings",
+        )
+        .update({
+          status: "withdrawn",
+          updated_at: new Date(),
+        })
+        .eq("id", id);
+
+      // Create withdrawal transaction
+      await supabase.from("transactions").insert({
+        to_account_id: account.id,
+        to_user_id: req.user.id,
+        amount: withdrawAmount,
+        description: `${type.charAt(0).toUpperCase() + type.slice(1)} Savings Withdrawal${fee > 0 ? ` (Fee: ₦${fee.toFixed(2)})` : ""}`,
+        transaction_type: "savings_withdrawal",
+        status: "completed",
+        completed_at: new Date(),
+      });
+
+      // Create savings transaction record
+      await supabase.from("savings_transactions").insert({
+        user_id: req.user.id,
+        savings_type: type,
+        savings_id: id,
+        amount: withdrawAmount,
+        transaction_type: "withdrawal",
+        description: `Withdrawn from ${type} savings${fee > 0 ? `, fee: ₦${fee.toFixed(2)}` : ""}`,
+      });
+
+      // Send email notification
+      try {
+        await transporter.sendMail({
+          from: process.env.SMTP_FROM,
+          to: savingsRecord.users?.email || req.user.email,
+          subject: `${type.charAt(0).toUpperCase() + type.slice(1)} Savings Withdrawal`,
+          html: `
+                    <h2>Withdrawal Complete</h2>
+                    <p>Dear ${savingsRecord.users?.first_name || req.user.first_name},</p>
+                    <p>You have successfully withdrawn <strong>₦${withdrawAmount.toFixed(2)}</strong> from your ${type} savings.</p>
+                    ${fee > 0 ? `<p>Withdrawal fee: <strong>₦${fee.toFixed(2)}</strong> (${feePercentage}%)</p>` : ""}
+                    <p>Amount credited to your account: <strong>₦${withdrawAmount.toFixed(2)}</strong></p>
+                    <p>Thank you for saving with us!</p>
+                `,
+        });
+      } catch (emailError) {
+        console.error("Email error:", emailError);
+      }
+
+      res.json({
+        success: true,
+        message: "Withdrawal completed successfully",
+        amount_withdrawn: withdrawAmount,
+        fee_charged: fee,
+        new_balance: newAvailable,
+      });
+    } catch (error) {
+      console.error("Withdrawal error:", error);
+      res
+        .status(500)
+        .json({ error: "Failed to process withdrawal: " + error.message });
+    }
+  },
+);
+
+// Cancel savings plan (stop auto-save but keep saved amount)
+app.post(
+  "/api/user/savings/:type/:id/cancel",
+  authenticate,
+  async (req, res) => {
+    const { type, id } = req.params;
+
+    try {
+      let table;
+      switch (type) {
+        case "harvest":
+          table = "user_harvest_enrollments";
+          break;
+        case "fixed":
+          table = "fixed_savings";
+          break;
+        case "savebox":
+          table = "savebox_savings";
+          break;
+        case "target":
+          table = "target_savings";
+          break;
+        case "spare_change":
+          table = "spare_change_savings";
+          break;
+        default:
+          return res.status(400).json({ error: "Invalid savings type" });
+      }
+
+      const { error } = await supabase
+        .from(table)
+        .update({
+          auto_save: false,
+          status: "cancelled",
+          updated_at: new Date(),
+        })
+        .eq("id", id)
+        .eq("user_id", req.user.id);
+
+      if (error) throw error;
+
+      res.json({
+        success: true,
+        message:
+          "Savings plan cancelled. Your saved funds remain available for withdrawal.",
+      });
+    } catch (error) {
+      console.error("Cancel savings error:", error);
+      res.status(500).json({ error: "Failed to cancel savings plan" });
+    }
+  },
+);
+
+// Get savings summary for dashboard
+app.get("/api/user/savings/summary", authenticate, async (req, res) => {
+  try {
+    const [harvest, fixed, savebox, target, spareChange] = await Promise.all([
+      supabase
+        .from("user_harvest_enrollments")
+        .select("total_saved, status, auto_save")
+        .eq("user_id", req.user.id)
+        .eq("status", "active"),
+      supabase
+        .from("fixed_savings")
+        .select("current_saved, status, auto_save, maturity_date")
+        .eq("user_id", req.user.id)
+        .in("status", ["active", "matured"]),
+      supabase
+        .from("savebox_savings")
+        .select("current_saved, status, auto_save, target_date")
+        .eq("user_id", req.user.id)
+        .eq("status", "active"),
+      supabase
+        .from("target_savings")
+        .select(
+          "current_saved, target_amount, status, auto_save, withdrawal_date",
+        )
+        .eq("user_id", req.user.id)
+        .eq("status", "active"),
+      supabase
+        .from("spare_change_savings")
+        .select("current_saved, status, auto_save")
+        .eq("user_id", req.user.id)
+        .eq("status", "active"),
+    ]);
+
+    const totalSaved =
+      (harvest.data?.[0]?.total_saved || 0) +
+      (fixed.data?.[0]?.current_saved || 0) +
+      (savebox.data?.[0]?.current_saved || 0) +
+      (target.data?.[0]?.current_saved || 0) +
+      (spareChange.data?.[0]?.current_saved || 0);
+
+    res.json({
+      total_saved: totalSaved,
+      active_plans: {
+        harvest: harvest.data?.[0] || null,
+        fixed: fixed.data?.[0] || null,
+        savebox: savebox.data?.[0] || null,
+        target: target.data?.[0] || null,
+        spare_change: spareChange.data?.[0] || null,
+      },
+    });
+  } catch (error) {
+    console.error("Savings summary error:", error);
+    res.status(500).json({ error: "Failed to get savings summary" });
   }
 });
 
@@ -5199,253 +5762,488 @@ app.post(
   },
 );
 
-
-
-
 // Check if user has transfer PIN
 app.get("/api/user/has-pin", authenticate, async (req, res) => {
-    try {
-        const { data: user, error } = await supabase
-            .from("users")
-            .select("transfer_pin, transfer_pin_set_at")
-            .eq("id", req.user.id)
-            .single();
-        
-        if (error) throw error;
-        
-        res.json({ 
-            has_pin: !!(user.transfer_pin && user.transfer_pin !== null),
-            pin_set_at: user.transfer_pin_set_at
-        });
-    } catch (error) {
-        console.error("Check PIN error:", error);
-        res.status(500).json({ error: "Failed to check PIN status" });
-    }
+  try {
+    const { data: user, error } = await supabase
+      .from("users")
+      .select("transfer_pin, transfer_pin_set_at")
+      .eq("id", req.user.id)
+      .single();
+
+    if (error) throw error;
+
+    res.json({
+      has_pin: !!(user.transfer_pin && user.transfer_pin !== null),
+      pin_set_at: user.transfer_pin_set_at,
+    });
+  } catch (error) {
+    console.error("Check PIN error:", error);
+    res.status(500).json({ error: "Failed to check PIN status" });
+  }
 });
 
 // Set/Update transfer PIN
 app.post("/api/user/set-transfer-pin", authenticate, async (req, res) => {
-    try {
-        const { pin } = req.body;
-        
-        if (!pin || pin.length !== 4 || !/^\d{4}$/.test(pin)) {
-            return res.status(400).json({ error: "PIN must be exactly 4 digits" });
-        }
-        
-        // Hash the PIN before storing
-        const hashedPin = await bcrypt.hash(pin, 10);
-        
-        const { error } = await supabase
-            .from("users")
-            .update({
-                transfer_pin: hashedPin,
-                transfer_pin_set_at: new Date(),
-                pin_attempts: 0,
-                last_pin_attempt: null
-            })
-            .eq("id", req.user.id);
-        
-        if (error) throw error;
-        
-        res.json({ success: true, message: "Transfer PIN set successfully" });
-    } catch (error) {
-        console.error("Set PIN error:", error);
-        res.status(500).json({ error: "Failed to set transfer PIN" });
+  try {
+    const { pin } = req.body;
+
+    if (!pin || pin.length !== 4 || !/^\d{4}$/.test(pin)) {
+      return res.status(400).json({ error: "PIN must be exactly 4 digits" });
     }
+
+    // Hash the PIN before storing
+    const hashedPin = await bcrypt.hash(pin, 10);
+
+    const { error } = await supabase
+      .from("users")
+      .update({
+        transfer_pin: hashedPin,
+        transfer_pin_set_at: new Date(),
+        pin_attempts: 0,
+        last_pin_attempt: null,
+      })
+      .eq("id", req.user.id);
+
+    if (error) throw error;
+
+    res.json({ success: true, message: "Transfer PIN set successfully" });
+  } catch (error) {
+    console.error("Set PIN error:", error);
+    res.status(500).json({ error: "Failed to set transfer PIN" });
+  }
 });
 
 // Verify transfer PIN
 app.post("/api/user/verify-transfer-pin", authenticate, async (req, res) => {
-    try {
-        const { pin } = req.body;
-        
-        if (!pin || pin.length !== 4) {
-            return res.status(400).json({ valid: false, error: "Invalid PIN format" });
-        }
-        
-        const { data: user, error } = await supabase
-            .from("users")
-            .select("transfer_pin, pin_attempts, last_pin_attempt")
-            .eq("id", req.user.id)
-            .single();
-        
-        if (error) throw error;
-        
-        if (!user.transfer_pin) {
-            return res.json({ valid: false, needs_setup: true });
-        }
-        
-        // Check if account is already frozen due to PIN attempts
-        if (user.pin_attempts >= 4) {
-            return res.status(403).json({ 
-                valid: false, 
-                frozen: true,
-                error: "Too many incorrect PIN attempts. Account frozen."
-            });
-        }
-        
-        const isValid = await bcrypt.compare(pin, user.transfer_pin);
-        
-        if (isValid) {
-            // Reset attempts on successful verification
-            await supabase
-                .from("users")
-                .update({ pin_attempts: 0, last_pin_attempt: null })
-                .eq("id", req.user.id);
-            
-            res.json({ valid: true });
-        } else {
-            // Increment attempts
-            const newAttempts = (user.pin_attempts || 0) + 1;
-            const updates = { pin_attempts: newAttempts, last_pin_attempt: new Date() };
-            
-            if (newAttempts >= 4) {
-                // Freeze account after 4 failed attempts
-                updates.is_frozen = true;
-                updates.freeze_reason = "Too many incorrect PIN attempts - Contact support to unfreeze";
-                updates.unfreeze_method = "support";
-            }
-            
-            await supabase
-                .from("users")
-                .update(updates)
-                .eq("id", req.user.id);
-            
-            res.json({ 
-                valid: false, 
-                attempts_remaining: 4 - newAttempts,
-                frozen: newAttempts >= 4
-            });
-        }
-    } catch (error) {
-        console.error("Verify PIN error:", error);
-        res.status(500).json({ error: "PIN verification failed" });
+  try {
+    const { pin } = req.body;
+
+    if (!pin || pin.length !== 4) {
+      return res
+        .status(400)
+        .json({ valid: false, error: "Invalid PIN format" });
     }
+
+    const { data: user, error } = await supabase
+      .from("users")
+      .select("transfer_pin, pin_attempts, last_pin_attempt")
+      .eq("id", req.user.id)
+      .single();
+
+    if (error) throw error;
+
+    if (!user.transfer_pin) {
+      return res.json({ valid: false, needs_setup: true });
+    }
+
+    // Check if account is already frozen due to PIN attempts
+    if (user.pin_attempts >= 4) {
+      return res.status(403).json({
+        valid: false,
+        frozen: true,
+        error: "Too many incorrect PIN attempts. Account frozen.",
+      });
+    }
+
+    const isValid = await bcrypt.compare(pin, user.transfer_pin);
+
+    if (isValid) {
+      // Reset attempts on successful verification
+      await supabase
+        .from("users")
+        .update({ pin_attempts: 0, last_pin_attempt: null })
+        .eq("id", req.user.id);
+
+      res.json({ valid: true });
+    } else {
+      // Increment attempts
+      const newAttempts = (user.pin_attempts || 0) + 1;
+      const updates = {
+        pin_attempts: newAttempts,
+        last_pin_attempt: new Date(),
+      };
+
+      if (newAttempts >= 4) {
+        // Freeze account after 4 failed attempts
+        updates.is_frozen = true;
+        updates.freeze_reason =
+          "Too many incorrect PIN attempts - Contact support to unfreeze";
+        updates.unfreeze_method = "support";
+      }
+
+      await supabase.from("users").update(updates).eq("id", req.user.id);
+
+      res.json({
+        valid: false,
+        attempts_remaining: 4 - newAttempts,
+        frozen: newAttempts >= 4,
+      });
+    }
+  } catch (error) {
+    console.error("Verify PIN error:", error);
+    res.status(500).json({ error: "PIN verification failed" });
+  }
 });
 
 // Freeze account due to PIN attempts
-app.post("/api/user/freeze-due-to-pin-attempts", authenticate, async (req, res) => {
+app.post(
+  "/api/user/freeze-due-to-pin-attempts",
+  authenticate,
+  async (req, res) => {
     try {
-        const { error } = await supabase
-            .from("users")
-            .update({
-                is_frozen: true,
-                freeze_reason: "Too many incorrect PIN attempts - Contact support",
-                unfreeze_method: "support"
-            })
-            .eq("id", req.user.id);
-        
-        if (error) throw error;
-        
-        res.json({ success: true });
+      const { error } = await supabase
+        .from("users")
+        .update({
+          is_frozen: true,
+          freeze_reason: "Too many incorrect PIN attempts - Contact support",
+          unfreeze_method: "support",
+        })
+        .eq("id", req.user.id);
+
+      if (error) throw error;
+
+      res.json({ success: true });
     } catch (error) {
-        console.error("Freeze error:", error);
-        res.status(500).json({ error: "Failed to freeze account" });
+      console.error("Freeze error:", error);
+      res.status(500).json({ error: "Failed to freeze account" });
     }
-});
+  },
+);
 
 // Get account limits
 app.get("/api/user/account-limits", authenticate, async (req, res) => {
-    try {
-        const userId = req.user.id;
-        
-        // Get user's account
-        const { data: account } = await supabase
-            .from("accounts")
-            .select("*")
-            .eq("user_id", userId)
-            .eq("account_type", "checking")
-            .single();
-        
-        // Get today's transactions sum
-        const today = new Date();
-        today.setHours(0, 0, 0, 0);
-        const { data: todayTxs } = await supabase
-            .from("transactions")
-            .select("amount")
-            .eq("from_user_id", userId)
-            .eq("status", "completed")
-            .gte("created_at", today.toISOString());
-        
-        const dailyUsed = todayTxs?.reduce((sum, t) => sum + t.amount, 0) || 0;
-        
-        // Get this week's transactions sum
-        const weekStart = new Date();
-        weekStart.setDate(weekStart.getDate() - weekStart.getDay());
-        weekStart.setHours(0, 0, 0, 0);
-        const { data: weekTxs } = await supabase
-            .from("transactions")
-            .select("amount")
-            .eq("from_user_id", userId)
-            .eq("status", "completed")
-            .gte("created_at", weekStart.toISOString());
-        
-        const weeklyUsed = weekTxs?.reduce((sum, t) => sum + t.amount, 0) || 0;
-        
-        // Get this month's transactions sum
-        const monthStart = new Date();
-        monthStart.setDate(1);
-        monthStart.setHours(0, 0, 0, 0);
-        const { data: monthTxs } = await supabase
-            .from("transactions")
-            .select("amount")
-            .eq("from_user_id", userId)
-            .eq("status", "completed")
-            .gte("created_at", monthStart.toISOString());
-        
-        const monthlyUsed = monthTxs?.reduce((sum, t) => sum + t.amount, 0) || 0;
-        
-        res.json({
-            daily_limit: 1000000,      // ₦1,000,000 (was $1,000)
-            weekly_limit: 5000000,     // ₦5,000,000 (was $5,000)
-            monthly_limit: 20000000,   // ₦20,000,000 (was $20,000)
-            single_transaction_limit: 1000000,  // ₦1,000,000
-            daily_used: dailyUsed,
-            weekly_used: weeklyUsed,
-            monthly_used: monthlyUsed
-        });
-    } catch (error) {
-        console.error("Limits error:", error);
-        res.status(500).json({ error: "Failed to fetch limits" });
-    }
+  try {
+    const userId = req.user.id;
+
+    // Get user's account
+    const { data: account } = await supabase
+      .from("accounts")
+      .select("*")
+      .eq("user_id", userId)
+      .eq("account_type", "checking")
+      .single();
+
+    // Get today's transactions sum
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const { data: todayTxs } = await supabase
+      .from("transactions")
+      .select("amount")
+      .eq("from_user_id", userId)
+      .eq("status", "completed")
+      .gte("created_at", today.toISOString());
+
+    const dailyUsed = todayTxs?.reduce((sum, t) => sum + t.amount, 0) || 0;
+
+    // Get this week's transactions sum
+    const weekStart = new Date();
+    weekStart.setDate(weekStart.getDate() - weekStart.getDay());
+    weekStart.setHours(0, 0, 0, 0);
+    const { data: weekTxs } = await supabase
+      .from("transactions")
+      .select("amount")
+      .eq("from_user_id", userId)
+      .eq("status", "completed")
+      .gte("created_at", weekStart.toISOString());
+
+    const weeklyUsed = weekTxs?.reduce((sum, t) => sum + t.amount, 0) || 0;
+
+    // Get this month's transactions sum
+    const monthStart = new Date();
+    monthStart.setDate(1);
+    monthStart.setHours(0, 0, 0, 0);
+    const { data: monthTxs } = await supabase
+      .from("transactions")
+      .select("amount")
+      .eq("from_user_id", userId)
+      .eq("status", "completed")
+      .gte("created_at", monthStart.toISOString());
+
+    const monthlyUsed = monthTxs?.reduce((sum, t) => sum + t.amount, 0) || 0;
+
+    res.json({
+      daily_limit: 1000000, // ₦1,000,000 (was $1,000)
+      weekly_limit: 5000000, // ₦5,000,000 (was $5,000)
+      monthly_limit: 20000000, // ₦20,000,000 (was $20,000)
+      single_transaction_limit: 1000000, // ₦1,000,000
+      daily_used: dailyUsed,
+      weekly_used: weeklyUsed,
+      monthly_used: monthlyUsed,
+    });
+  } catch (error) {
+    console.error("Limits error:", error);
+    res.status(500).json({ error: "Failed to fetch limits" });
+  }
 });
 
 // Export transactions as CSV
 app.get("/api/user/transactions/export", authenticate, async (req, res) => {
-    try {
-        const { data: accounts } = await supabase
-            .from("accounts")
-            .select("id")
-            .eq("user_id", req.user.id);
-        
-        const accountIds = accounts.map(a => a.id);
-        
-        const { data: transactions } = await supabase
-            .from("transactions")
-            .select("*")
-            .or(`from_account_id.in.(${accountIds.join(",")}),to_account_id.in.(${accountIds.join(",")})`)
-            .order("created_at", { ascending: false });
-        
-        let csv = "Date,Description,Type,Amount (NGN),Status\n";
-        
-        transactions.forEach(t => {
-            const isCredit = t.to_user_id === req.user.id;
-            const ngnAmount = t.amount * 1500; // Convert to NGN
-            csv += `${t.created_at},${t.description || t.transaction_type},${isCredit ? "Credit" : "Debit"},${ngnAmount.toFixed(2)},${t.status}\n`;
-        });
-        
-        res.setHeader("Content-Type", "text/csv");
-        res.setHeader("Content-Disposition", `attachment; filename=transactions_${new Date().toISOString().split("T")[0]}.csv`);
-        res.send(csv);
-    } catch (error) {
-        console.error("Export error:", error);
-        res.status(500).json({ error: "Export failed" });
-    }
+  try {
+    const { data: accounts } = await supabase
+      .from("accounts")
+      .select("id")
+      .eq("user_id", req.user.id);
+
+    const accountIds = accounts.map((a) => a.id);
+
+    const { data: transactions } = await supabase
+      .from("transactions")
+      .select("*")
+      .or(
+        `from_account_id.in.(${accountIds.join(",")}),to_account_id.in.(${accountIds.join(",")})`,
+      )
+      .order("created_at", { ascending: false });
+
+    let csv = "Date,Description,Type,Amount (NGN),Status\n";
+
+    transactions.forEach((t) => {
+      const isCredit = t.to_user_id === req.user.id;
+      const ngnAmount = t.amount * 1500; // Convert to NGN
+      csv += `${t.created_at},${t.description || t.transaction_type},${isCredit ? "Credit" : "Debit"},${ngnAmount.toFixed(2)},${t.status}\n`;
+    });
+
+    res.setHeader("Content-Type", "text/csv");
+    res.setHeader(
+      "Content-Disposition",
+      `attachment; filename=transactions_${new Date().toISOString().split("T")[0]}.csv`,
+    );
+    res.send(csv);
+  } catch (error) {
+    console.error("Export error:", error);
+    res.status(500).json({ error: "Export failed" });
+  }
 });
 
+// ==================== ADMIN SAVINGS MANAGEMENT ====================
 
+// Get all active savings plans (admin)
+app.get(
+  "/api/admin/savings/all",
+  authenticate,
+  authorizeAdmin,
+  async (req, res) => {
+    try {
+      const { type, status, page = 1, limit = 50 } = req.query;
+      const offset = (page - 1) * limit;
 
+      let results = {};
 
+      if (!type || type === "harvest") {
+        let query = supabase.from("user_harvest_enrollments").select(`
+                    *,
+                    users!inner(id, email, first_name, last_name, phone),
+                    harvest_plans!inner(name, daily_amount, duration_days)
+                `);
+        if (status) query = query.eq("status", status);
+        const { data, count } = await query.range(offset, offset + limit - 1);
+        results.harvest = { data: data || [], total: count || 0 };
+      }
+
+      if (!type || type === "fixed") {
+        let query = supabase
+          .from("fixed_savings")
+          .select("*, users!inner(id, email, first_name, last_name, phone)");
+        if (status) query = query.eq("status", status);
+        const { data, count } = await query.range(offset, offset + limit - 1);
+        results.fixed = { data: data || [], total: count || 0 };
+      }
+
+      if (!type || type === "savebox") {
+        let query = supabase
+          .from("savebox_savings")
+          .select("*, users!inner(id, email, first_name, last_name, phone)");
+        if (status) query = query.eq("status", status);
+        const { data, count } = await query.range(offset, offset + limit - 1);
+        results.savebox = { data: data || [], total: count || 0 };
+      }
+
+      if (!type || type === "target") {
+        let query = supabase
+          .from("target_savings")
+          .select("*, users!inner(id, email, first_name, last_name, phone)");
+        if (status) query = query.eq("status", status);
+        const { data, count } = await query.range(offset, offset + limit - 1);
+        results.target = { data: data || [], total: count || 0 };
+      }
+
+      if (!type || type === "spare_change") {
+        let query = supabase
+          .from("spare_change_savings")
+          .select("*, users!inner(id, email, first_name, last_name, phone)");
+        if (status) query = query.eq("status", status);
+        const { data, count } = await query.range(offset, offset + limit - 1);
+        results.spare_change = { data: data || [], total: count || 0 };
+      }
+
+      res.json({
+        success: true,
+        data: results,
+        pagination: { page, limit },
+      });
+    } catch (error) {
+      console.error("Admin savings fetch error:", error);
+      res.status(500).json({ error: "Failed to fetch savings data" });
+    }
+  },
+);
+
+// Send notification to all users with active savings (admin)
+app.post(
+  "/api/admin/savings/notify",
+  authenticate,
+  authorizeAdmin,
+  async (req, res) => {
+    const { savings_type, message, subject } = req.body;
+
+    try {
+      let users = [];
+
+      if (!savings_type || savings_type === "harvest") {
+        const { data } = await supabase
+          .from("user_harvest_enrollments")
+          .select("user_id, users(email, first_name, last_name)")
+          .eq("status", "active");
+        users.push(...(data || []));
+      }
+
+      if (!savings_type || savings_type === "fixed") {
+        const { data } = await supabase
+          .from("fixed_savings")
+          .select("user_id, users(email, first_name, last_name)")
+          .in("status", ["active", "matured"]);
+        users.push(...(data || []));
+      }
+
+      if (!savings_type || savings_type === "savebox") {
+        const { data } = await supabase
+          .from("savebox_savings")
+          .select("user_id, users(email, first_name, last_name)")
+          .eq("status", "active");
+        users.push(...(data || []));
+      }
+
+      if (!savings_type || savings_type === "target") {
+        const { data } = await supabase
+          .from("target_savings")
+          .select("user_id, users(email, first_name, last_name)")
+          .eq("status", "active");
+        users.push(...(data || []));
+      }
+
+      // Remove duplicates
+      const uniqueUsers = [
+        ...new Map(users.map((u) => [u.user_id, u])).values(),
+      ];
+
+      // Send notifications
+      for (const user of uniqueUsers) {
+        await supabase.from("notifications").insert({
+          user_id: user.user_id,
+          title: subject || "Savings Plan Update",
+          message: message,
+          type: "info",
+        });
+
+        // Send email
+        if (user.users?.email) {
+          await transporter.sendMail({
+            from: process.env.SMTP_FROM,
+            to: user.users.email,
+            subject: subject || "Savings Plan Update",
+            html: `<h2>Savings Plan Update</h2><p>Dear ${user.users.first_name},</p><p>${message}</p><p>Thank you for banking with us.</p>`,
+          });
+        }
+      }
+
+      res.json({
+        success: true,
+        message: `Notification sent to ${uniqueUsers.length} users`,
+      });
+    } catch (error) {
+      console.error("Admin notify error:", error);
+      res.status(500).json({ error: "Failed to send notifications" });
+    }
+  },
+);
+
+// Get savings statistics (admin)
+app.get(
+  "/api/admin/savings/stats",
+  authenticate,
+  authorizeAdmin,
+  async (req, res) => {
+    try {
+      const [harvestStats, fixedStats, saveboxStats, targetStats, spareStats] =
+        await Promise.all([
+          supabase
+            .from("user_harvest_enrollments")
+            .select("total_saved, days_completed, status", { count: "exact" }),
+          supabase
+            .from("fixed_savings")
+            .select("current_saved, status", { count: "exact" }),
+          supabase
+            .from("savebox_savings")
+            .select("current_saved, status", { count: "exact" }),
+          supabase
+            .from("target_savings")
+            .select("current_saved, target_amount, status", { count: "exact" }),
+          supabase
+            .from("spare_change_savings")
+            .select("current_saved, total_saved, status", { count: "exact" }),
+        ]);
+
+      const totalSaved =
+        (harvestStats.data?.reduce((s, h) => s + (h.total_saved || 0), 0) ||
+          0) +
+        (fixedStats.data?.reduce((s, f) => s + (f.current_saved || 0), 0) ||
+          0) +
+        (saveboxStats.data?.reduce((s, sb) => s + (sb.current_saved || 0), 0) ||
+          0) +
+        (targetStats.data?.reduce((s, t) => s + (t.current_saved || 0), 0) ||
+          0) +
+        (spareStats.data?.reduce((s, sp) => s + (sp.current_saved || 0), 0) ||
+          0);
+
+      res.json({
+        total_saved: totalSaved,
+        counts: {
+          harvest: {
+            active:
+              harvestStats.data?.filter((h) => h.status === "active").length ||
+              0,
+            total: harvestStats.count || 0,
+          },
+          fixed: {
+            active:
+              fixedStats.data?.filter((f) => f.status === "active").length || 0,
+            total: fixedStats.count || 0,
+          },
+          savebox: {
+            active:
+              saveboxStats.data?.filter((s) => s.status === "active").length ||
+              0,
+            total: saveboxStats.count || 0,
+          },
+          target: {
+            active:
+              targetStats.data?.filter((t) => t.status === "active").length ||
+              0,
+            total: targetStats.count || 0,
+          },
+          spare_change: {
+            active:
+              spareStats.data?.filter((s) => s.status === "active").length || 0,
+            total: spareStats.count || 0,
+          },
+        },
+      });
+    } catch (error) {
+      console.error("Savings stats error:", error);
+      res.status(500).json({ error: "Failed to fetch savings stats" });
+    }
+  },
+);
 
 // ==================== ADMIN ROUTES ================
 
