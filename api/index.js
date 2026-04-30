@@ -80,10 +80,7 @@ const transporter = nodemailer.createTransport({
   },
 });
 
-// TEMPORARY DEBUG ROUTE - Put this FIRST
-app.get("/api/test", (req, res) => {
-    res.json({ message: "Server is working!", time: new Date().toISOString() });
-});
+
 
 // ==================== AUTHENTICATION ROUTES ====================
 
@@ -463,6 +460,11 @@ app.post("/api/auth/verify-2fa", async (req, res) => {
     console.error("2FA verification error:", error);
     res.status(500).json({ error: "Verification failed" });
   }
+});
+
+// TEMPORARY DEBUG ROUTE - Put this FIRST
+app.get("/api/test", (req, res) => {
+    res.json({ message: "Server is working!", time: new Date().toISOString() });
 });
 
 // ==================== USER DASHBOARD ROUTES ====================
