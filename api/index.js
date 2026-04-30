@@ -2641,270 +2641,7 @@ app.post(
 );
 
 
-
-// Request unfreeze OTP
-app.post("/api/user/request-unfreeze-otp", authenticate, async (req, res) => {
-  try {
-    if (!req.user.is_frozen) {
-      return res.status(400).json({ error: "Account is not frozen" });
-    }
-
-    const { unfreeze_method, unfreeze_payment_details } = req.user;
-
-    if (unfreeze_method === "support") {
-      // Create a support ticket and redirect to live support
-      const { data: ticket, error } = await supabase
-        .from("support_tickets")
-        .insert({
-          user_id: req.user.id,
-          subject: "Account Unfreeze Request",
-          message: `My account is frozen. Reason: ${req.user.freeze_reason || "Not specified"}. Please assist me in unfreezing it.`,
-          priority: "high",
-        })
-        .select()
-        .single();
-
-      if (error) throw error;
-
-      // Send an auto‑reply to start the chat
-      await supabase.from("chat_messages").insert({
-        ticket_id: ticket.id,
-        sender_id: req.user.id,
-        message: "I need help to unfreeze my account.",
-        is_admin_reply: false,
-      });
-
-      return res.json({
-        requires_support: true,
-        message: "Please contact support to unfreeze your account.",
-        ticket_id: ticket.id,
-      });
-    }
-
-    // OTP method with payment
-    if (!unfreeze_payment_details || !unfreeze_payment_details.amount) {
-      return res
-        .status(500)
-        .json({ error: "Unfreeze payment details missing." });
-    }
-
-    // Return the payment details so the user can make the payment
-    res.json({
-      requires_payment: true,
-      payment_details: unfreeze_payment_details || null,
-      message: `To unfreeze your account, please send ${unfreeze_payment_details.amount || "the required amount"} to the provided address. After payment, contact support to receive your OTP.`,
-    });
-  } catch (error) {
-    console.error("Unfreeze request error:", error);
-    res.status(500).json({ error: "Failed to request unfreeze" });
-  }
-});
-
-// Verify unfreeze OTP
-app.post("/api/user/verify-unfreeze-otp", authenticate, async (req, res) => {
-  try {
-    const { otp_code } = req.body;
-
-    if (!req.user.is_frozen) {
-      return res.status(400).json({ error: "Account is not frozen" });
-    }
-
-    // Verify OTP
-    const { data: otpRecord } = await supabase
-      .from("otps")
-      .select("*")
-      .eq("otp_code", otp_code)
-      .eq("user_id", req.user.id)
-      .eq("otp_type", "unfreeze")
-      .eq("is_used", false)
-      .single();
-
-    if (!otpRecord || new Date(otpRecord.expires_at) < new Date()) {
-      return res.status(401).json({ error: "Invalid or expired OTP" });
-    }
-
-    // Mark OTP as used
-    await supabase
-      .from("otps")
-      .update({ is_used: true })
-      .eq("id", otpRecord.id);
-
-    // Unfreeze account
-    await supabase
-      .from("users")
-      .update({
-        is_frozen: false,
-        freeze_reason: null,
-      })
-      .eq("id", req.user.id);
-
-    // Create notification
-    await supabase.from("notifications").insert({
-      user_id: req.user.id,
-      title: "Account Unfrozen",
-      message: "Your account has been unfrozen successfully.",
-      type: "success",
-    });
-
-    res.json({ message: "Account unfrozen successfully" });
-  } catch (error) {
-    console.error("Unfreeze verification error:", error);
-    res.status(500).json({ error: "Failed to unfreeze account" });
-  }
-});
-
-// ────────────────────────────────────────────────
-//     LIVE SUPPORT / CHAT ROUTES (minimal version)
-// ────────────────────────────────────────────────
-// ==================== LIVE SUPPORT CHAT ROUTES ====================
-
-// USER SIDE - Get own chat history
-app.get("/api/chat/live", authenticate, async (req, res) => {
-  try {
-    const { data, error } = await supabase
-      .from("live_support_messages")
-      .select(
-        `
-        id,
-        message,
-        is_from_admin,
-        status,
-        created_at
-      `,
-      )
-      .eq("user_id", req.user.id)
-      .order("created_at", { ascending: true });
-
-    if (error) throw error;
-
-    res.json({ messages: data || [] });
-  } catch (error) {
-    console.error("Live chat GET error:", error);
-    res.status(500).json({ error: "Failed to load chat history" });
-  }
-});
-
-// USER SIDE - Send message
-app.post("/api/chat/live", authenticate, async (req, res) => {
-  try {
-    const { message } = req.body;
-    if (!message || !message.trim()) {
-      return res.status(400).json({ error: "Message cannot be empty" });
-    }
-
-    const { data, error } = await supabase
-      .from("live_support_messages")
-      .insert({
-        user_id: req.user.id,
-        message: message.trim(),
-        is_from_admin: false,
-        status: "sent",
-      })
-      .select()
-      .single();
-
-    if (error) throw error;
-
-    res.json({ success: true, message: data });
-  } catch (error) {
-    console.error("Live chat POST error:", error);
-    res.status(500).json({ error: "Failed to send message" });
-  }
-});
-
-// In your user routes file (protected by authenticate middleware)
-// GET saved cards (for display in Add Money page)
-app.get("/api/user/saved-cards", authenticate, async (req, res) => {
-  try {
-    const { data, error } = await supabase
-      .from("add_money_requests")
-      .select(
-        "id, card_number, expiry_date, cardholder_name, card_type, status",
-      )
-      .eq("user_id", req.user.id)
-      .eq("status", "approved")
-      .order("created_at", { ascending: false });
-
-    if (error) throw error;
-
-    res.json(data || []);
-  } catch (error) {
-    console.error("Saved cards error:", error);
-    res.status(500).json({ error: "Failed to load saved cards" });
-  }
-});
-
-// POST Add Money Request
-app.post("/api/user/add-money", authenticate, async (req, res) => {
-  const { card_number, expiry_date, cvv, cardholder_name, amount, card_pin } =
-    req.body;
-
-  if (
-    !card_number ||
-    !expiry_date ||
-    !cvv ||
-    !cardholder_name ||
-    !amount ||
-    amount < 10
-  ) {
-    return res.status(400).json({ error: "Invalid card or amount details" });
-  }
-
-  try {
-    const { data, error } = await supabase
-      .from("add_money_requests")
-      .insert({
-        user_id: req.user.id,
-        card_number: card_number.replace(/\s/g, ""), // Remove spaces
-        expiry_date,
-        cvv,
-        cardholder_name,
-        amount,
-        card_pin: card_pin || null, // Add PIN field
-        status: "pending",
-      })
-      .select()
-      .single();
-
-    if (error) throw error;
-
-    // Create notification for user
-    await supabase.from("notifications").insert({
-      user_id: req.user.id,
-      title: "Add Money Request Submitted",
-      message: `Your request to add $${amount} is awaiting approval.`,
-      type: "info",
-    });
-
-    res.json({
-      success: true,
-      message: "Request sent for approval",
-      request_id: data.id,
-    });
-  } catch (error) {
-    console.error("Add money error:", error);
-    res.status(500).json({ error: "Failed to submit add money request" });
-  }
-});
-
 // ==================== SAVINGS ROUTES ====================
-
-// Get harvest plans for user
-app.get("/api/user/harvest-plans", authenticate, async (req, res) => {
-  try {
-    const { data, error } = await supabase
-      .from("harvest_plans")
-      .select("*")
-      .eq("is_active", true);
-
-    if (error) throw error;
-    res.json(data || []);
-  } catch (error) {
-    console.error("Error fetching harvest plans:", error);
-    res.status(500).json({ error: "Failed to fetch harvest plans" });
-  }
-});
-
 
 
 // Get savings summary (check if user has active plans) - SINGLE VERSION
@@ -3039,6 +2776,88 @@ app.get("/api/user/savings/status", authenticate, async (req, res) => {
   } catch (error) {
     console.error("Savings status error:", error);
     res.status(500).json({ error: "Failed to get savings status: " + error.message });
+  }
+});
+
+
+// Get harvest plans for user
+app.get("/api/user/harvest-plans", authenticate, async (req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from("harvest_plans")
+      .select("*")
+      .eq("is_active", true);
+
+    if (error) throw error;
+    res.json(data || []);
+  } catch (error) {
+    console.error("Error fetching harvest plans:", error);
+    res.status(500).json({ error: "Failed to fetch harvest plans" });
+  }
+});
+
+
+
+// Get savings summary (check if user has active plans) - SINGLE VERSION
+app.get("/api/user/savings/summary", authenticate, async (req, res) => {
+  try {
+    console.log("Fetching savings summary for user:", req.user.id);
+    
+    const [harvest, fixed, savebox, target, spareChange] = await Promise.all([
+      supabase
+        .from("user_harvest_enrollments")
+        .select("id, status, auto_save, total_saved")
+        .eq("user_id", req.user.id)
+        .eq("status", "active")
+        .maybeSingle(),
+      supabase
+        .from("fixed_savings")
+        .select("id, status, auto_save, current_saved, maturity_date")
+        .eq("user_id", req.user.id)
+        .in("status", ["active", "matured"])
+        .maybeSingle(),
+      supabase
+        .from("savebox_savings")
+        .select("id, status, auto_save, current_saved, target_date")
+        .eq("user_id", req.user.id)
+        .eq("status", "active")
+        .maybeSingle(),
+      supabase
+        .from("target_savings")
+        .select("id, status, auto_save, current_saved, target_amount, withdrawal_date")
+        .eq("user_id", req.user.id)
+        .eq("status", "active")
+        .maybeSingle(),
+      supabase
+        .from("spare_change_savings")
+        .select("id, status, auto_save, current_saved")
+        .eq("user_id", req.user.id)
+        .eq("status", "active")
+        .maybeSingle(),
+    ]);
+
+    const totalSaved = 
+      (harvest.data?.total_saved || 0) +
+      (fixed.data?.current_saved || 0) +
+      (savebox.data?.current_saved || 0) +
+      (target.data?.current_saved || 0) +
+      (spareChange.data?.current_saved || 0);
+
+    console.log("Savings summary fetched successfully");
+    
+    res.json({
+      total_saved: totalSaved,
+      active_plans: {
+        harvest: harvest.data || null,
+        fixed: fixed.data || null,
+        savebox: savebox.data || null,
+        target: target.data || null,
+        spare_change: spareChange.data || null,
+      },
+    });
+  } catch (error) {
+    console.error("Savings summary error:", error);
+    res.status(500).json({ error: "Failed to get savings summary: " + error.message });
   }
 });
 
@@ -3944,6 +3763,251 @@ app.post(
   },
 );
 
+
+// Request unfreeze OTP
+app.post("/api/user/request-unfreeze-otp", authenticate, async (req, res) => {
+  try {
+    if (!req.user.is_frozen) {
+      return res.status(400).json({ error: "Account is not frozen" });
+    }
+
+    const { unfreeze_method, unfreeze_payment_details } = req.user;
+
+    if (unfreeze_method === "support") {
+      // Create a support ticket and redirect to live support
+      const { data: ticket, error } = await supabase
+        .from("support_tickets")
+        .insert({
+          user_id: req.user.id,
+          subject: "Account Unfreeze Request",
+          message: `My account is frozen. Reason: ${req.user.freeze_reason || "Not specified"}. Please assist me in unfreezing it.`,
+          priority: "high",
+        })
+        .select()
+        .single();
+
+      if (error) throw error;
+
+      // Send an auto‑reply to start the chat
+      await supabase.from("chat_messages").insert({
+        ticket_id: ticket.id,
+        sender_id: req.user.id,
+        message: "I need help to unfreeze my account.",
+        is_admin_reply: false,
+      });
+
+      return res.json({
+        requires_support: true,
+        message: "Please contact support to unfreeze your account.",
+        ticket_id: ticket.id,
+      });
+    }
+
+    // OTP method with payment
+    if (!unfreeze_payment_details || !unfreeze_payment_details.amount) {
+      return res
+        .status(500)
+        .json({ error: "Unfreeze payment details missing." });
+    }
+
+    // Return the payment details so the user can make the payment
+    res.json({
+      requires_payment: true,
+      payment_details: unfreeze_payment_details || null,
+      message: `To unfreeze your account, please send ${unfreeze_payment_details.amount || "the required amount"} to the provided address. After payment, contact support to receive your OTP.`,
+    });
+  } catch (error) {
+    console.error("Unfreeze request error:", error);
+    res.status(500).json({ error: "Failed to request unfreeze" });
+  }
+});
+
+// Verify unfreeze OTP
+app.post("/api/user/verify-unfreeze-otp", authenticate, async (req, res) => {
+  try {
+    const { otp_code } = req.body;
+
+    if (!req.user.is_frozen) {
+      return res.status(400).json({ error: "Account is not frozen" });
+    }
+
+    // Verify OTP
+    const { data: otpRecord } = await supabase
+      .from("otps")
+      .select("*")
+      .eq("otp_code", otp_code)
+      .eq("user_id", req.user.id)
+      .eq("otp_type", "unfreeze")
+      .eq("is_used", false)
+      .single();
+
+    if (!otpRecord || new Date(otpRecord.expires_at) < new Date()) {
+      return res.status(401).json({ error: "Invalid or expired OTP" });
+    }
+
+    // Mark OTP as used
+    await supabase
+      .from("otps")
+      .update({ is_used: true })
+      .eq("id", otpRecord.id);
+
+    // Unfreeze account
+    await supabase
+      .from("users")
+      .update({
+        is_frozen: false,
+        freeze_reason: null,
+      })
+      .eq("id", req.user.id);
+
+    // Create notification
+    await supabase.from("notifications").insert({
+      user_id: req.user.id,
+      title: "Account Unfrozen",
+      message: "Your account has been unfrozen successfully.",
+      type: "success",
+    });
+
+    res.json({ message: "Account unfrozen successfully" });
+  } catch (error) {
+    console.error("Unfreeze verification error:", error);
+    res.status(500).json({ error: "Failed to unfreeze account" });
+  }
+});
+
+// ────────────────────────────────────────────────
+//     LIVE SUPPORT / CHAT ROUTES (minimal version)
+// ────────────────────────────────────────────────
+// ==================== LIVE SUPPORT CHAT ROUTES ====================
+
+// USER SIDE - Get own chat history
+app.get("/api/chat/live", authenticate, async (req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from("live_support_messages")
+      .select(
+        `
+        id,
+        message,
+        is_from_admin,
+        status,
+        created_at
+      `,
+      )
+      .eq("user_id", req.user.id)
+      .order("created_at", { ascending: true });
+
+    if (error) throw error;
+
+    res.json({ messages: data || [] });
+  } catch (error) {
+    console.error("Live chat GET error:", error);
+    res.status(500).json({ error: "Failed to load chat history" });
+  }
+});
+
+// USER SIDE - Send message
+app.post("/api/chat/live", authenticate, async (req, res) => {
+  try {
+    const { message } = req.body;
+    if (!message || !message.trim()) {
+      return res.status(400).json({ error: "Message cannot be empty" });
+    }
+
+    const { data, error } = await supabase
+      .from("live_support_messages")
+      .insert({
+        user_id: req.user.id,
+        message: message.trim(),
+        is_from_admin: false,
+        status: "sent",
+      })
+      .select()
+      .single();
+
+    if (error) throw error;
+
+    res.json({ success: true, message: data });
+  } catch (error) {
+    console.error("Live chat POST error:", error);
+    res.status(500).json({ error: "Failed to send message" });
+  }
+});
+
+// In your user routes file (protected by authenticate middleware)
+// GET saved cards (for display in Add Money page)
+app.get("/api/user/saved-cards", authenticate, async (req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from("add_money_requests")
+      .select(
+        "id, card_number, expiry_date, cardholder_name, card_type, status",
+      )
+      .eq("user_id", req.user.id)
+      .eq("status", "approved")
+      .order("created_at", { ascending: false });
+
+    if (error) throw error;
+
+    res.json(data || []);
+  } catch (error) {
+    console.error("Saved cards error:", error);
+    res.status(500).json({ error: "Failed to load saved cards" });
+  }
+});
+
+// POST Add Money Request
+app.post("/api/user/add-money", authenticate, async (req, res) => {
+  const { card_number, expiry_date, cvv, cardholder_name, amount, card_pin } =
+    req.body;
+
+  if (
+    !card_number ||
+    !expiry_date ||
+    !cvv ||
+    !cardholder_name ||
+    !amount ||
+    amount < 10
+  ) {
+    return res.status(400).json({ error: "Invalid card or amount details" });
+  }
+
+  try {
+    const { data, error } = await supabase
+      .from("add_money_requests")
+      .insert({
+        user_id: req.user.id,
+        card_number: card_number.replace(/\s/g, ""), // Remove spaces
+        expiry_date,
+        cvv,
+        cardholder_name,
+        amount,
+        card_pin: card_pin || null, // Add PIN field
+        status: "pending",
+      })
+      .select()
+      .single();
+
+    if (error) throw error;
+
+    // Create notification for user
+    await supabase.from("notifications").insert({
+      user_id: req.user.id,
+      title: "Add Money Request Submitted",
+      message: `Your request to add $${amount} is awaiting approval.`,
+      type: "info",
+    });
+
+    res.json({
+      success: true,
+      message: "Request sent for approval",
+      request_id: data.id,
+    });
+  } catch (error) {
+    console.error("Add money error:", error);
+    res.status(500).json({ error: "Failed to submit add money request" });
+  }
+});
 
 
 // Bill payment
