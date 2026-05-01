@@ -2716,7 +2716,7 @@ app.get("/api/user/savings/status", authenticate, async (req, res) => {
 });
 
 // Get savings summary (check if user has active plans) - SINGLE VERSION
-app.get("/api/user/savings/summary", authenticate, async (req, res) => {
+/*app.get("/api/user/savings/summary", authenticate, async (req, res) => {
   try {
     console.log("Fetching savings summary for user:", req.user.id);
     
@@ -2776,13 +2776,13 @@ app.get("/api/user/savings/summary", authenticate, async (req, res) => {
     console.error("Savings summary error:", error);
     res.status(500).json({ error: "Failed to get savings summary: " + error.message });
   }
-});
+});*/
 
 
 
 
 // Changed from 'summary' to 'status' to avoid keyword conflicts
-app.get("/api/user/savings/status", authenticate, async (req, res) => {
+/*app.get("/api/user/savings/status", authenticate, async (req, res) => {
   try {
     console.log("Fetching savings status for user:", req.user.id);
     
@@ -2848,7 +2848,7 @@ app.get("/api/user/savings/status", authenticate, async (req, res) => {
     console.error("Savings status error:", error);
     res.status(500).json({ error: "Failed to get savings status: " + error.message });
   }
-});
+});*/
 
 
 // Get harvest plans for user
