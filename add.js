@@ -1,26 +1,14 @@
-// api/index.js - Main entry point
+// api/router.js - Central router that imports all route files
 const express = require('express');
-const cors = require('cors');
-const helmet = require('helmet');
-const morgan = require('morgan');
-// ... other imports
+const savingsRouter = require('./savings');
 
-const app = express();
+const router = express.Router();
 
-// ... middleware setup (helmet, cors, express.json, etc.)
+// Mount savings routes at /api/user/savings
+router.use('/user/savings', savingsRouter);
 
-// Import the main router
-const mainRouter = require('./router');
+// You can add other routers here as needed
+// router.use('/user/accounts', accountsRouter);
+// router.use('/admin', adminRouter);
 
-// Mount all API routes - THIS GOES BEFORE any other route handlers
-app.use('/api', mainRouter);
-
-// Your existing routes can stay, but the router handles the savings ones
-// So you can KEEP all your other working routes like:
-// app.get("/api/user/profile", authenticate, ...)
-// app.get("/api/user/accounts", authenticate, ...)
-// app.post("/api/user/transfer", authenticate, checkAccountFrozen, ...)
-
-// ... rest of your existing code (other routes, ledger routes, admin routes, etc.)
-
-module.exports = app;
+module.exports = router;

@@ -1958,7 +1958,7 @@ app.post(
 
 // ==================== SAVINGS STATUS / SUMMARY ====================
 
-app.get("/api/user/status", authenticate, async (req, res) => {
+/*app.get("/api/user/savings/status", authenticate, async (req, res) => {
   try {
     const userId = req.user.id;
 
@@ -2027,7 +2027,7 @@ app.get("/api/user/status", authenticate, async (req, res) => {
     console.error("Savings status error:", error);
     res.status(500).json({ error: "Failed to fetch savings status" });
   }
-});
+});*/
 
 // Get beneficiaries
 app.get(
@@ -2868,7 +2868,7 @@ app.get("/api/user/harvest-plans", authenticate, async (req, res) => {
 });
 
 // Get savings summary (check if user has active plans) - SINGLE VERSION
-app.get("/api/user/savings/summary", authenticate, async (req, res) => {
+/*app.get("/api/user/savings/summary", authenticate, async (req, res) => {
   try {
     console.log("Fetching savings summary for user:", req.user.id);
 
@@ -2932,7 +2932,7 @@ app.get("/api/user/savings/summary", authenticate, async (req, res) => {
       .status(500)
       .json({ error: "Failed to get savings summary: " + error.message });
   }
-});
+});*/
 
 // Start savings - WITH DUPLICATE PREVENTION
 app.post(
@@ -3396,7 +3396,7 @@ app.get("/api/user/savings", authenticate, async (req, res) => {
 });
 
 // Get single savings details (FIXED - get specific savings by type and id)
-app.get("/api/user/savings/:type/:id", authenticate, async (req, res) => {
+/*app.get("/api/user/savings/:type/:id", authenticate, async (req, res) => {
   const { type, id } = req.params;
 
   try {
@@ -3522,7 +3522,7 @@ app.get("/api/user/savings/:type/:id", authenticate, async (req, res) => {
       .status(500)
       .json({ error: "Failed to fetch savings details: " + error.message });
   }
-});
+});*/
 
 // Toggle auto-save for savings plan
 app.post(
