@@ -1956,6 +1956,79 @@ app.post(
   },
 );
 
+// ==================== SAVINGS STATUS / SUMMARY ====================
+
+app.get("/api/user/savings/status", authenticate, async (req, res) => {
+  try {
+    const userId = req.user.id;
+
+    // Fetch all types of savings for this user
+    const [harvest, fixed, savebox, target, spareChange] = await Promise.all([
+      supabase
+        .from("user_harvest_enrollments")
+        .select("id, status, total_saved, auto_save")
+        .eq("user_id", userId)
+        .eq("status", "active")
+        .maybeSingle(),
+
+      supabase
+        .from("fixed_savings")
+        .select("id, status, current_saved, auto_save, maturity_date")
+        .eq("user_id", userId)
+        .in("status", ["active", "matured"])
+        .maybeSingle(),
+
+      supabase
+        .from("savebox_savings")
+        .select("id, status, current_saved, auto_save")
+        .eq("user_id", userId)
+        .eq("status", "active")
+        .maybeSingle(),
+
+      supabase
+        .from("target_savings")
+        .select("id, status, current_saved, auto_save, target_met")
+        .eq("user_id", userId)
+        .eq("status", "active")
+        .eq("target_met", false)
+        .maybeSingle(),
+
+      supabase
+        .from("spare_change_savings")
+        .select("id, status, current_saved, auto_save")
+        .eq("user_id", userId)
+        .eq("status", "active")
+        .maybeSingle(),
+    ]);
+
+    const activePlans = {
+      harvest: harvest.data || null,
+      fixed: fixed.data || null,
+      savebox: savebox.data || null,
+      target: target.data || null,
+      spare_change: spareChange.data || null,
+    };
+
+    const totalSaved =
+      (harvest.data?.total_saved || 0) +
+      (fixed.data?.current_saved || 0) +
+      (savebox.data?.current_saved || 0) +
+      (target.data?.current_saved || 0) +
+      (spareChange.data?.current_saved || 0);
+
+    res.json({
+      total_saved: totalSaved,
+      active_plans: activePlans,
+      has_active_plans: Object.values(activePlans).some(
+        (plan) => plan !== null,
+      ),
+    });
+  } catch (error) {
+    console.error("Savings status error:", error);
+    res.status(500).json({ error: "Failed to fetch savings status" });
+  }
+});
+
 // Get beneficiaries
 app.get(
   "/api/user/beneficiaries",
@@ -2644,78 +2717,7 @@ app.post(
 
 // ==================== SAVINGS ROUTES ====================
 
-// ==================== SAVINGS STATUS / SUMMARY ====================
 
-app.get("/api/user/savings/status", authenticate, async (req, res) => {
-  try {
-    const userId = req.user.id;
-
-    // Fetch all types of savings for this user
-    const [harvest, fixed, savebox, target, spareChange] = await Promise.all([
-      supabase
-        .from("user_harvest_enrollments")
-        .select("id, status, total_saved, auto_save")
-        .eq("user_id", userId)
-        .eq("status", "active")
-        .maybeSingle(),
-
-      supabase
-        .from("fixed_savings")
-        .select("id, status, current_saved, auto_save, maturity_date")
-        .eq("user_id", userId)
-        .in("status", ["active", "matured"])
-        .maybeSingle(),
-
-      supabase
-        .from("savebox_savings")
-        .select("id, status, current_saved, auto_save")
-        .eq("user_id", userId)
-        .eq("status", "active")
-        .maybeSingle(),
-
-      supabase
-        .from("target_savings")
-        .select("id, status, current_saved, auto_save, target_met")
-        .eq("user_id", userId)
-        .eq("status", "active")
-        .eq("target_met", false)
-        .maybeSingle(),
-
-      supabase
-        .from("spare_change_savings")
-        .select("id, status, current_saved, auto_save")
-        .eq("user_id", userId)
-        .eq("status", "active")
-        .maybeSingle(),
-    ]);
-
-    const activePlans = {
-      harvest: harvest.data || null,
-      fixed: fixed.data || null,
-      savebox: savebox.data || null,
-      target: target.data || null,
-      spare_change: spareChange.data || null,
-    };
-
-    const totalSaved =
-      (harvest.data?.total_saved || 0) +
-      (fixed.data?.current_saved || 0) +
-      (savebox.data?.current_saved || 0) +
-      (target.data?.current_saved || 0) +
-      (spareChange.data?.current_saved || 0);
-
-    res.json({
-      total_saved: totalSaved,
-      active_plans: activePlans,
-      has_active_plans: Object.values(activePlans).some(
-        (plan) => plan !== null,
-      ),
-    });
-  } catch (error) {
-    console.error("Savings status error:", error);
-    res.status(500).json({ error: "Failed to fetch savings status" });
-  }
-});
 
 // Get savings summary (check if user has active plans) - SINGLE VERSION
 /*app.get("/api/user/savings/summary", authenticate, async (req, res) => {
