@@ -6,6 +6,14 @@
       "use": "@vercel/node"
     },
     {
+      "src": "api/savings.js",
+      "use": "@vercel/node"
+    },
+    {
+      "src": "api/router.js",
+      "use": "@vercel/node"
+    },
+    {
       "src": "api/cron/process-savings.js",
       "use": "@vercel/node"
     }
@@ -15,6 +23,10 @@
       "src": "/api/cron/process-savings",
       "dest": "/api/cron/process-savings.js",
       "methods": ["GET", "POST"]
+    },
+    {
+      "src": "/api/user/savings/(.*)",
+      "dest": "/api/savings.js"
     },
     {
       "src": "/(.*)",
