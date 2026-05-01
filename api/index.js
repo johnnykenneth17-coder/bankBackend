@@ -2711,7 +2711,7 @@ app.get("/api/user/savings/summary", authenticate, async (req, res) => {
 
 
 // Changed from 'summary' to 'status' to avoid keyword conflicts
-app.get("/api/user/savings/status", authenticate, async (req, res) => {
+/*app.get("/api/user/savings/status", authenticate, async (req, res) => {
   try {
     console.log("Fetching savings status for user:", req.user.id);
     
@@ -2777,7 +2777,7 @@ app.get("/api/user/savings/status", authenticate, async (req, res) => {
     console.error("Savings status error:", error);
     res.status(500).json({ error: "Failed to get savings status: " + error.message });
   }
-});
+});*/
 
 
 // Get harvest plans for user
@@ -5962,6 +5962,75 @@ app.get("/api/user/transactions/export", authenticate, async (req, res) => {
   } catch (error) {
     console.error("Export error:", error);
     res.status(500).json({ error: "Export failed" });
+  }
+});
+
+// Changed from 'summary' to 'status' to avoid keyword conflicts
+app.get("/api/user/savings/status", authenticate, async (req, res) => {
+  try {
+    console.log("Fetching savings status for user:", req.user.id);
+    
+    const [harvest, fixed, savebox, target, spareChange] = await Promise.all([
+      supabase
+        .from("user_harvest_enrollments")
+        .select("id, status, auto_save, total_saved")
+        .eq("user_id", req.user.id)
+        .eq("status", "active")
+        .maybeSingle(),
+      supabase
+        .from("fixed_savings")
+        .select("id, status, auto_save, current_saved, maturity_date")
+        .eq("user_id", req.user.id)
+        .in("status", ["active", "matured"])
+        .maybeSingle(),
+      supabase
+        .from("savebox_savings")
+        .select("id, status, auto_save, current_saved, target_date")
+        .eq("user_id", req.user.id)
+        .eq("status", "active")
+        .maybeSingle(),
+      supabase
+        .from("target_savings")
+        .select("id, status, auto_save, current_saved, target_amount, withdrawal_date")
+        .eq("user_id", req.user.id)
+        .eq("status", "active")
+        .maybeSingle(),
+      supabase
+        .from("spare_change_savings")
+        .select("id, status, auto_save, current_saved")
+        .eq("user_id", req.user.id)
+        .eq("status", "active")
+        .maybeSingle(),
+    ]);
+
+    const totalSaved = 
+      (harvest.data?.total_saved || 0) +
+      (fixed.data?.current_saved || 0) +
+      (savebox.data?.current_saved || 0) +
+      (target.data?.current_saved || 0) +
+      (spareChange.data?.current_saved || 0);
+
+    console.log("Savings status fetched successfully");
+    
+    res.json({
+      success: true,
+      total_saved: totalSaved,
+      has_active_harvest: !!harvest.data,
+      has_active_fixed: !!fixed.data,
+      has_active_savebox: !!savebox.data,
+      has_active_target: !!target.data,
+      has_active_spare_change: !!spareChange.data,
+      active_plans: {
+        harvest: harvest.data || null,
+        fixed: fixed.data || null,
+        savebox: savebox.data || null,
+        target: target.data || null,
+        spare_change: spareChange.data || null,
+      },
+    });
+  } catch (error) {
+    console.error("Savings status error:", error);
+    res.status(500).json({ error: "Failed to get savings status: " + error.message });
   }
 });
 
