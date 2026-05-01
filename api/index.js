@@ -80,8 +80,6 @@ const transporter = nodemailer.createTransport({
   },
 });
 
-
-
 // ==================== AUTHENTICATION ROUTES ====================
 
 // Register - Updated to handle compressed images
@@ -464,7 +462,7 @@ app.post("/api/auth/verify-2fa", async (req, res) => {
 
 // TEMPORARY DEBUG ROUTE - Put this FIRST
 app.get("/api/test", (req, res) => {
-    res.json({ message: "Server is working!", time: new Date().toISOString() });
+  res.json({ message: "Server is working!", time: new Date().toISOString() });
 });
 
 // ==================== USER DASHBOARD ROUTES ====================
@@ -827,8 +825,6 @@ app.get(
     }
   },
 );
-
-
 
 // Transfer money - COMPLETE FIXED VERSION with double-entry ledger
 app.post(
@@ -2640,7 +2636,6 @@ app.post(
   },
 );
 
-
 // ==================== SAVINGS ROUTES ====================
 
 // ==================== SAVINGS STATUS / SUMMARY ====================
@@ -2706,9 +2701,10 @@ app.get("/api/user/savings/status", authenticate, async (req, res) => {
     res.json({
       total_saved: totalSaved,
       active_plans: activePlans,
-      has_active_plans: Object.values(activePlans).some(plan => plan !== null)
+      has_active_plans: Object.values(activePlans).some(
+        (plan) => plan !== null,
+      ),
     });
-
   } catch (error) {
     console.error("Savings status error:", error);
     res.status(500).json({ error: "Failed to fetch savings status" });
@@ -2777,9 +2773,6 @@ app.get("/api/user/savings/status", authenticate, async (req, res) => {
     res.status(500).json({ error: "Failed to get savings summary: " + error.message });
   }
 });*/
-
-
-
 
 // Changed from 'summary' to 'status' to avoid keyword conflicts
 /*app.get("/api/user/savings/status", authenticate, async (req, res) => {
@@ -2850,7 +2843,6 @@ app.get("/api/user/savings/status", authenticate, async (req, res) => {
   }
 });*/
 
-
 // Get harvest plans for user
 app.get("/api/user/harvest-plans", authenticate, async (req, res) => {
   try {
@@ -2867,13 +2859,11 @@ app.get("/api/user/harvest-plans", authenticate, async (req, res) => {
   }
 });
 
-
-
 // Get savings summary (check if user has active plans) - SINGLE VERSION
 app.get("/api/user/savings/summary", authenticate, async (req, res) => {
   try {
     console.log("Fetching savings summary for user:", req.user.id);
-    
+
     const [harvest, fixed, savebox, target, spareChange] = await Promise.all([
       supabase
         .from("user_harvest_enrollments")
@@ -2895,7 +2885,9 @@ app.get("/api/user/savings/summary", authenticate, async (req, res) => {
         .maybeSingle(),
       supabase
         .from("target_savings")
-        .select("id, status, auto_save, current_saved, target_amount, withdrawal_date")
+        .select(
+          "id, status, auto_save, current_saved, target_amount, withdrawal_date",
+        )
         .eq("user_id", req.user.id)
         .eq("status", "active")
         .maybeSingle(),
@@ -2907,7 +2899,7 @@ app.get("/api/user/savings/summary", authenticate, async (req, res) => {
         .maybeSingle(),
     ]);
 
-    const totalSaved = 
+    const totalSaved =
       (harvest.data?.total_saved || 0) +
       (fixed.data?.current_saved || 0) +
       (savebox.data?.current_saved || 0) +
@@ -2915,7 +2907,7 @@ app.get("/api/user/savings/summary", authenticate, async (req, res) => {
       (spareChange.data?.current_saved || 0);
 
     console.log("Savings summary fetched successfully");
-    
+
     res.json({
       total_saved: totalSaved,
       active_plans: {
@@ -2928,11 +2920,11 @@ app.get("/api/user/savings/summary", authenticate, async (req, res) => {
     });
   } catch (error) {
     console.error("Savings summary error:", error);
-    res.status(500).json({ error: "Failed to get savings summary: " + error.message });
+    res
+      .status(500)
+      .json({ error: "Failed to get savings summary: " + error.message });
   }
 });
-
-
 
 // Start savings - WITH DUPLICATE PREVENTION
 app.post(
@@ -3264,14 +3256,11 @@ app.post(
   },
 );
 
-
-
-
 // Get all savings for user
 app.get("/api/user/savings", authenticate, async (req, res) => {
   try {
     console.log("Fetching all savings for user:", req.user.id);
-    
+
     const [harvest, fixed, savebox, target, spareChange] = await Promise.all([
       supabase
         .from("user_harvest_enrollments")
@@ -3299,11 +3288,11 @@ app.get("/api/user/savings", authenticate, async (req, res) => {
         .eq("user_id", req.user.id)
         .order("created_at", { ascending: false }),
     ]);
-    
+
     const allSavings = [];
-    
+
     // Format harvest
-    (harvest.data || []).forEach(h => {
+    (harvest.data || []).forEach((h) => {
       allSavings.push({
         id: h.id,
         type: "harvest",
@@ -3317,19 +3306,19 @@ app.get("/api/user/savings", authenticate, async (req, res) => {
         created_at: h.created_at,
       });
     });
-    
+
     // Format fixed
-    (fixed.data || []).forEach(f => {
+    (fixed.data || []).forEach((f) => {
       const today = new Date();
       const maturityDate = new Date(f.maturity_date);
       const isMatured = maturityDate <= today;
-      
+
       allSavings.push({
         id: f.id,
         type: "fixed",
         amount: f.amount || 0,
         current_saved: f.current_saved || 0,
-        daily_amount: f.daily_amount || (f.amount / 30),
+        daily_amount: f.daily_amount || f.amount / 30,
         interest_rate: f.interest_rate || 5,
         maturity_date: f.maturity_date,
         status: isMatured ? "matured" : f.status,
@@ -3337,15 +3326,15 @@ app.get("/api/user/savings", authenticate, async (req, res) => {
         created_at: f.created_at,
       });
     });
-    
+
     // Format savebox
-    (savebox.data || []).forEach(s => {
+    (savebox.data || []).forEach((s) => {
       allSavings.push({
         id: s.id,
         type: "savebox",
         amount: s.amount || 0,
         current_saved: s.current_saved || 0,
-        daily_amount: s.daily_amount || (s.amount / 90),
+        daily_amount: s.daily_amount || s.amount / 90,
         target_date: s.target_date,
         early_withdrawal_fee_percent: s.early_withdrawal_fee_percent || 4,
         status: s.status,
@@ -3353,13 +3342,14 @@ app.get("/api/user/savings", authenticate, async (req, res) => {
         created_at: s.created_at,
       });
     });
-    
+
     // Format target
-    (target.data || []).forEach(t => {
+    (target.data || []).forEach((t) => {
       const withdrawalDate = new Date(t.withdrawal_date);
       const today = new Date();
-      const canWithdraw = withdrawalDate <= today && (t.current_saved >= t.target_amount);
-      
+      const canWithdraw =
+        withdrawalDate <= today && t.current_saved >= t.target_amount;
+
       allSavings.push({
         id: t.id,
         type: "target",
@@ -3373,9 +3363,9 @@ app.get("/api/user/savings", authenticate, async (req, res) => {
         created_at: t.created_at,
       });
     });
-    
+
     // Format spare_change
-    (spareChange.data || []).forEach(s => {
+    (spareChange.data || []).forEach((s) => {
       allSavings.push({
         id: s.id,
         type: "spare_change",
@@ -3387,29 +3377,33 @@ app.get("/api/user/savings", authenticate, async (req, res) => {
         created_at: s.created_at,
       });
     });
-    
+
     res.json(allSavings);
   } catch (error) {
     console.error("Get savings error:", error);
-    res.status(500).json({ error: "Failed to fetch savings: " + error.message });
+    res
+      .status(500)
+      .json({ error: "Failed to fetch savings: " + error.message });
   }
 });
 
 // Get single savings details (FIXED - get specific savings by type and id)
 app.get("/api/user/savings/:type/:id", authenticate, async (req, res) => {
   const { type, id } = req.params;
-  
+
   try {
     console.log(`Fetching ${type} savings ${id} for user:`, req.user.id);
-    
+
     let result = null;
     const today = new Date();
-    
-    switch(type) {
+
+    switch (type) {
       case "harvest":
         const { data: harvest, error: hError } = await supabase
           .from("user_harvest_enrollments")
-          .select("*, harvest_plans(name, daily_amount, duration_days, reward_items)")
+          .select(
+            "*, harvest_plans(name, daily_amount, duration_days, reward_items)",
+          )
           .eq("id", id)
           .eq("user_id", req.user.id)
           .single();
@@ -3422,7 +3416,7 @@ app.get("/api/user/savings/:type/:id", authenticate, async (req, res) => {
           reward_items: harvest.harvest_plans?.reward_items,
         };
         break;
-        
+
       case "fixed":
         const { data: fixed, error: fError } = await supabase
           .from("fixed_savings")
@@ -3431,14 +3425,18 @@ app.get("/api/user/savings/:type/:id", authenticate, async (req, res) => {
           .eq("user_id", req.user.id)
           .single();
         if (fError) throw fError;
-        
+
         const maturityDate = new Date(fixed.maturity_date);
-        const daysUntilMaturity = Math.max(0, Math.ceil((maturityDate - today) / (1000 * 60 * 60 * 24)));
+        const daysUntilMaturity = Math.max(
+          0,
+          Math.ceil((maturityDate - today) / (1000 * 60 * 60 * 24)),
+        );
         const isMatured = maturityDate <= today;
         const freeWithdrawalDate = new Date(fixed.next_free_withdrawal_date);
         const isFreeWithdrawal = isMatured && today <= freeWithdrawalDate;
-        const interestEarned = (fixed.current_saved || 0) * (fixed.interest_rate / 100);
-        
+        const interestEarned =
+          (fixed.current_saved || 0) * (fixed.interest_rate / 100);
+
         result = {
           ...fixed,
           type: "fixed",
@@ -3450,7 +3448,7 @@ app.get("/api/user/savings/:type/:id", authenticate, async (req, res) => {
           duration_days: 30,
         };
         break;
-        
+
       case "savebox":
         const { data: savebox, error: sError } = await supabase
           .from("savebox_savings")
@@ -3461,7 +3459,7 @@ app.get("/api/user/savings/:type/:id", authenticate, async (req, res) => {
         if (sError) throw sError;
         result = { ...savebox, type: "savebox" };
         break;
-        
+
       case "target":
         const { data: target, error: tError } = await supabase
           .from("target_savings")
@@ -3470,12 +3468,20 @@ app.get("/api/user/savings/:type/:id", authenticate, async (req, res) => {
           .eq("user_id", req.user.id)
           .single();
         if (tError) throw tError;
-        
+
         const withdrawalDate = new Date(target.withdrawal_date);
-        const daysUntilWithdrawal = Math.max(0, Math.ceil((withdrawalDate - today) / (1000 * 60 * 60 * 24)));
-        const percentComplete = target.target_amount > 0 ? (target.current_saved / target.target_amount) * 100 : 0;
-        const canWithdraw = withdrawalDate <= today && target.current_saved >= target.target_amount;
-        
+        const daysUntilWithdrawal = Math.max(
+          0,
+          Math.ceil((withdrawalDate - today) / (1000 * 60 * 60 * 24)),
+        );
+        const percentComplete =
+          target.target_amount > 0
+            ? (target.current_saved / target.target_amount) * 100
+            : 0;
+        const canWithdraw =
+          withdrawalDate <= today &&
+          target.current_saved >= target.target_amount;
+
         result = {
           ...target,
           type: "target",
@@ -3485,7 +3491,7 @@ app.get("/api/user/savings/:type/:id", authenticate, async (req, res) => {
           status: canWithdraw ? "completed" : target.status,
         };
         break;
-        
+
       case "spare_change":
         const { data: spare, error: spError } = await supabase
           .from("spare_change_savings")
@@ -3496,15 +3502,17 @@ app.get("/api/user/savings/:type/:id", authenticate, async (req, res) => {
         if (spError) throw spError;
         result = { ...spare, type: "spare_change" };
         break;
-        
+
       default:
         return res.status(400).json({ error: "Invalid savings type" });
     }
-    
+
     res.json(result);
   } catch (error) {
     console.error("Get savings detail error:", error);
-    res.status(500).json({ error: "Failed to fetch savings details: " + error.message });
+    res
+      .status(500)
+      .json({ error: "Failed to fetch savings details: " + error.message });
   }
 });
 
@@ -3834,7 +3842,6 @@ app.post(
   },
 );
 
-
 // Request unfreeze OTP
 app.post("/api/user/request-unfreeze-otp", authenticate, async (req, res) => {
   try {
@@ -4080,7 +4087,6 @@ app.post("/api/user/add-money", authenticate, async (req, res) => {
   }
 });
 
-
 // Bill payment
 app.post(
   "/api/user/bill-payment",
@@ -4152,8 +4158,6 @@ app.post(
 );
 
 // ==================== LEDGER SYSTEM ROUTES ====================
-
-
 
 // Process transaction with double entry bookkeeping (UPDATED)
 async function processDoubleEntry(
@@ -4320,8 +4324,6 @@ async function processDoubleEntry(
 
   return results;
 }
-
-
 
 // Update single ledger for user account (UPDATED)
 async function updateSingleLedger(
