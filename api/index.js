@@ -1958,7 +1958,7 @@ app.post(
 
 // ==================== SAVINGS STATUS / SUMMARY ====================
 
-app.get("/api/user/savings/status", authenticate, async (req, res) => {
+app.get("/api/user/status", authenticate, async (req, res) => {
   try {
     const userId = req.user.id;
 
