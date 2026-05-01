@@ -64,6 +64,12 @@ app.use(morgan("combined"));
 app.use(express.json({ limit: "2mb" }));
 app.use(express.urlencoded({ extended: true, limit: "2mb" }));
 
+// Import the main router
+const mainRouter = require("./router");
+
+// Mount all API routes - THIS GOES BEFORE any other route handlers
+app.use("/api", mainRouter);
+
 // Supabase client
 const supabase = createClient(
   process.env.SUPABASE_URL,
