@@ -1992,7 +1992,7 @@ app.post(
 
 // ==================== SAVINGS STATUS / SUMMARY ====================
 
-/*app.get("/api/user/savings/status", authenticate, async (req, res) => {
+app.get("/api/user/savings/status", authenticate, async (req, res) => {
   try {
     const userId = req.user.id;
 
@@ -2061,7 +2061,7 @@ app.post(
     console.error("Savings status error:", error);
     res.status(500).json({ error: "Failed to fetch savings status" });
   }
-});*/
+});
 
 // Get beneficiaries
 app.get(
@@ -2815,7 +2815,7 @@ app.post(
 });*/
 
 // Changed from 'summary' to 'status' to avoid keyword conflicts
-app.get("/api/user/savings/status", authenticate, async (req, res) => {
+/*app.get("/api/user/savings/status", authenticate, async (req, res) => {
   try {
     console.log("Fetching savings status for user:", req.user.id);
 
@@ -2885,7 +2885,7 @@ app.get("/api/user/savings/status", authenticate, async (req, res) => {
       .status(500)
       .json({ error: "Failed to get savings status: " + error.message });
   }
-});
+});*/
 
 // Get harvest plans for user
 app.get("/api/user/harvest-plans", authenticate, async (req, res) => {
