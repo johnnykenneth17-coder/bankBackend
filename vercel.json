@@ -40,11 +40,5 @@
         { "key": "Access-Control-Max-Age", "value": "86400" }
       ]
     }
-  ],
-  "crons": [
-    {
-      "path": "/api/cron/process-savings",
-      "schedule": "0 * * * *"
-    }
   ]
 }
