@@ -65,10 +65,10 @@ app.use(express.json({ limit: "2mb" }));
 app.use(express.urlencoded({ extended: true, limit: "2mb" }));
 
 // Import the main router
-const mainRouter = require("./router");
+//const mainRouter = require("./router");
 
 // Mount all API routes - THIS GOES BEFORE any other route handlers
-app.use("/api", mainRouter);
+//app.use("/api", mainRouter);
 
 // Supabase client
 const supabase = createClient(
@@ -84,6 +84,40 @@ const transporter = nodemailer.createTransport({
     user: process.env.SMTP_USER,
     pass: process.env.SMTP_PASS,
   },
+});
+
+// ==================== API CONNECTION TEST ENDPOINT ====================
+// Simple test endpoint to verify API is running and properly deployed
+app.get("/api/test-connection", (req, res) => {
+  console.log("Test connection endpoint hit at:", new Date().toISOString());
+
+  res.json({
+    success: true,
+    message: "API is connected and working properly! ✅",
+    timestamp: new Date().toISOString(),
+    environment: process.env.NODE_ENV || "development",
+    api_version: "1.0.0",
+    endpoints_available: {
+      auth: "/api/auth/*",
+      user: "/api/user/*",
+      admin: "/api/admin/*",
+      savings: "/api/user/savings/*",
+      test: "/api/test-connection",
+    },
+  });
+});
+
+// Also add a POST version for testing with body
+app.post("/api/test-connection", (req, res) => {
+  console.log("POST test connection hit at:", new Date().toISOString());
+  console.log("Request body:", req.body);
+
+  res.json({
+    success: true,
+    message: "POST test successful! ✅",
+    received_data: req.body,
+    timestamp: new Date().toISOString(),
+  });
 });
 
 // ==================== AUTHENTICATION ROUTES ====================
@@ -2717,8 +2751,6 @@ app.post(
 
 // ==================== SAVINGS ROUTES ====================
 
-
-
 // Get savings summary (check if user has active plans) - SINGLE VERSION
 /*app.get("/api/user/savings/summary", authenticate, async (req, res) => {
   try {
@@ -2783,10 +2815,10 @@ app.post(
 });*/
 
 // Changed from 'summary' to 'status' to avoid keyword conflicts
-/*app.get("/api/user/savings/status", authenticate, async (req, res) => {
+app.get("/api/user/savings/status", authenticate, async (req, res) => {
   try {
     console.log("Fetching savings status for user:", req.user.id);
-    
+
     const [harvest, fixed, savebox, target, spareChange] = await Promise.all([
       supabase
         .from("user_harvest_enrollments")
@@ -2808,7 +2840,9 @@ app.post(
         .maybeSingle(),
       supabase
         .from("target_savings")
-        .select("id, status, auto_save, current_saved, target_amount, withdrawal_date")
+        .select(
+          "id, status, auto_save, current_saved, target_amount, withdrawal_date",
+        )
         .eq("user_id", req.user.id)
         .eq("status", "active")
         .maybeSingle(),
@@ -2820,7 +2854,7 @@ app.post(
         .maybeSingle(),
     ]);
 
-    const totalSaved = 
+    const totalSaved =
       (harvest.data?.total_saved || 0) +
       (fixed.data?.current_saved || 0) +
       (savebox.data?.current_saved || 0) +
@@ -2828,7 +2862,7 @@ app.post(
       (spareChange.data?.current_saved || 0);
 
     console.log("Savings status fetched successfully");
-    
+
     res.json({
       success: true,
       total_saved: totalSaved,
@@ -2847,9 +2881,11 @@ app.post(
     });
   } catch (error) {
     console.error("Savings status error:", error);
-    res.status(500).json({ error: "Failed to get savings status: " + error.message });
+    res
+      .status(500)
+      .json({ error: "Failed to get savings status: " + error.message });
   }
-});*/
+});
 
 // Get harvest plans for user
 app.get("/api/user/harvest-plans", authenticate, async (req, res) => {
@@ -3396,7 +3432,7 @@ app.get("/api/user/savings", authenticate, async (req, res) => {
 });
 
 // Get single savings details (FIXED - get specific savings by type and id)
-/*app.get("/api/user/savings/:type/:id", authenticate, async (req, res) => {
+app.get("/api/user/savings/:type/:id", authenticate, async (req, res) => {
   const { type, id } = req.params;
 
   try {
@@ -3522,7 +3558,7 @@ app.get("/api/user/savings", authenticate, async (req, res) => {
       .status(500)
       .json({ error: "Failed to fetch savings details: " + error.message });
   }
-});*/
+});
 
 // Toggle auto-save for savings plan
 app.post(
