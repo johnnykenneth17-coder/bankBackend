@@ -3,10 +3,10 @@ const { processAllSavings } = require("../services/savings-cron");
 
 export default async function handler(req, res) {
   // Verify cron secret
-  const authHeader = req.headers.authorization;
+  /*const authHeader = req.headers.authorization;
   if (authHeader !== `Bearer ${process.env.CRON_SECRET}`) {
     return res.status(401).json({ error: "Unauthorized" });
-  }
+  }*/
 
   try {
     await processAllSavings();
