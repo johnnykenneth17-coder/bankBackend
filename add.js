@@ -19,15 +19,3 @@ app.get("/api/test-connection", (req, res) => {
   });
 });
 
-// Also add a POST version for testing with body
-app.post("/api/test-connection", (req, res) => {
-  console.log("POST test connection hit at:", new Date().toISOString());
-  console.log("Request body:", req.body);
-  
-  res.json({
-    success: true,
-    message: "POST test successful! ✅",
-    received_data: req.body,
-    timestamp: new Date().toISOString()
-  });
-});
