@@ -1,5 +1,5 @@
 // api/cron/process-savings.js - Serverless function for Vercel cron
-const { processAllSavings } = require("../../savings-cron");
+const { processAllSavings } = require("../services/savings-cron");
 
 export default async function handler(req, res) {
   // Verify cron secret

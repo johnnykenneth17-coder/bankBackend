@@ -714,9 +714,9 @@ module.exports = {
 };
 
 // Run if called directly
-if (require.main === module) {
+/*if (require.main === module) {
     processAllSavings().then(() => process.exit(0)).catch(err => {
         console.error(err);
         process.exit(1);
     });
-}
+}*/
