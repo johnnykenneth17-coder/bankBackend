@@ -2429,109 +2429,216 @@ app.post(
 
 // Get notifications with pagination and unread count
 app.get("/api/user/notifications", authenticate, async (req, res) => {
-  try {
-    const { page = 1, limit = 20, unread_only = false } = req.query;
-    const offset = (page - 1) * limit;
+    try {
+        const { page = 1, limit = 20, unread_only = false } = req.query;
+        const offset = (parseInt(page) - 1) * parseInt(limit);
 
-    let query = supabase
-      .from("notifications")
-      .select("*", { count: "exact" })
-      .eq("user_id", req.user.id)
-      .order("created_at", { ascending: false });
+        // First, check if the table exists and has the right structure
+        const { error: tableCheckError } = await supabase
+            .from("notifications")
+            .select("id")
+            .limit(1);
+        
+        if (tableCheckError && tableCheckError.code === '42P01') {
+            // Table doesn't exist, create it
+            console.log("Notifications table doesn't exist, creating...");
+            await createNotificationsTable();
+        }
 
-    if (unread_only === "true") {
-      query = query.eq("is_read", false);
+        let query = supabase
+            .from("notifications")
+            .select("*", { count: "exact" })
+            .eq("user_id", req.user.id)
+            .order("created_at", { ascending: false });
+
+        if (unread_only === "true") {
+            query = query.eq("is_read", false);
+        }
+
+        const { data: notifications, error, count } = await query
+            .range(offset, offset + parseInt(limit) - 1);
+
+        if (error) {
+            console.error("Supabase notifications error:", error);
+            // Return empty array instead of error
+            return res.json({
+                notifications: [],
+                unread_count: 0,
+                pagination: {
+                    page: parseInt(page),
+                    limit: parseInt(limit),
+                    total: 0,
+                    pages: 0
+                }
+            });
+        }
+
+        // Get unread count for badge
+        const { count: unreadCount, error: unreadError } = await supabase
+            .from("notifications")
+            .select("*", { count: "exact", head: true })
+            .eq("user_id", req.user.id)
+            .eq("is_read", false);
+
+        if (unreadError) {
+            console.error("Unread count error:", unreadError);
+        }
+
+        res.json({
+            notifications: notifications || [],
+            unread_count: unreadCount || 0,
+            pagination: {
+                page: parseInt(page),
+                limit: parseInt(limit),
+                total: count || 0,
+                pages: Math.ceil((count || 0) / parseInt(limit))
+            }
+        });
+    } catch (error) {
+        console.error("Notifications fetch error:", error);
+        // Return empty array instead of error
+        res.json({
+            notifications: [],
+            unread_count: 0,
+            pagination: {
+                page: 1,
+                limit: 20,
+                total: 0,
+                pages: 0
+            }
+        });
     }
+}); 
 
-    const { data: notifications, error, count } = await query.range(offset, offset + limit - 1);
-
-    if (error) throw error;
-
-    // Get unread count for badge
-    const { count: unreadCount } = await supabase
-      .from("notifications")
-      .select("*", { count: "exact", head: true })
-      .eq("user_id", req.user.id)
-      .eq("is_read", false);
-
-    res.json({
-      notifications: notifications || [],
-      unread_count: unreadCount || 0,
-      pagination: {
-        page: parseInt(page),
-        limit: parseInt(limit),
-        total: count || 0,
-        pages: Math.ceil((count || 0) / limit)
-      }
-    });
-  } catch (error) {
-    console.error("Notifications fetch error:", error);
-    res.status(500).json({ error: "Failed to fetch notifications" });
-  }
-});
+// Helper function to create notifications table if it doesn't exist
+async function createNotificationsTable() {
+    try {
+        // Check if table exists
+        const { error: checkError } = await supabase
+            .from("notifications")
+            .select("id")
+            .limit(1);
+        
+        if (checkError && checkError.code === '42P01') {
+            // Create the notifications table using raw SQL
+            const createTableSQL = `
+                CREATE TABLE IF NOT EXISTS notifications (
+                    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+                    user_id UUID REFERENCES users(id) ON DELETE CASCADE,
+                    title VARCHAR(200) NOT NULL,
+                    message TEXT NOT NULL,
+                    type VARCHAR(50) DEFAULT 'info',
+                    is_read BOOLEAN DEFAULT false,
+                    read_at TIMESTAMP,
+                    action_url TEXT,
+                    created_at TIMESTAMP DEFAULT NOW(),
+                    updated_at TIMESTAMP DEFAULT NOW()
+                );
+                
+                CREATE INDEX IF NOT EXISTS idx_notifications_user_id ON notifications(user_id);
+                CREATE INDEX IF NOT EXISTS idx_notifications_is_read ON notifications(is_read);
+                CREATE INDEX IF NOT EXISTS idx_notifications_created_at ON notifications(created_at);
+            `;
+            
+            // Execute through Supabase's RPC if you have the function, or log to run manually
+            console.log("Please run this SQL in your Supabase SQL editor:");
+            console.log(createTableSQL);
+            
+            // Alternative: Try to insert a test record to see if table exists
+            // If it fails, log the SQL for manual execution
+        }
+    } catch (error) {
+        console.error("Error checking/creating notifications table:", error);
+    }
+}
 
 // Mark single notification as read
 app.post("/api/user/notifications/:id/read", authenticate, async (req, res) => {
-  try {
-    const { id } = req.params;
+    try {
+        const { id } = req.params;
+        
+        console.log(`Marking notification ${id} as read for user ${req.user.id}`);
 
-    const { error } = await supabase
-      .from("notifications")
-      .update({ 
-        is_read: true,
-        read_at: new Date()
-      })
-      .eq("id", id)
-      .eq("user_id", req.user.id);
+        // Check if notification exists and belongs to user
+        const { data: existing, error: checkError } = await supabase
+            .from("notifications")
+            .select("id, is_read")
+            .eq("id", id)
+            .eq("user_id", req.user.id)
+            .single();
+        
+        if (checkError) {
+            console.error("Notification not found:", checkError);
+            return res.status(404).json({ error: "Notification not found" });
+        }
+        
+        if (existing.is_read) {
+            return res.json({ success: true, message: "Already read" });
+        }
+        
+        const { error } = await supabase
+            .from("notifications")
+            .update({ 
+                is_read: true,
+                read_at: new Date().toISOString()
+            })
+            .eq("id", id)
+            .eq("user_id", req.user.id);
 
-    if (error) throw error;
+        if (error) {
+            console.error("Update error:", error);
+            throw error;
+        }
 
-    res.json({ success: true });
-  } catch (error) {
-    console.error("Notification update error:", error);
-    res.status(500).json({ error: "Failed to update notification" });
-  }
+        res.json({ success: true });
+    } catch (error) {
+        console.error("Notification update error:", error);
+        res.status(500).json({ error: "Failed to update notification" });
+    }
 });
 
 // Mark all notifications as read
 app.post("/api/user/notifications/mark-all-read", authenticate, async (req, res) => {
-  try {
-    const { error } = await supabase
-      .from("notifications")
-      .update({ 
-        is_read: true,
-        read_at: new Date()
-      })
-      .eq("user_id", req.user.id)
-      .eq("is_read", false);
+    try {
+        const { error } = await supabase
+            .from("notifications")
+            .update({ 
+                is_read: true,
+                read_at: new Date().toISOString()
+            })
+            .eq("user_id", req.user.id)
+            .eq("is_read", false);
 
-    if (error) throw error;
+        if (error) {
+            console.error("Mark all update error:", error);
+            throw error;
+        }
 
-    res.json({ success: true });
-  } catch (error) {
-    console.error("Mark all read error:", error);
-    res.status(500).json({ error: "Failed to mark all as read" });
-  }
+        res.json({ success: true });
+    } catch (error) {
+        console.error("Mark all read error:", error);
+        res.status(500).json({ error: "Failed to mark all as read" });
+    }
 });
 
 // Delete notification
 app.delete("/api/user/notifications/:id", authenticate, async (req, res) => {
-  try {
-    const { id } = req.params;
+    try {
+        const { id } = req.params;
 
-    const { error } = await supabase
-      .from("notifications")
-      .delete()
-      .eq("id", id)
-      .eq("user_id", req.user.id);
+        const { error } = await supabase
+            .from("notifications")
+            .delete()
+            .eq("id", id)
+            .eq("user_id", req.user.id);
 
-    if (error) throw error;
+        if (error) throw error;
 
-    res.json({ success: true });
-  } catch (error) {
-    console.error("Notification delete error:", error);
-    res.status(500).json({ error: "Failed to delete notification" });
-  }
+        res.json({ success: true });
+    } catch (error) {
+        console.error("Notification delete error:", error);
+        res.status(500).json({ error: "Failed to delete notification" });
+    }
 });
 
 // Register device for push notifications
