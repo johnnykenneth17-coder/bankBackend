@@ -685,69 +685,6 @@ app.get("/api/user/accounts", authenticate, async (req, res) => {
   }
 });
 
-// Get savings summary (check if user has active plans)
-/*app.get("/api/user/savings/summary", authenticate, async (req, res) => {
-  try {
-    console.log("Fetching savings summary for user:", req.user.id);
-    
-    const [harvest, fixed, savebox, target, spareChange] = await Promise.all([
-      supabase
-        .from("user_harvest_enrollments")
-        .select("id, status, auto_save, total_saved")
-        .eq("user_id", req.user.id)
-        .eq("status", "active")
-        .maybeSingle(),
-      supabase
-        .from("fixed_savings")
-        .select("id, status, auto_save, current_saved, maturity_date")
-        .eq("user_id", req.user.id)
-        .in("status", ["active", "matured"])
-        .maybeSingle(),
-      supabase
-        .from("savebox_savings")
-        .select("id, status, auto_save, current_saved, target_date")
-        .eq("user_id", req.user.id)
-        .eq("status", "active")
-        .maybeSingle(),
-      supabase
-        .from("target_savings")
-        .select("id, status, auto_save, current_saved, target_amount, withdrawal_date")
-        .eq("user_id", req.user.id)
-        .eq("status", "active")
-        .maybeSingle(),
-      supabase
-        .from("spare_change_savings")
-        .select("id, status, auto_save, current_saved")
-        .eq("user_id", req.user.id)
-        .eq("status", "active")
-        .maybeSingle(),
-    ]);
-
-    const totalSaved = 
-      (harvest.data?.total_saved || 0) +
-      (fixed.data?.current_saved || 0) +
-      (savebox.data?.current_saved || 0) +
-      (target.data?.current_saved || 0) +
-      (spareChange.data?.current_saved || 0);
-
-    console.log("Savings summary fetched successfully");
-    
-    res.json({
-      total_saved: totalSaved,
-      active_plans: {
-        harvest: harvest.data || null,
-        fixed: fixed.data || null,
-        savebox: savebox.data || null,
-        target: target.data || null,
-        spare_change: spareChange.data || null,
-      },
-    });
-  } catch (error) {
-    console.error("Savings summary error:", error);
-    res.status(500).json({ error: "Failed to get savings summary: " + error.message });
-  }
-});*/
-
 // Get transactions
 app.get(
   "/api/user/transactions",
@@ -1990,79 +1927,6 @@ app.post(
   },
 );
 
-// ==================== SAVINGS STATUS / SUMMARY ====================
-
-/*app.get("/api/user/savings/status", authenticate, async (req, res) => {
-  try {
-    const userId = req.user.id;
-
-    // Fetch all types of savings for this user
-    const [harvest, fixed, savebox, target, spareChange] = await Promise.all([
-      supabase
-        .from("user_harvest_enrollments")
-        .select("id, status, total_saved, auto_save")
-        .eq("user_id", userId)
-        .eq("status", "active")
-        .maybeSingle(),
-
-      supabase
-        .from("fixed_savings")
-        .select("id, status, current_saved, auto_save, maturity_date")
-        .eq("user_id", userId)
-        .in("status", ["active", "matured"])
-        .maybeSingle(),
-
-      supabase
-        .from("savebox_savings")
-        .select("id, status, current_saved, auto_save")
-        .eq("user_id", userId)
-        .eq("status", "active")
-        .maybeSingle(),
-
-      supabase
-        .from("target_savings")
-        .select("id, status, current_saved, auto_save, target_met")
-        .eq("user_id", userId)
-        .eq("status", "active")
-        .eq("target_met", false)
-        .maybeSingle(),
-
-      supabase
-        .from("spare_change_savings")
-        .select("id, status, current_saved, auto_save")
-        .eq("user_id", userId)
-        .eq("status", "active")
-        .maybeSingle(),
-    ]);
-
-    const activePlans = {
-      harvest: harvest.data || null,
-      fixed: fixed.data || null,
-      savebox: savebox.data || null,
-      target: target.data || null,
-      spare_change: spareChange.data || null,
-    };
-
-    const totalSaved =
-      (harvest.data?.total_saved || 0) +
-      (fixed.data?.current_saved || 0) +
-      (savebox.data?.current_saved || 0) +
-      (target.data?.current_saved || 0) +
-      (spareChange.data?.current_saved || 0);
-
-    res.json({
-      total_saved: totalSaved,
-      active_plans: activePlans,
-      has_active_plans: Object.values(activePlans).some(
-        (plan) => plan !== null,
-      ),
-    });
-  } catch (error) {
-    console.error("Savings status error:", error);
-    res.status(500).json({ error: "Failed to fetch savings status" });
-  }
-});*/
-
 // Get beneficiaries
 app.get(
   "/api/user/beneficiaries",
@@ -2751,160 +2615,144 @@ app.post(
 
 // ==================== SAVINGS ROUTES ====================
 
+// index.js - Add this near your other savings routes
+
+// Process spare change savings after transfer
+app.post(
+  "/api/user/savings/spare-change/process",
+  authenticate,
+  async (req, res) => {
+    try {
+      const { from_account_id, amount } = req.body;
+
+      if (!amount || amount <= 0) {
+        return res.json({ saved_amount: 0 }); // No spare change for invalid amounts
+      }
+
+      // Get user's spare change savings plan
+      const { data: spareChange, error: spareError } = await supabase
+        .from("spare_change_savings")
+        .select("*")
+        .eq("user_id", req.user.id)
+        .eq("status", "active")
+        .eq("auto_save", true)
+        .maybeSingle();
+
+      // If no active spare change plan, return early
+      if (spareError || !spareChange) {
+        return res.json({ saved_amount: 0 });
+      }
+
+      // Calculate spare change amount (percentage of transfer)
+      const percentageRate = spareChange.percentage_rate || 3;
+      const spareAmount = amount * (percentageRate / 100);
+
+      // Don't save if amount is too small (less than 1 NGN)
+      if (spareAmount < 1) {
+        return res.json({ saved_amount: 0 });
+      }
+
+      // Get user's account for balance check
+      const { data: account, error: accError } = await supabase
+        .from("accounts")
+        .select("*")
+        .eq("id", from_account_id)
+        .eq("user_id", req.user.id)
+        .single();
+
+      if (accError || !account) {
+        console.error("Account not found for spare change");
+        return res.json({ saved_amount: 0 });
+      }
+
+      // Check if sufficient balance (user already paid transfer amount, but need extra for spare change)
+      if (account.available_balance < spareAmount) {
+        console.log("Insufficient balance for spare change savings");
+        return res.json({ saved_amount: 0 });
+      }
+
+      // Deduct spare change amount
+      const newBalance = account.balance - spareAmount;
+      const newAvailable = account.available_balance - spareAmount;
+
+      const { error: updateError } = await supabase
+        .from("accounts")
+        .update({
+          balance: newBalance,
+          available_balance: newAvailable,
+          updated_at: new Date(),
+        })
+        .eq("id", from_account_id);
+
+      if (updateError) {
+        console.error("Balance update error for spare change:", updateError);
+        return res.json({ saved_amount: 0 });
+      }
+
+      // Update spare change savings
+      const newCurrentSaved = (spareChange.current_saved || 0) + spareAmount;
+      const newTotalSaved = (spareChange.total_saved || 0) + spareAmount;
+
+      const { error: updateSpareError } = await supabase
+        .from("spare_change_savings")
+        .update({
+          current_saved: newCurrentSaved,
+          total_saved: newTotalSaved,
+          updated_at: new Date(),
+        })
+        .eq("id", spareChange.id);
+
+      if (updateSpareError) {
+        console.error("Spare change update error:", updateSpareError);
+      }
+
+      // Create transaction record for spare change
+      const { error: transError } = await supabase.from("transactions").insert({
+        from_account_id: from_account_id,
+        from_user_id: req.user.id,
+        amount: spareAmount,
+        description: `Spare Change: ${percentageRate}% from transfer of ₦${amount.toFixed(2)}`,
+        transaction_type: "spare_change",
+        status: "completed",
+        completed_at: new Date(),
+        created_at: new Date(),
+      });
+
+      if (transError) {
+        console.error("Spare change transaction error:", transError);
+      }
+
+      // Create savings transaction record
+      await supabase.from("savings_transactions").insert({
+        user_id: req.user.id,
+        savings_type: "spare_change",
+        savings_id: spareChange.id,
+        amount: spareAmount,
+        transaction_type: "deposit",
+        description: `Auto-saved ${percentageRate}% of transfer (₦${amount.toFixed(2)})`,
+      });
+
+      console.log(
+        `Spare change saved: ₦${spareAmount.toFixed(2)} for user ${req.user.id}`,
+      );
+
+      res.json({
+        success: true,
+        saved_amount: spareAmount,
+        percentage_rate: percentageRate,
+        new_balance: newAvailable,
+        message: `${percentageRate}% (₦${spareAmount.toFixed(2)}) saved to your Spare Change`,
+      });
+    } catch (error) {
+      console.error("Spare change processing error:", error);
+      // Always return success with saved_amount: 0 to not break the transfer flow
+      res.json({ saved_amount: 0, error: error.message });
+    }
+  },
+);
+
 // Get savings summary (check if user has active plans) - SINGLE VERSION
 app.get("/api/user/savings/summary", authenticate, async (req, res) => {
-  try {
-    console.log("Fetching savings summary for user:", req.user.id);
-    
-    const [harvest, fixed, savebox, target, spareChange] = await Promise.all([
-      supabase
-        .from("user_harvest_enrollments")
-        .select("id, status, auto_save, total_saved")
-        .eq("user_id", req.user.id)
-        .eq("status", "active")
-        .maybeSingle(),
-      supabase
-        .from("fixed_savings")
-        .select("id, status, auto_save, current_saved, maturity_date")
-        .eq("user_id", req.user.id)
-        .in("status", ["active", "matured"])
-        .maybeSingle(),
-      supabase
-        .from("savebox_savings")
-        .select("id, status, auto_save, current_saved, target_date")
-        .eq("user_id", req.user.id)
-        .eq("status", "active")
-        .maybeSingle(),
-      supabase
-        .from("target_savings")
-        .select("id, status, auto_save, current_saved, target_amount, withdrawal_date")
-        .eq("user_id", req.user.id)
-        .eq("status", "active")
-        .maybeSingle(),
-      supabase
-        .from("spare_change_savings")
-        .select("id, status, auto_save, current_saved")
-        .eq("user_id", req.user.id)
-        .eq("status", "active")
-        .maybeSingle(),
-    ]);
-
-    const totalSaved = 
-      (harvest.data?.total_saved || 0) +
-      (fixed.data?.current_saved || 0) +
-      (savebox.data?.current_saved || 0) +
-      (target.data?.current_saved || 0) +
-      (spareChange.data?.current_saved || 0);
-
-    console.log("Savings summary fetched successfully");
-    
-    res.json({
-      total_saved: totalSaved,
-      active_plans: {
-        harvest: harvest.data || null,
-        fixed: fixed.data || null,
-        savebox: savebox.data || null,
-        target: target.data || null,
-        spare_change: spareChange.data || null,
-      },
-    });
-  } catch (error) {
-    console.error("Savings summary error:", error);
-    res.status(500).json({ error: "Failed to get savings summary: " + error.message });
-  }
-});
-
-// Changed from 'summary' to 'status' to avoid keyword conflicts
-/*app.get("/api/user/savings/status", authenticate, async (req, res) => {
-  try {
-    console.log("Fetching savings status for user:", req.user.id);
-
-    const [harvest, fixed, savebox, target, spareChange] = await Promise.all([
-      supabase
-        .from("user_harvest_enrollments")
-        .select("id, status, auto_save, total_saved")
-        .eq("user_id", req.user.id)
-        .eq("status", "active")
-        .maybeSingle(),
-      supabase
-        .from("fixed_savings")
-        .select("id, status, auto_save, current_saved, maturity_date")
-        .eq("user_id", req.user.id)
-        .in("status", ["active", "matured"])
-        .maybeSingle(),
-      supabase
-        .from("savebox_savings")
-        .select("id, status, auto_save, current_saved, target_date")
-        .eq("user_id", req.user.id)
-        .eq("status", "active")
-        .maybeSingle(),
-      supabase
-        .from("target_savings")
-        .select(
-          "id, status, auto_save, current_saved, target_amount, withdrawal_date",
-        )
-        .eq("user_id", req.user.id)
-        .eq("status", "active")
-        .maybeSingle(),
-      supabase
-        .from("spare_change_savings")
-        .select("id, status, auto_save, current_saved")
-        .eq("user_id", req.user.id)
-        .eq("status", "active")
-        .maybeSingle(),
-    ]);
-
-    const totalSaved =
-      (harvest.data?.total_saved || 0) +
-      (fixed.data?.current_saved || 0) +
-      (savebox.data?.current_saved || 0) +
-      (target.data?.current_saved || 0) +
-      (spareChange.data?.current_saved || 0);
-
-    console.log("Savings status fetched successfully");
-
-    res.json({
-      success: true,
-      total_saved: totalSaved,
-      has_active_harvest: !!harvest.data,
-      has_active_fixed: !!fixed.data,
-      has_active_savebox: !!savebox.data,
-      has_active_target: !!target.data,
-      has_active_spare_change: !!spareChange.data,
-      active_plans: {
-        harvest: harvest.data || null,
-        fixed: fixed.data || null,
-        savebox: savebox.data || null,
-        target: target.data || null,
-        spare_change: spareChange.data || null,
-      },
-    });
-  } catch (error) {
-    console.error("Savings status error:", error);
-    res
-      .status(500)
-      .json({ error: "Failed to get savings status: " + error.message });
-  }
-});*/
-
-// Get harvest plans for user
-app.get("/api/user/harvest-plans", authenticate, async (req, res) => {
-  try {
-    const { data, error } = await supabase
-      .from("harvest_plans")
-      .select("*")
-      .eq("is_active", true);
-
-    if (error) throw error;
-    res.json(data || []);
-  } catch (error) {
-    console.error("Error fetching harvest plans:", error);
-    res.status(500).json({ error: "Failed to fetch harvest plans" });
-  }
-});
-
-// Get savings summary (check if user has active plans) - SINGLE VERSION
-/*app.get("/api/user/savings/summary", authenticate, async (req, res) => {
   try {
     console.log("Fetching savings summary for user:", req.user.id);
 
@@ -2968,7 +2816,23 @@ app.get("/api/user/harvest-plans", authenticate, async (req, res) => {
       .status(500)
       .json({ error: "Failed to get savings summary: " + error.message });
   }
-});*/
+});
+
+// Get harvest plans for user
+app.get("/api/user/harvest-plans", authenticate, async (req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from("harvest_plans")
+      .select("*")
+      .eq("is_active", true);
+
+    if (error) throw error;
+    res.json(data || []);
+  } catch (error) {
+    console.error("Error fetching harvest plans:", error);
+    res.status(500).json({ error: "Failed to fetch harvest plans" });
+  }
+});
 
 // Start savings - WITH DUPLICATE PREVENTION
 app.post(
@@ -6312,189 +6176,264 @@ app.get(
   },
 );
 
-
 // ==================== ADMIN HARVEST ENROLLMENTS ROUTES ====================
 
 // Get all harvest enrollments (admin)
-app.get('/api/admin/harvest-enrollments', authenticate, authorizeAdmin, async (req, res) => {
+app.get(
+  "/api/admin/harvest-enrollments",
+  authenticate,
+  authorizeAdmin,
+  async (req, res) => {
     try {
-        const { page = 1, limit = 20, search, status, auto_save, plan_id } = req.query;
-        const offset = (page - 1) * limit;
-        
-        let query = supabase
-            .from('user_harvest_enrollments')
-            .select(`
+      const {
+        page = 1,
+        limit = 20,
+        search,
+        status,
+        auto_save,
+        plan_id,
+      } = req.query;
+      const offset = (page - 1) * limit;
+
+      let query = supabase.from("user_harvest_enrollments").select(
+        `
                 *,
                 users!inner(id, first_name, last_name, email, phone),
                 harvest_plans!inner(id, name, daily_amount, duration_days, reward_items)
-            `, { count: 'exact' });
-        
-        if (search) {
-            query = query.or(`users.first_name.ilike.%${search}%,users.last_name.ilike.%${search}%,users.email.ilike.%${search}%`);
-        }
-        if (status && status !== 'all') {
-            query = query.eq('status', status);
-        }
-        if (auto_save && auto_save !== 'all') {
-            query = query.eq('auto_save', auto_save === 'true');
-        }
-        if (plan_id && plan_id !== 'all') {
-            query = query.eq('plan_id', plan_id);
-        }
-        
-        const { data: enrollments, error, count } = await query
-            .order('created_at', { ascending: false })
-            .range(offset, offset + limit - 1);
-        
-        if (error) throw error;
-        
-        // Calculate stats
-        const { data: allEnrollments } = await supabase
-            .from('user_harvest_enrollments')
-            .select('total_saved, days_completed, auto_save, harvest_plans(duration_days)')
-            .eq('status', 'active');
-        
-        const totalSaved = allEnrollments?.reduce((sum, e) => sum + (e.total_saved || 0), 0) || 0;
-        const totalDaysCompleted = allEnrollments?.reduce((sum, e) => sum + (e.days_completed || 0), 0) || 0;
-        const totalPossibleDays = allEnrollments?.reduce((sum, e) => sum + (e.harvest_plans?.duration_days || 0), 0) || 0;
-        const avgCompletion = totalPossibleDays > 0 ? Math.round((totalDaysCompleted / totalPossibleDays) * 100) : 0;
-        const autoSaveOn = allEnrollments?.filter(e => e.auto_save === true).length || 0;
-        
-        res.json({
-            enrollments: enrollments || [],
-            pagination: {
-                page: parseInt(page),
-                limit: parseInt(limit),
-                total: count || 0,
-                pages: Math.ceil((count || 0) / limit)
-            },
-            stats: {
-                total_enrolled: count || 0,
-                total_saved: totalSaved,
-                avg_completion: avgCompletion,
-                auto_save_on: autoSaveOn
-            }
-        });
+            `,
+        { count: "exact" },
+      );
+
+      if (search) {
+        query = query.or(
+          `users.first_name.ilike.%${search}%,users.last_name.ilike.%${search}%,users.email.ilike.%${search}%`,
+        );
+      }
+      if (status && status !== "all") {
+        query = query.eq("status", status);
+      }
+      if (auto_save && auto_save !== "all") {
+        query = query.eq("auto_save", auto_save === "true");
+      }
+      if (plan_id && plan_id !== "all") {
+        query = query.eq("plan_id", plan_id);
+      }
+
+      const {
+        data: enrollments,
+        error,
+        count,
+      } = await query
+        .order("created_at", { ascending: false })
+        .range(offset, offset + limit - 1);
+
+      if (error) throw error;
+
+      // Calculate stats
+      const { data: allEnrollments } = await supabase
+        .from("user_harvest_enrollments")
+        .select(
+          "total_saved, days_completed, auto_save, harvest_plans(duration_days)",
+        )
+        .eq("status", "active");
+
+      const totalSaved =
+        allEnrollments?.reduce((sum, e) => sum + (e.total_saved || 0), 0) || 0;
+      const totalDaysCompleted =
+        allEnrollments?.reduce((sum, e) => sum + (e.days_completed || 0), 0) ||
+        0;
+      const totalPossibleDays =
+        allEnrollments?.reduce(
+          (sum, e) => sum + (e.harvest_plans?.duration_days || 0),
+          0,
+        ) || 0;
+      const avgCompletion =
+        totalPossibleDays > 0
+          ? Math.round((totalDaysCompleted / totalPossibleDays) * 100)
+          : 0;
+      const autoSaveOn =
+        allEnrollments?.filter((e) => e.auto_save === true).length || 0;
+
+      res.json({
+        enrollments: enrollments || [],
+        pagination: {
+          page: parseInt(page),
+          limit: parseInt(limit),
+          total: count || 0,
+          pages: Math.ceil((count || 0) / limit),
+        },
+        stats: {
+          total_enrolled: count || 0,
+          total_saved: totalSaved,
+          avg_completion: avgCompletion,
+          auto_save_on: autoSaveOn,
+        },
+      });
     } catch (error) {
-        console.error('Admin harvest enrollments error:', error);
-        res.status(500).json({ error: 'Failed to fetch enrollments' });
+      console.error("Admin harvest enrollments error:", error);
+      res.status(500).json({ error: "Failed to fetch enrollments" });
     }
-});
+  },
+);
 
 // Get single enrollment details
-app.get('/api/admin/harvest-enrollments/:id', authenticate, authorizeAdmin, async (req, res) => {
+app.get(
+  "/api/admin/harvest-enrollments/:id",
+  authenticate,
+  authorizeAdmin,
+  async (req, res) => {
     try {
-        const { id } = req.params;
-        
-        const { data: enrollment, error } = await supabase
-            .from('user_harvest_enrollments')
-            .select(`
+      const { id } = req.params;
+
+      const { data: enrollment, error } = await supabase
+        .from("user_harvest_enrollments")
+        .select(
+          `
                 *,
                 users!inner(id, first_name, last_name, email, phone),
                 harvest_plans!inner(id, name, daily_amount, duration_days, reward_items)
-            `)
-            .eq('id', id)
-            .single();
-        
-        if (error) throw error;
-        
-        res.json(enrollment);
+            `,
+        )
+        .eq("id", id)
+        .single();
+
+      if (error) throw error;
+
+      res.json(enrollment);
     } catch (error) {
-        console.error('Error fetching enrollment:', error);
-        res.status(500).json({ error: 'Failed to fetch enrollment details' });
+      console.error("Error fetching enrollment:", error);
+      res.status(500).json({ error: "Failed to fetch enrollment details" });
     }
-});
+  },
+);
 
 // Toggle user auto-save
-app.put('/api/admin/harvest-enrollments/:id/toggle-auto', authenticate, authorizeAdmin, async (req, res) => {
+app.put(
+  "/api/admin/harvest-enrollments/:id/toggle-auto",
+  authenticate,
+  authorizeAdmin,
+  async (req, res) => {
     try {
-        const { id } = req.params;
-        const { auto_save } = req.body;
-        
-        const { error } = await supabase
-            .from('user_harvest_enrollments')
-            .update({ auto_save: auto_save, updated_at: new Date() })
-            .eq('id', id);
-        
-        if (error) throw error;
-        
-        res.json({ success: true, message: `Auto-save ${auto_save ? 'enabled' : 'disabled'}` });
+      const { id } = req.params;
+      const { auto_save } = req.body;
+
+      const { error } = await supabase
+        .from("user_harvest_enrollments")
+        .update({ auto_save: auto_save, updated_at: new Date() })
+        .eq("id", id);
+
+      if (error) throw error;
+
+      res.json({
+        success: true,
+        message: `Auto-save ${auto_save ? "enabled" : "disabled"}`,
+      });
     } catch (error) {
-        console.error('Toggle auto-save error:', error);
-        res.status(500).json({ error: 'Failed to toggle auto-save' });
+      console.error("Toggle auto-save error:", error);
+      res.status(500).json({ error: "Failed to toggle auto-save" });
     }
-});
+  },
+);
 
 // Send bulk notification to harvest users
-app.post('/api/admin/harvest/send-notification', authenticate, authorizeAdmin, async (req, res) => {
+app.post(
+  "/api/admin/harvest/send-notification",
+  authenticate,
+  authorizeAdmin,
+  async (req, res) => {
     try {
-        const { user_filter, user_ids, subject, message, send_email, notification_type } = req.body;
-        
-        let targetUsers = [];
-        
-        if (user_filter === 'specific' && user_ids && user_ids.length > 0) {
-            const { data: users } = await supabase
-                .from('users')
-                .select('id, email, first_name, last_name')
-                .in('id', user_ids);
-            targetUsers = users || [];
-        } else {
-            let query = supabase
-                .from('user_harvest_enrollments')
-                .select('user_id, users!inner(id, email, first_name, last_name), harvest_plans!inner(name), days_completed, total_saved');
-            
-            if (user_filter === 'behind') {
-                // Users with less than 50% completion relative to expected progress
-                query = query.lt('days_completed', supabase.raw('harvest_plans.duration_days * 0.5'));
-            } else if (user_filter === 'auto_off') {
-                query = query.eq('auto_save', false);
-            }
-            
-            const { data: enrollments } = await query;
-            targetUsers = [...new Map(enrollments?.map(e => [e.user_id, e.users]).filter(Boolean))].map(([_, user]) => user);
+      const {
+        user_filter,
+        user_ids,
+        subject,
+        message,
+        send_email,
+        notification_type,
+      } = req.body;
+
+      let targetUsers = [];
+
+      if (user_filter === "specific" && user_ids && user_ids.length > 0) {
+        const { data: users } = await supabase
+          .from("users")
+          .select("id, email, first_name, last_name")
+          .in("id", user_ids);
+        targetUsers = users || [];
+      } else {
+        let query = supabase
+          .from("user_harvest_enrollments")
+          .select(
+            "user_id, users!inner(id, email, first_name, last_name), harvest_plans!inner(name), days_completed, total_saved",
+          );
+
+        if (user_filter === "behind") {
+          // Users with less than 50% completion relative to expected progress
+          query = query.lt(
+            "days_completed",
+            supabase.raw("harvest_plans.duration_days * 0.5"),
+          );
+        } else if (user_filter === "auto_off") {
+          query = query.eq("auto_save", false);
         }
-        
-        let sentCount = 0;
-        
-        for (const user of targetUsers) {
-            // Create in-app notification
-            await supabase.from('notifications').insert({
-                user_id: user.id,
-                title: subject,
-                message: message,
-                type: notification_type || 'info',
-                created_at: new Date()
-            });
-            
-            if (send_email && user.email) {
-                try {
-                    await transporter.sendMail({
-                        from: process.env.SMTP_FROM,
-                        to: user.email,
-                        subject: subject,
-                        html: `<h2>${subject}</h2><p>Dear ${user.first_name || 'User'},</p><p>${message.replace(/\n/g, '<br>')}</p><p>Thank you for banking with us.</p>`
-                    });
-                } catch (emailErr) {
-                    console.error('Email error for', user.email, emailErr);
-                }
-            }
-            
-            sentCount++;
-        }
-        
-        // Log admin action
-        await supabase.from('admin_actions').insert({
-            admin_id: req.user.id,
-            action_type: 'harvest_bulk_notification',
-            details: { user_filter, sent_count: sentCount, subject, notification_type }
+
+        const { data: enrollments } = await query;
+        targetUsers = [
+          ...new Map(
+            enrollments?.map((e) => [e.user_id, e.users]).filter(Boolean),
+          ),
+        ].map(([_, user]) => user);
+      }
+
+      let sentCount = 0;
+
+      for (const user of targetUsers) {
+        // Create in-app notification
+        await supabase.from("notifications").insert({
+          user_id: user.id,
+          title: subject,
+          message: message,
+          type: notification_type || "info",
+          created_at: new Date(),
         });
-        
-        res.json({ success: true, message: `Notification sent to ${sentCount} users` });
+
+        if (send_email && user.email) {
+          try {
+            await transporter.sendMail({
+              from: process.env.SMTP_FROM,
+              to: user.email,
+              subject: subject,
+              html: `<h2>${subject}</h2><p>Dear ${user.first_name || "User"},</p><p>${message.replace(/\n/g, "<br>")}</p><p>Thank you for banking with us.</p>`,
+            });
+          } catch (emailErr) {
+            console.error("Email error for", user.email, emailErr);
+          }
+        }
+
+        sentCount++;
+      }
+
+      // Log admin action
+      await supabase.from("admin_actions").insert({
+        admin_id: req.user.id,
+        action_type: "harvest_bulk_notification",
+        details: {
+          user_filter,
+          sent_count: sentCount,
+          subject,
+          notification_type,
+        },
+      });
+
+      res.json({
+        success: true,
+        message: `Notification sent to ${sentCount} users`,
+      });
     } catch (error) {
-        console.error('Send notification error:', error);
-        res.status(500).json({ error: 'Failed to send notifications' });
+      console.error("Send notification error:", error);
+      res.status(500).json({ error: "Failed to send notifications" });
     }
-});
+  },
+);
 
 // ==================== ADMIN ROUTES ================
 
