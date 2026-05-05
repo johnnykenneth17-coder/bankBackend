@@ -2423,42 +2423,203 @@ app.post(
   },
 );
 
-// Get notifications
+
+// ==================== IMPROVED NOTIFICATION ROUTES ====================
+
+
+// Get notifications with pagination and unread count
 app.get("/api/user/notifications", authenticate, async (req, res) => {
   try {
-    const { data: notifications, error } = await supabase
+    const { page = 1, limit = 20, unread_only = false } = req.query;
+    const offset = (page - 1) * limit;
+
+    let query = supabase
       .from("notifications")
-      .select("*")
+      .select("*", { count: "exact" })
       .eq("user_id", req.user.id)
-      .order("created_at", { ascending: false })
-      .limit(50);
+      .order("created_at", { ascending: false });
+
+    if (unread_only === "true") {
+      query = query.eq("is_read", false);
+    }
+
+    const { data: notifications, error, count } = await query.range(offset, offset + limit - 1);
 
     if (error) throw error;
 
-    res.json(notifications);
+    // Get unread count for badge
+    const { count: unreadCount } = await supabase
+      .from("notifications")
+      .select("*", { count: "exact", head: true })
+      .eq("user_id", req.user.id)
+      .eq("is_read", false);
+
+    res.json({
+      notifications: notifications || [],
+      unread_count: unreadCount || 0,
+      pagination: {
+        page: parseInt(page),
+        limit: parseInt(limit),
+        total: count || 0,
+        pages: Math.ceil((count || 0) / limit)
+      }
+    });
   } catch (error) {
     console.error("Notifications fetch error:", error);
     res.status(500).json({ error: "Failed to fetch notifications" });
   }
 });
 
-// Mark notification as read
+// Mark single notification as read
 app.post("/api/user/notifications/:id/read", authenticate, async (req, res) => {
   try {
     const { id } = req.params;
 
-    await supabase
+    const { error } = await supabase
       .from("notifications")
-      .update({ is_read: true })
+      .update({ 
+        is_read: true,
+        read_at: new Date()
+      })
       .eq("id", id)
       .eq("user_id", req.user.id);
 
-    res.json({ message: "Notification marked as read" });
+    if (error) throw error;
+
+    res.json({ success: true });
   } catch (error) {
     console.error("Notification update error:", error);
     res.status(500).json({ error: "Failed to update notification" });
   }
 });
+
+// Mark all notifications as read
+app.post("/api/user/notifications/mark-all-read", authenticate, async (req, res) => {
+  try {
+    const { error } = await supabase
+      .from("notifications")
+      .update({ 
+        is_read: true,
+        read_at: new Date()
+      })
+      .eq("user_id", req.user.id)
+      .eq("is_read", false);
+
+    if (error) throw error;
+
+    res.json({ success: true });
+  } catch (error) {
+    console.error("Mark all read error:", error);
+    res.status(500).json({ error: "Failed to mark all as read" });
+  }
+});
+
+// Delete notification
+app.delete("/api/user/notifications/:id", authenticate, async (req, res) => {
+  try {
+    const { id } = req.params;
+
+    const { error } = await supabase
+      .from("notifications")
+      .delete()
+      .eq("id", id)
+      .eq("user_id", req.user.id);
+
+    if (error) throw error;
+
+    res.json({ success: true });
+  } catch (error) {
+    console.error("Notification delete error:", error);
+    res.status(500).json({ error: "Failed to delete notification" });
+  }
+});
+
+// Register device for push notifications
+app.post("/api/user/register-push-token", authenticate, async (req, res) => {
+  try {
+    const { token: push_token, platform, device_name } = req.body;
+
+    if (!push_token) {
+      return res.status(400).json({ error: "Push token required" });
+    }
+
+    // Upsert the push token
+    const { error } = await supabase
+      .from("user_push_tokens")
+      .upsert({
+        user_id: req.user.id,
+        push_token: push_token,
+        platform: platform || "web",
+        device_name: device_name || null,
+        is_active: true,
+        last_active: new Date(),
+        updated_at: new Date()
+      }, {
+        onConflict: "user_id, push_token"
+      });
+
+    if (error) throw error;
+
+    res.json({ success: true });
+  } catch (error) {
+    console.error("Push token registration error:", error);
+    res.status(500).json({ error: "Failed to register push token" });
+  }
+});
+
+// Get push notification settings
+app.get("/api/user/push-settings", authenticate, async (req, res) => {
+  try {
+    const { data, error } = await supabase
+      .from("user_push_settings")
+      .select("*")
+      .eq("user_id", req.user.id)
+      .single();
+
+    if (error && error.code !== "PGRST116") throw error;
+
+    // Default settings
+    const defaultSettings = {
+      transfers: true,
+      savings: true,
+      promotions: false,
+      security: true,
+      bills: true
+    };
+
+    res.json(data || defaultSettings);
+  } catch (error) {
+    console.error("Push settings fetch error:", error);
+    res.status(500).json({ error: "Failed to fetch push settings" });
+  }
+});
+
+// Update push notification settings
+app.post("/api/user/push-settings", authenticate, async (req, res) => {
+  try {
+    const { transfers, savings, promotions, security, bills } = req.body;
+
+    const { error } = await supabase
+      .from("user_push_settings")
+      .upsert({
+        user_id: req.user.id,
+        transfers: transfers !== undefined ? transfers : true,
+        savings: savings !== undefined ? savings : true,
+        promotions: promotions !== undefined ? promotions : false,
+        security: security !== undefined ? security : true,
+        bills: bills !== undefined ? bills : true,
+        updated_at: new Date()
+      });
+
+    if (error) throw error;
+
+    res.json({ success: true });
+  } catch (error) {
+    console.error("Push settings update error:", error);
+    res.status(500).json({ error: "Failed to update push settings" });
+  }
+});
+
 
 // Request OTP for withdrawal
 app.post(
