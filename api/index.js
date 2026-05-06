@@ -731,7 +731,7 @@ app.get("/api/user/accounts", authenticate, async (req, res) => {
   }
 });
 
-// Get transactions
+// Get transactions with user details
 app.get(
   "/api/user/transactions",
   authenticate,
@@ -750,15 +750,15 @@ app.get(
 
       const { data: transactions, error } = await supabase
         .from("transactions")
-        .select(
-          `
-                *,
-                from_account:accounts!transactions_from_account_id_fkey(account_number),
-                to_account:accounts!transactions_to_account_id_fkey(account_number)
-            `,
-        )
+        .select(`
+          *,
+          from_account:accounts!transactions_from_account_id_fkey(id, account_number),
+          to_account:accounts!transactions_to_account_id_fkey(id, account_number),
+          from_user:users!transactions_from_user_id_fkey(id, first_name, last_name, email),
+          to_user:users!transactions_to_user_id_fkey(id, first_name, last_name, email)
+        `)
         .or(
-          `from_account_id.in.(${accountIds.join(",")}),to_account_id.in.(${accountIds.join(",")})`,
+          `from_account_id.in.(${accountIds.join(",")}),to_account_id.in.(${accountIds.join(",")})`
         )
         .order("created_at", { ascending: false })
         .range(offset, offset + limit - 1);
@@ -770,23 +770,23 @@ app.get(
         .from("transactions")
         .select("*", { count: "exact", head: true })
         .or(
-          `from_account_id.in.(${accountIds.join(",")}),to_account_id.in.(${accountIds.join(",")})`,
+          `from_account_id.in.(${accountIds.join(",")}),to_account_id.in.(${accountIds.join(",")})`
         );
 
       res.json({
-        transactions,
+        transactions: transactions || [],
         pagination: {
           page: parseInt(page),
           limit: parseInt(limit),
-          total: count,
-          pages: Math.ceil(count / limit),
+          total: count || 0,
+          pages: Math.ceil((count || 0) / limit),
         },
       });
     } catch (error) {
       console.error("Transactions fetch error:", error);
       res.status(500).json({ error: "Failed to fetch transactions" });
     }
-  },
+  }
 );
 
 // Download statement
