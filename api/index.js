@@ -11,6 +11,7 @@ const { v4: uuidv4 } = require("uuid");
 require("dotenv").config();
 const router = express.Router();
 const nodemailer = require("nodemailer");
+const webpush = require('web-push');
 
 // Add this if missing (adjust path if your folder structure is different)
 const {
@@ -75,6 +76,51 @@ const supabase = createClient(
   process.env.SUPABASE_URL,
   process.env.SUPABASE_SERVICE_KEY,
 );
+
+// Configure VAPID for web push - ADD THIS SECTION
+webpush.setVapidDetails(
+    process.env.VAPID_SUBJECT || 'mailto:support@paystora.com',
+    process.env.VAPID_PUBLIC_KEY,
+    process.env.VAPID_PRIVATE_KEY
+);
+
+
+// Function to send push notification - ADD THIS FUNCTION
+async function sendPushNotification(pushToken, title, body, data = {}) {
+    try {
+        // Parse the subscription object
+        let subscription;
+        if (typeof pushToken === 'string') {
+            subscription = JSON.parse(pushToken);
+        } else {
+            subscription = pushToken;
+        }
+        
+        const payload = JSON.stringify({
+            title: title,
+            body: body,
+            data: data,
+            icon: '/icons/icon-192x192.png',
+            badge: '/icons/badge-72x72.png',
+            vibrate: [200, 100, 200]
+        });
+        
+        await webpush.sendNotification(subscription, payload);
+        console.log(`Push notification sent to ${subscription.endpoint.substring(0, 50)}...`);
+        return true;
+    } catch (error) {
+        console.error('Error sending push:', error);
+        
+        // If token is expired or invalid, deactivate it
+        if (error.statusCode === 410 || error.message.includes('expired')) {
+            // You could deactivate the token here
+            console.log('Push token expired, should be deactivated');
+        }
+        
+        return false;
+    }
+}
+
 
 const transporter = nodemailer.createTransport({
   host: process.env.SMTP_HOST,
@@ -2641,37 +2687,87 @@ app.delete("/api/user/notifications/:id", authenticate, async (req, res) => {
     }
 });
 
-// Register device for push notifications
+// Register push token endpoint (fix the 500 error)
 app.post("/api/user/register-push-token", authenticate, async (req, res) => {
-  try {
-    const { token: push_token, platform, device_name } = req.body;
-
-    if (!push_token) {
-      return res.status(400).json({ error: "Push token required" });
+    try {
+        const { push_token, platform, device_name } = req.body;
+        
+        if (!push_token) {
+            return res.status(400).json({ error: "Push token is required" });
+        }
+        
+        console.log(`Registering push token for user ${req.user.id}`);
+        
+        // Upsert the push token
+        const { data, error } = await supabase
+            .from("user_push_tokens")
+            .upsert({
+                user_id: req.user.id,
+                push_token: push_token,
+                platform: platform || "web",
+                device_name: device_name || null,
+                is_active: true,
+                last_active: new Date().toISOString(),
+                updated_at: new Date().toISOString()
+            }, {
+                onConflict: "user_id, push_token"
+            })
+            .select();
+        
+        if (error) {
+            console.error("Supabase error:", error);
+            return res.status(500).json({ error: "Failed to register push token", details: error.message });
+        }
+        
+        res.json({ 
+            success: true, 
+            message: "Push token registered successfully" 
+        });
+        
+    } catch (error) {
+        console.error("Push token registration error:", error);
+        res.status(500).json({ error: "Failed to register push token" });
     }
+});
 
-    // Upsert the push token
-    const { error } = await supabase
-      .from("user_push_tokens")
-      .upsert({
-        user_id: req.user.id,
-        push_token: push_token,
-        platform: platform || "web",
-        device_name: device_name || null,
-        is_active: true,
-        last_active: new Date(),
-        updated_at: new Date()
-      }, {
-        onConflict: "user_id, push_token"
-      });
-
-    if (error) throw error;
-
-    res.json({ success: true });
-  } catch (error) {
-    console.error("Push token registration error:", error);
-    res.status(500).json({ error: "Failed to register push token" });
-  }
+// Test endpoint to send a push notification (for testing)
+app.post("/api/user/test-push", authenticate, async (req, res) => {
+    try {
+        // Get user's push tokens
+        const { data: tokens, error } = await supabase
+            .from("user_push_tokens")
+            .select("push_token")
+            .eq("user_id", req.user.id)
+            .eq("is_active", true);
+        
+        if (error) throw error;
+        
+        if (!tokens || tokens.length === 0) {
+            return res.json({ success: false, message: "No push tokens found" });
+        }
+        
+        // Send test notification to all tokens
+        const results = [];
+        for (const token of tokens) {
+            const sent = await sendPushNotification(
+                token.push_token,
+                "Test Notification",
+                "This is a test push notification from Paystora!",
+                { url: "/dashboard.html", type: "test" }
+            );
+            results.push({ sent });
+        }
+        
+        res.json({ 
+            success: true, 
+            message: `Test notification sent to ${results.length} device(s)`,
+            results 
+        });
+        
+    } catch (error) {
+        console.error("Test push error:", error);
+        res.status(500).json({ error: "Failed to send test notification" });
+    }
 });
 
 // Get push notification settings
