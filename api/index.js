@@ -967,8 +967,15 @@ app.post(
       }
 
       // Calculate fee (0.5% for internal transfers, min $0.50, max $10)
-      let feeAmount = amount * 0.005;
-      feeAmount = Math.min(Math.max(feeAmount, 500), 10000);
+      // ==================== UPDATED FEE CALCULATION ====================
+      // Fee rules:
+      // - Transfers below ₦10,000: FREE (₦0)
+      // - Transfers ₦10,000 and above: Flat fee of ₦50
+      let feeAmount = 0;
+      if (amount >= 10000) {
+        feeAmount = 50; // Flat fee of ₦50 for any transfer ₦10,000 or above
+      }
+
       const transferAmount = amount;
       const totalDeduction = transferAmount + feeAmount;
 
@@ -1088,6 +1095,11 @@ app.post(
         .eq("id", toAccount.id);
 
       if (updateReceiverError) throw updateReceiverError;
+
+      // Process fee income if applicable
+      if (feeAmount > 0) {
+        await processFeeIncome(transaction, feeAmount, fromAccount, toAccount);
+      }
 
       // ==================== LEDGER ENTRIES ====================
 
