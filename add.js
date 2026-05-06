@@ -1,43 +1,85 @@
-// ==================== PUSH NOTIFICATION ROUTES ====================
-
-
-
-// Test endpoint to send a push notification (for testing)
-app.post("/api/user/test-push", authenticate, async (req, res) => {
+async function processSingleSaveboxDeduction(saving) {
     try {
-        // Get user's push tokens
-        const { data: tokens, error } = await supabase
-            .from("user_push_tokens")
-            .select("push_token")
-            .eq("user_id", req.user.id)
-            .eq("is_active", true);
+        const dailyAmount = saving.daily_amount;
         
-        if (error) throw error;
-        
-        if (!tokens || tokens.length === 0) {
-            return res.json({ success: false, message: "No push tokens found" });
+        if (!dailyAmount || dailyAmount <= 0) {
+            console.error(`Invalid daily amount for savebox savings ${saving.id}`);
+            return;
         }
         
-        // Send test notification to all tokens
-        const results = [];
-        for (const token of tokens) {
-            const sent = await sendPushNotification(
-                token.push_token,
-                "Test Notification",
-                "This is a test push notification from Paystora!",
-                { url: "/dashboard.html", type: "test" }
-            );
-            results.push({ sent });
+        const { data: account, error: accError } = await supabase
+            .from('accounts')
+            .select('*')
+            .eq('user_id', saving.user_id)
+            .eq('account_type', 'checking')
+            .single();
+        
+        if (accError || !account) {
+            console.error(`No account for user ${saving.user_id}`);
+            await addToRetryQueue(saving.user_id, saving.id, 'savebox', dailyAmount);
+            return;
         }
         
-        res.json({ 
-            success: true, 
-            message: `Test notification sent to ${results.length} device(s)`,
-            results 
+        if (saving.users?.is_frozen) return;
+        
+        // Check if sufficient balance
+        if (account.available_balance < dailyAmount) {
+            console.log(`Insufficient balance for user ${saving.user_id} - adding to retry queue`);
+            await addToRetryQueue(saving.user_id, saving.id, 'savebox', dailyAmount);
+            await sendLowBalanceNotification(saving.users, 'SaveBox');
+            return;
+        }
+        
+        // Deduct the DAILY amount
+        const newBalance = account.balance - dailyAmount;
+        const newAvailable = account.available_balance - dailyAmount;
+        
+        await supabase
+            .from('accounts')
+            .update({ balance: newBalance, available_balance: newAvailable })
+            .eq('id', account.id);
+        
+        const newCurrentSaved = (saving.current_saved || 0) + dailyAmount;
+        const isCompleted = new Date() >= new Date(saving.target_date) || newCurrentSaved >= saving.amount;
+        
+        await supabase
+            .from('savebox_savings')
+            .update({
+                current_saved: newCurrentSaved,
+                last_deduction_date: new Date(),
+                status: isCompleted ? 'completed' : 'active'
+            })
+            .eq('id', saving.id);
+        
+        // Create transaction
+        await supabase.from('transactions').insert({
+            from_account_id: account.id,
+            from_user_id: saving.user_id,
+            amount: dailyAmount,
+            description: `SaveBox Savings - Target: ₦${saving.amount.toFixed(2)}`,
+            transaction_type: 'savings',
+            status: 'completed',
+            completed_at: new Date()
         });
         
+        // Create savings transaction
+        await supabase.from('savings_transactions').insert({
+            user_id: saving.user_id,
+            savings_type: 'savebox',
+            savings_id: saving.id,
+            amount: dailyAmount,
+            transaction_type: 'deposit',
+            description: `Daily SaveBox deposit`
+        });
+        
+        console.log(`Savebox deduction completed for user ${saving.user_id}: ₦${dailyAmount}`);
+        
+        if (isCompleted) {
+            await sendSaveboxCompletionNotification(saving);
+        }
+        
     } catch (error) {
-        console.error("Test push error:", error);
-        res.status(500).json({ error: "Failed to send test notification" });
+        console.error(`Savebox error for user ${saving.user_id}:`, error);
+        await addToRetryQueue(saving.user_id, saving.id, 'savebox', saving.daily_amount);
     }
-});
+}

@@ -11,7 +11,7 @@ const { v4: uuidv4 } = require("uuid");
 require("dotenv").config();
 const router = express.Router();
 const nodemailer = require("nodemailer");
-const webpush = require('web-push');
+const webpush = require("web-push");
 
 // Add this if missing (adjust path if your folder structure is different)
 const {
@@ -79,48 +79,48 @@ const supabase = createClient(
 
 // Configure VAPID for web push - ADD THIS SECTION
 webpush.setVapidDetails(
-    process.env.VAPID_SUBJECT || 'mailto:support@paystora.com',
-    process.env.VAPID_PUBLIC_KEY,
-    process.env.VAPID_PRIVATE_KEY
+  process.env.VAPID_SUBJECT || "mailto:support@paystora.com",
+  process.env.VAPID_PUBLIC_KEY,
+  process.env.VAPID_PRIVATE_KEY,
 );
-
 
 // Function to send push notification - ADD THIS FUNCTION
 async function sendPushNotification(pushToken, title, body, data = {}) {
-    try {
-        // Parse the subscription object
-        let subscription;
-        if (typeof pushToken === 'string') {
-            subscription = JSON.parse(pushToken);
-        } else {
-            subscription = pushToken;
-        }
-        
-        const payload = JSON.stringify({
-            title: title,
-            body: body,
-            data: data,
-            icon: '/icons/icon-192x192.png',
-            badge: '/icons/badge-72x72.png',
-            vibrate: [200, 100, 200]
-        });
-        
-        await webpush.sendNotification(subscription, payload);
-        console.log(`Push notification sent to ${subscription.endpoint.substring(0, 50)}...`);
-        return true;
-    } catch (error) {
-        console.error('Error sending push:', error);
-        
-        // If token is expired or invalid, deactivate it
-        if (error.statusCode === 410 || error.message.includes('expired')) {
-            // You could deactivate the token here
-            console.log('Push token expired, should be deactivated');
-        }
-        
-        return false;
+  try {
+    // Parse the subscription object
+    let subscription;
+    if (typeof pushToken === "string") {
+      subscription = JSON.parse(pushToken);
+    } else {
+      subscription = pushToken;
     }
-}
 
+    const payload = JSON.stringify({
+      title: title,
+      body: body,
+      data: data,
+      icon: "/icons/icon-192x192.png",
+      badge: "/icons/badge-72x72.png",
+      vibrate: [200, 100, 200],
+    });
+
+    await webpush.sendNotification(subscription, payload);
+    console.log(
+      `Push notification sent to ${subscription.endpoint.substring(0, 50)}...`,
+    );
+    return true;
+  } catch (error) {
+    console.error("Error sending push:", error);
+
+    // If token is expired or invalid, deactivate it
+    if (error.statusCode === 410 || error.message.includes("expired")) {
+      // You could deactivate the token here
+      console.log("Push token expired, should be deactivated");
+    }
+
+    return false;
+  }
+}
 
 const transporter = nodemailer.createTransport({
   host: process.env.SMTP_HOST,
@@ -2469,105 +2469,106 @@ app.post(
   },
 );
 
-
 // ==================== IMPROVED NOTIFICATION ROUTES ====================
-
 
 // Get notifications with pagination and unread count
 app.get("/api/user/notifications", authenticate, async (req, res) => {
-    try {
-        const { page = 1, limit = 20, unread_only = false } = req.query;
-        const offset = (parseInt(page) - 1) * parseInt(limit);
+  try {
+    const { page = 1, limit = 20, unread_only = false } = req.query;
+    const offset = (parseInt(page) - 1) * parseInt(limit);
 
-        // First, check if the table exists and has the right structure
-        const { error: tableCheckError } = await supabase
-            .from("notifications")
-            .select("id")
-            .limit(1);
-        
-        if (tableCheckError && tableCheckError.code === '42P01') {
-            // Table doesn't exist, create it
-            console.log("Notifications table doesn't exist, creating...");
-            await createNotificationsTable();
-        }
+    // First, check if the table exists and has the right structure
+    const { error: tableCheckError } = await supabase
+      .from("notifications")
+      .select("id")
+      .limit(1);
 
-        let query = supabase
-            .from("notifications")
-            .select("*", { count: "exact" })
-            .eq("user_id", req.user.id)
-            .order("created_at", { ascending: false });
-
-        if (unread_only === "true") {
-            query = query.eq("is_read", false);
-        }
-
-        const { data: notifications, error, count } = await query
-            .range(offset, offset + parseInt(limit) - 1);
-
-        if (error) {
-            console.error("Supabase notifications error:", error);
-            // Return empty array instead of error
-            return res.json({
-                notifications: [],
-                unread_count: 0,
-                pagination: {
-                    page: parseInt(page),
-                    limit: parseInt(limit),
-                    total: 0,
-                    pages: 0
-                }
-            });
-        }
-
-        // Get unread count for badge
-        const { count: unreadCount, error: unreadError } = await supabase
-            .from("notifications")
-            .select("*", { count: "exact", head: true })
-            .eq("user_id", req.user.id)
-            .eq("is_read", false);
-
-        if (unreadError) {
-            console.error("Unread count error:", unreadError);
-        }
-
-        res.json({
-            notifications: notifications || [],
-            unread_count: unreadCount || 0,
-            pagination: {
-                page: parseInt(page),
-                limit: parseInt(limit),
-                total: count || 0,
-                pages: Math.ceil((count || 0) / parseInt(limit))
-            }
-        });
-    } catch (error) {
-        console.error("Notifications fetch error:", error);
-        // Return empty array instead of error
-        res.json({
-            notifications: [],
-            unread_count: 0,
-            pagination: {
-                page: 1,
-                limit: 20,
-                total: 0,
-                pages: 0
-            }
-        });
+    if (tableCheckError && tableCheckError.code === "42P01") {
+      // Table doesn't exist, create it
+      console.log("Notifications table doesn't exist, creating...");
+      await createNotificationsTable();
     }
-}); 
+
+    let query = supabase
+      .from("notifications")
+      .select("*", { count: "exact" })
+      .eq("user_id", req.user.id)
+      .order("created_at", { ascending: false });
+
+    if (unread_only === "true") {
+      query = query.eq("is_read", false);
+    }
+
+    const {
+      data: notifications,
+      error,
+      count,
+    } = await query.range(offset, offset + parseInt(limit) - 1);
+
+    if (error) {
+      console.error("Supabase notifications error:", error);
+      // Return empty array instead of error
+      return res.json({
+        notifications: [],
+        unread_count: 0,
+        pagination: {
+          page: parseInt(page),
+          limit: parseInt(limit),
+          total: 0,
+          pages: 0,
+        },
+      });
+    }
+
+    // Get unread count for badge
+    const { count: unreadCount, error: unreadError } = await supabase
+      .from("notifications")
+      .select("*", { count: "exact", head: true })
+      .eq("user_id", req.user.id)
+      .eq("is_read", false);
+
+    if (unreadError) {
+      console.error("Unread count error:", unreadError);
+    }
+
+    res.json({
+      notifications: notifications || [],
+      unread_count: unreadCount || 0,
+      pagination: {
+        page: parseInt(page),
+        limit: parseInt(limit),
+        total: count || 0,
+        pages: Math.ceil((count || 0) / parseInt(limit)),
+      },
+    });
+  } catch (error) {
+    console.error("Notifications fetch error:", error);
+    // Return empty array instead of error
+    res.json({
+      notifications: [],
+      unread_count: 0,
+      pagination: {
+        page: 1,
+        limit: 20,
+        total: 0,
+        pages: 0,
+      },
+    });
+  }
+});
 
 // Helper function to create notifications table if it doesn't exist
 async function createNotificationsTable() {
-    try {
-        // Check if table exists
-        const { error: checkError } = await supabase
-            .from("notifications")
-            .select("id")
-            .limit(1);
-        
-        if (checkError && checkError.code === '42P01') {
-            // Create the notifications table using raw SQL
-            const createTableSQL = `
+  try {
+    // Check if table exists
+    const { error: checkError } = await supabase
+      .from("notifications")
+      .select("id")
+      .limit(1);
+
+    if (checkError && checkError.code === "42P01") {
+      // Create the notifications table using raw SQL
+      const createTableSQL = `
                 CREATE TABLE IF NOT EXISTS notifications (
                     id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
                     user_id UUID REFERENCES users(id) ON DELETE CASCADE,
@@ -2585,189 +2586,199 @@ async function createNotificationsTable() {
                 CREATE INDEX IF NOT EXISTS idx_notifications_is_read ON notifications(is_read);
                 CREATE INDEX IF NOT EXISTS idx_notifications_created_at ON notifications(created_at);
             `;
-            
-            // Execute through Supabase's RPC if you have the function, or log to run manually
-            console.log("Please run this SQL in your Supabase SQL editor:");
-            console.log(createTableSQL);
-            
-            // Alternative: Try to insert a test record to see if table exists
-            // If it fails, log the SQL for manual execution
-        }
-    } catch (error) {
-        console.error("Error checking/creating notifications table:", error);
+
+      // Execute through Supabase's RPC if you have the function, or log to run manually
+      console.log("Please run this SQL in your Supabase SQL editor:");
+      console.log(createTableSQL);
+
+      // Alternative: Try to insert a test record to see if table exists
+      // If it fails, log the SQL for manual execution
     }
+  } catch (error) {
+    console.error("Error checking/creating notifications table:", error);
+  }
 }
 
 // Mark single notification as read
 app.post("/api/user/notifications/:id/read", authenticate, async (req, res) => {
-    try {
-        const { id } = req.params;
-        
-        console.log(`Marking notification ${id} as read for user ${req.user.id}`);
+  try {
+    const { id } = req.params;
 
-        // Check if notification exists and belongs to user
-        const { data: existing, error: checkError } = await supabase
-            .from("notifications")
-            .select("id, is_read")
-            .eq("id", id)
-            .eq("user_id", req.user.id)
-            .single();
-        
-        if (checkError) {
-            console.error("Notification not found:", checkError);
-            return res.status(404).json({ error: "Notification not found" });
-        }
-        
-        if (existing.is_read) {
-            return res.json({ success: true, message: "Already read" });
-        }
-        
-        const { error } = await supabase
-            .from("notifications")
-            .update({ 
-                is_read: true,
-                read_at: new Date().toISOString()
-            })
-            .eq("id", id)
-            .eq("user_id", req.user.id);
+    console.log(`Marking notification ${id} as read for user ${req.user.id}`);
 
-        if (error) {
-            console.error("Update error:", error);
-            throw error;
-        }
+    // Check if notification exists and belongs to user
+    const { data: existing, error: checkError } = await supabase
+      .from("notifications")
+      .select("id, is_read")
+      .eq("id", id)
+      .eq("user_id", req.user.id)
+      .single();
 
-        res.json({ success: true });
-    } catch (error) {
-        console.error("Notification update error:", error);
-        res.status(500).json({ error: "Failed to update notification" });
+    if (checkError) {
+      console.error("Notification not found:", checkError);
+      return res.status(404).json({ error: "Notification not found" });
     }
+
+    if (existing.is_read) {
+      return res.json({ success: true, message: "Already read" });
+    }
+
+    const { error } = await supabase
+      .from("notifications")
+      .update({
+        is_read: true,
+        read_at: new Date().toISOString(),
+      })
+      .eq("id", id)
+      .eq("user_id", req.user.id);
+
+    if (error) {
+      console.error("Update error:", error);
+      throw error;
+    }
+
+    res.json({ success: true });
+  } catch (error) {
+    console.error("Notification update error:", error);
+    res.status(500).json({ error: "Failed to update notification" });
+  }
 });
 
 // Mark all notifications as read
-app.post("/api/user/notifications/mark-all-read", authenticate, async (req, res) => {
+app.post(
+  "/api/user/notifications/mark-all-read",
+  authenticate,
+  async (req, res) => {
     try {
-        const { error } = await supabase
-            .from("notifications")
-            .update({ 
-                is_read: true,
-                read_at: new Date().toISOString()
-            })
-            .eq("user_id", req.user.id)
-            .eq("is_read", false);
+      const { error } = await supabase
+        .from("notifications")
+        .update({
+          is_read: true,
+          read_at: new Date().toISOString(),
+        })
+        .eq("user_id", req.user.id)
+        .eq("is_read", false);
 
-        if (error) {
-            console.error("Mark all update error:", error);
-            throw error;
-        }
+      if (error) {
+        console.error("Mark all update error:", error);
+        throw error;
+      }
 
-        res.json({ success: true });
+      res.json({ success: true });
     } catch (error) {
-        console.error("Mark all read error:", error);
-        res.status(500).json({ error: "Failed to mark all as read" });
+      console.error("Mark all read error:", error);
+      res.status(500).json({ error: "Failed to mark all as read" });
     }
-});
+  },
+);
 
 // Delete notification
 app.delete("/api/user/notifications/:id", authenticate, async (req, res) => {
-    try {
-        const { id } = req.params;
+  try {
+    const { id } = req.params;
 
-        const { error } = await supabase
-            .from("notifications")
-            .delete()
-            .eq("id", id)
-            .eq("user_id", req.user.id);
+    const { error } = await supabase
+      .from("notifications")
+      .delete()
+      .eq("id", id)
+      .eq("user_id", req.user.id);
 
-        if (error) throw error;
+    if (error) throw error;
 
-        res.json({ success: true });
-    } catch (error) {
-        console.error("Notification delete error:", error);
-        res.status(500).json({ error: "Failed to delete notification" });
-    }
+    res.json({ success: true });
+  } catch (error) {
+    console.error("Notification delete error:", error);
+    res.status(500).json({ error: "Failed to delete notification" });
+  }
 });
 
 // Register push token endpoint (fix the 500 error)
 app.post("/api/user/register-push-token", authenticate, async (req, res) => {
-    try {
-        const { push_token, platform, device_name } = req.body;
-        
-        if (!push_token) {
-            return res.status(400).json({ error: "Push token is required" });
-        }
-        
-        console.log(`Registering push token for user ${req.user.id}`);
-        
-        // Upsert the push token
-        const { data, error } = await supabase
-            .from("user_push_tokens")
-            .upsert({
-                user_id: req.user.id,
-                push_token: push_token,
-                platform: platform || "web",
-                device_name: device_name || null,
-                is_active: true,
-                last_active: new Date().toISOString(),
-                updated_at: new Date().toISOString()
-            }, {
-                onConflict: "user_id, push_token"
-            })
-            .select();
-        
-        if (error) {
-            console.error("Supabase error:", error);
-            return res.status(500).json({ error: "Failed to register push token", details: error.message });
-        }
-        
-        res.json({ 
-            success: true, 
-            message: "Push token registered successfully" 
-        });
-        
-    } catch (error) {
-        console.error("Push token registration error:", error);
-        res.status(500).json({ error: "Failed to register push token" });
+  try {
+    const { push_token, platform, device_name } = req.body;
+
+    if (!push_token) {
+      return res.status(400).json({ error: "Push token is required" });
     }
+
+    console.log(`Registering push token for user ${req.user.id}`);
+
+    // Upsert the push token
+    const { data, error } = await supabase
+      .from("user_push_tokens")
+      .upsert(
+        {
+          user_id: req.user.id,
+          push_token: push_token,
+          platform: platform || "web",
+          device_name: device_name || null,
+          is_active: true,
+          last_active: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        },
+        {
+          onConflict: "user_id, push_token",
+        },
+      )
+      .select();
+
+    if (error) {
+      console.error("Supabase error:", error);
+      return res
+        .status(500)
+        .json({
+          error: "Failed to register push token",
+          details: error.message,
+        });
+    }
+
+    res.json({
+      success: true,
+      message: "Push token registered successfully",
+    });
+  } catch (error) {
+    console.error("Push token registration error:", error);
+    res.status(500).json({ error: "Failed to register push token" });
+  }
 });
 
 // Test endpoint to send a push notification (for testing)
 app.post("/api/user/test-push", authenticate, async (req, res) => {
-    try {
-        // Get user's push tokens
-        const { data: tokens, error } = await supabase
-            .from("user_push_tokens")
-            .select("push_token")
-            .eq("user_id", req.user.id)
-            .eq("is_active", true);
-        
-        if (error) throw error;
-        
-        if (!tokens || tokens.length === 0) {
-            return res.json({ success: false, message: "No push tokens found" });
-        }
-        
-        // Send test notification to all tokens
-        const results = [];
-        for (const token of tokens) {
-            const sent = await sendPushNotification(
-                token.push_token,
-                "Test Notification",
-                "This is a test push notification from Paystora!",
-                { url: "/dashboard.html", type: "test" }
-            );
-            results.push({ sent });
-        }
-        
-        res.json({ 
-            success: true, 
-            message: `Test notification sent to ${results.length} device(s)`,
-            results 
-        });
-        
-    } catch (error) {
-        console.error("Test push error:", error);
-        res.status(500).json({ error: "Failed to send test notification" });
+  try {
+    // Get user's push tokens
+    const { data: tokens, error } = await supabase
+      .from("user_push_tokens")
+      .select("push_token")
+      .eq("user_id", req.user.id)
+      .eq("is_active", true);
+
+    if (error) throw error;
+
+    if (!tokens || tokens.length === 0) {
+      return res.json({ success: false, message: "No push tokens found" });
     }
+
+    // Send test notification to all tokens
+    const results = [];
+    for (const token of tokens) {
+      const sent = await sendPushNotification(
+        token.push_token,
+        "Test Notification",
+        "This is a test push notification from Paystora!",
+        { url: "/dashboard.html", type: "test" },
+      );
+      results.push({ sent });
+    }
+
+    res.json({
+      success: true,
+      message: `Test notification sent to ${results.length} device(s)`,
+      results,
+    });
+  } catch (error) {
+    console.error("Test push error:", error);
+    res.status(500).json({ error: "Failed to send test notification" });
+  }
 });
 
 // Get push notification settings
@@ -2787,7 +2798,7 @@ app.get("/api/user/push-settings", authenticate, async (req, res) => {
       savings: true,
       promotions: false,
       security: true,
-      bills: true
+      bills: true,
     };
 
     res.json(data || defaultSettings);
@@ -2802,17 +2813,15 @@ app.post("/api/user/push-settings", authenticate, async (req, res) => {
   try {
     const { transfers, savings, promotions, security, bills } = req.body;
 
-    const { error } = await supabase
-      .from("user_push_settings")
-      .upsert({
-        user_id: req.user.id,
-        transfers: transfers !== undefined ? transfers : true,
-        savings: savings !== undefined ? savings : true,
-        promotions: promotions !== undefined ? promotions : false,
-        security: security !== undefined ? security : true,
-        bills: bills !== undefined ? bills : true,
-        updated_at: new Date()
-      });
+    const { error } = await supabase.from("user_push_settings").upsert({
+      user_id: req.user.id,
+      transfers: transfers !== undefined ? transfers : true,
+      savings: savings !== undefined ? savings : true,
+      promotions: promotions !== undefined ? promotions : false,
+      security: security !== undefined ? security : true,
+      bills: bills !== undefined ? bills : true,
+      updated_at: new Date(),
+    });
 
     if (error) throw error;
 
@@ -2822,7 +2831,6 @@ app.post("/api/user/push-settings", authenticate, async (req, res) => {
     res.status(500).json({ error: "Failed to update push settings" });
   }
 });
-
 
 // Request OTP for withdrawal
 app.post(
@@ -3360,7 +3368,7 @@ app.post(
           };
           break;
 
-        case "fixed":
+        /*case "fixed":
           // Deduct initial amount
           await supabase
             .from("accounts")
@@ -3396,9 +3404,51 @@ app.post(
 
           if (fError) throw fError;
           savingsRecord = fixed;
+          break;*/
+
+        case "fixed":
+          // Deduct initial amount
+          await supabase
+            .from("accounts")
+            .update({
+              balance: account.balance - amount,
+              available_balance: account.available_balance - amount,
+            })
+            .eq("id", account.id);
+
+          const maturityDate = new Date();
+          maturityDate.setDate(maturityDate.getDate() + 30);
+          const freeWithdrawalDate = new Date();
+          freeWithdrawalDate.setDate(freeWithdrawalDate.getDate() + 32);
+
+          // FIXED: Store the user's daily amount as the amount they input
+          // No division by 30 - they save the same amount every day
+          const fixedDailyAmount = amount; // User's daily savings amount
+          const totalToSave = amount * 30; // Amount * 30 days
+
+          const { data: fixed, error: fError } = await supabase
+            .from("fixed_savings")
+            .insert({
+              user_id: req.user.id,
+              amount: totalToSave, // Total target amount
+              current_saved: amount, // Already saved the first day's amount
+              daily_amount: fixedDailyAmount, // Daily amount = user's input amount
+              last_deduction_date: new Date(),
+              interest_rate: 5.0,
+              start_date: new Date(),
+              maturity_date: maturityDate,
+              next_free_withdrawal_date: freeWithdrawalDate,
+              auto_save: auto_save,
+              status: "active",
+            })
+            .select()
+            .single();
+
+          if (fError) throw fError;
+          savingsRecord = fixed;
           break;
 
-        case "savebox":
+        /*case "savebox":
           // Deduct initial amount
           await supabase
             .from("accounts")
@@ -3419,6 +3469,43 @@ app.post(
               amount: amount,
               current_saved: amount,
               daily_amount: saveboxDailyAmount,
+              last_deduction_date: new Date(),
+              target_date: targetDate,
+              early_withdrawal_fee_percent: 4.0,
+              auto_save: auto_save,
+              status: "active",
+            })
+            .select()
+            .single();
+
+          if (sError) throw sError;
+          savingsRecord = savebox;
+          break;*/
+
+        case "savebox":
+          // Deduct initial amount
+          await supabase
+            .from("accounts")
+            .update({
+              balance: account.balance - amount,
+              available_balance: account.available_balance - amount,
+            })
+            .eq("id", account.id);
+
+          const targetDate = new Date();
+          targetDate.setMonth(targetDate.getMonth() + 3);
+
+          // FIXED: Store the user's daily amount as the amount they input
+          const saveboxDailyAmount = amount; // User's daily savings amount
+          const totalSaveboxTarget = amount * 90; // Amount * 90 days (3 months)
+
+          const { data: savebox, error: sError } = await supabase
+            .from("savebox_savings")
+            .insert({
+              user_id: req.user.id,
+              amount: totalSaveboxTarget, // Total target amount
+              current_saved: amount, // Already saved the first day's amount
+              daily_amount: saveboxDailyAmount, // Daily amount = user's input amount
               last_deduction_date: new Date(),
               target_date: targetDate,
               early_withdrawal_fee_percent: 4.0,
