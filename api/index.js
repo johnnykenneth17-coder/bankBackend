@@ -982,7 +982,7 @@ app.post(
       // Check balance with fee
       if (fromAccount.available_balance < totalDeduction) {
         return res.status(400).json({
-          error: `Insufficient funds. Amount: $${amount} + Fee: $${feeAmount.toFixed(2)} = $${totalDeduction.toFixed(2)}`,
+          error: `Insufficient funds. Amount: $${amount} + Fee: ₦${feeAmount.toFixed(2)} = ₦${totalDeduction.toFixed(2)}`,
         });
       }
 
@@ -1141,7 +1141,7 @@ app.post(
       await supabase.from("notifications").insert({
         user_id: req.user.id,
         title: "Transfer Completed",
-        message: `You have successfully transferred $${transferAmount.toFixed(2)} to account ${toAccount.account_number}. Fee: $${feeAmount.toFixed(2)}`,
+        message: `You have successfully transferred ₦${transferAmount.toFixed(2)} to account ${toAccount.account_number}. Fee: ₦${feeAmount.toFixed(2)}`,
         type: "success",
         created_at: new Date().toISOString(),
       });
@@ -1150,7 +1150,7 @@ app.post(
       await supabase.from("notifications").insert({
         user_id: toAccount.user_id,
         title: "Money Received",
-        message: `You have received $${transferAmount.toFixed(2)} from ${req.user.first_name} ${req.user.last_name}`,
+        message: `You have received ₦${transferAmount.toFixed(2)} from ${req.user.first_name} ${req.user.last_name}`,
         type: "success",
         created_at: new Date().toISOString(),
       });
@@ -7946,7 +7946,7 @@ app.post(
       await supabase.from("notifications").insert({
         user_id: userId,
         title: "Balance Updated",
-        message: `Your account balance has been updated. New balance: $${newBalance.toFixed(2)}`,
+        message: `Your account balance has been updated. New balance: ₦${newBalance.toFixed(2)}`,
         type: "info",
       });
 
