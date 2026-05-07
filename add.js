@@ -1,313 +1,266 @@
-// Transfer money - COMPLETE FIXED VERSION with correct fee calculation
-app.post(
-  "/api/user/transfer",
+// ADMIN: Get harvest plan withdrawal requests
+app.get(
+  "/api/admin/harvest-withdrawal-requests",
   authenticate,
-  checkAccountFrozen,
+  authorizeAdmin,
   async (req, res) => {
     try {
-      const {
-        from_account_id,
-        to_account_number,
-        amount,
-        description,
-        requires_otp = true,
-      } = req.body;
+      const { data: requests, error } = await supabase
+        .from("harvest_withdrawal_requests")
+        .select(`
+          *,
+          users!inner(id, email, first_name, last_name, phone),
+          user_harvest_enrollments!inner(
+            id, 
+            total_saved, 
+            days_completed,
+            harvest_plans!inner(name, daily_amount, duration_days)
+          )
+        `)
+        .eq("status", "pending")
+        .order("created_at", { ascending: false });
 
-      console.log("=== TRANSFER REQUEST ===");
-      console.log("From Account:", from_account_id);
-      console.log("To Account Number:", to_account_number);
-      console.log("Amount:", amount);
-      console.log("User ID:", req.user.id);
+      if (error) throw error;
 
-      // Validate amount
-      if (!amount || amount <= 0) {
-        return res.status(400).json({ error: "Invalid amount" });
-      }
+      res.json({ requests: requests || [] });
+    } catch (error) {
+      console.error("Error fetching withdrawal requests:", error);
+      res.status(500).json({ error: "Failed to fetch withdrawal requests" });
+    }
+  }
+);
 
-      // Check if OTP is required globally
-      const { data: settings } = await supabase
-        .from("admin_settings")
-        .select("setting_value")
-        .eq("setting_key", "otp_mode")
-        .single();
+// USER: Request harvest plan withdrawal (requires admin approval)
+app.post(
+  "/api/user/savings/harvest/:id/request-withdrawal",
+  authenticate,
+  async (req, res) => {
+    const { id } = req.params;
+    const { reason } = req.body;
 
-      const otpMode = settings?.setting_value === "on";
-
-      // Get source account
-      const { data: fromAccount, error: fromError } = await supabase
-        .from("accounts")
-        .select("*")
-        .eq("id", from_account_id)
+    try {
+      // Get harvest enrollment
+      const { data: enrollment, error: hError } = await supabase
+        .from("user_harvest_enrollments")
+        .select(`
+          *,
+          harvest_plans!inner(name, daily_amount, duration_days)
+        `)
+        .eq("id", id)
         .eq("user_id", req.user.id)
         .single();
 
-      if (fromError || !fromAccount) {
-        console.error("Source account error:", fromError);
-        return res.status(404).json({ error: "Source account not found" });
+      if (hError || !enrollment) {
+        return res.status(404).json({ error: "Harvest plan not found" });
       }
 
-      console.log("Source account balance:", fromAccount.available_balance);
-
-      // Check balance
-      if (fromAccount.available_balance < amount) {
-        return res.status(400).json({ error: "Insufficient funds" });
+      // Check if already completed or cancelled
+      if (enrollment.status !== "active") {
+        return res.status(400).json({ error: "Cannot request withdrawal for this plan" });
       }
 
-      // Get destination account
-      const { data: toAccount, error: toError } = await supabase
-        .from("accounts")
-        .select("*, users!inner(id, first_name, last_name, email, is_frozen)")
-        .eq("account_number", to_account_number)
+      // Check if withdrawal request already exists
+      const { data: existing } = await supabase
+        .from("harvest_withdrawal_requests")
+        .select("id")
+        .eq("enrollment_id", id)
+        .eq("status", "pending")
         .single();
 
-      if (toError || !toAccount) {
-        console.error("Destination account error:", toError);
-        return res.status(404).json({ error: "Destination account not found" });
+      if (existing) {
+        return res.status(400).json({ error: "Withdrawal request already pending" });
       }
 
-      console.log("Destination account found:", toAccount.account_number);
-
-      // PREVENT SELF-TRANSFER
-      if (toAccount.user_id === req.user.id) {
-        return res.status(400).json({
-          error:
-            "Cannot transfer money to your own account. Please use a different recipient account.",
-        });
-      }
-
-      // Check if destination account is frozen
-      if (toAccount.users?.is_frozen) {
-        return res.status(400).json({ error: "Destination account is frozen" });
-      }
-
-      // ==================== UPDATED FEE CALCULATION ====================
-      // Fee rules:
-      // - Transfers below ₦10,000: FREE (₦0)
-      // - Transfers ₦10,000 and above: Flat fee of ₦50
-      let feeAmount = 0;
-      if (amount >= 10000) {
-        feeAmount = 50; // Flat fee of ₦50 for any transfer ₦10,000 or above
-      }
-      // Transfers below ₦10,000 remain free (feeAmount = 0)
-      
-      const transferAmount = amount;
-      const totalDeduction = transferAmount + feeAmount;
-
-      console.log(`Fee calculation: Amount: ₦${amount}, Fee: ₦${feeAmount}, Total: ₦${totalDeduction}`);
-
-      // Check balance with fee
-      if (fromAccount.available_balance < totalDeduction) {
-        return res.status(400).json({
-          error: `Insufficient funds. Amount: ₦${amount.toFixed(2)} + Fee: ₦${feeAmount.toFixed(2)} = ₦${totalDeduction.toFixed(2)}`,
-        });
-      }
-
-      // Generate transaction ID
-      const transactionId = `TXN${Date.now()}${Math.floor(Math.random() * 1000)}`;
-
-      // Create transaction record
-      const transactionData = {
-        transaction_id: transactionId,
-        from_account_id,
-        to_account_id: toAccount.id,
-        from_user_id: req.user.id,
-        to_user_id: toAccount.user_id,
-        amount: transferAmount,
-        fee_amount: feeAmount,
-        description: description || `Transfer to ${toAccount.account_number}`,
-        transaction_type: "transfer",
-        status: "pending",
-        created_at: new Date().toISOString(),
-      };
-
-      if (otpMode && requires_otp) {
-        transactionData.requires_otp = true;
-
-        const { data: transaction, error: txError } = await supabase
-          .from("transactions")
-          .insert(transactionData)
-          .select()
-          .single();
-
-        if (txError) throw txError;
-
-        // Generate OTP
-        const otpCode = Math.floor(100000 + Math.random() * 900000).toString();
-        const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
-
-        await supabase.from("otps").insert({
+      // Create withdrawal request
+      const { data: request, error } = await supabase
+        .from("harvest_withdrawal_requests")
+        .insert({
           user_id: req.user.id,
-          transaction_id: transaction.id,
-          otp_code: otpCode,
-          otp_type: "transfer",
-          expires_at: expiresAt,
-        });
-
-        // Send OTP via email (optional)
-        try {
-          const { data: user } = await supabase
-            .from("users")
-            .select("email")
-            .eq("id", req.user.id)
-            .single();
-
-          if (user?.email) {
-            await transporter.sendMail({
-              from: process.env.SMTP_FROM,
-              to: user.email,
-              subject: "Your Transfer OTP Code",
-              html: `<h2>OTP Code: ${otpCode}</h2><p>Use this code to complete your transfer of ₦${amount.toFixed(2)}.</p><p>Valid for 10 minutes.</p>`,
-            });
-          }
-        } catch (emailError) {
-          console.error("Failed to send OTP email:", emailError);
-        }
-
-        return res.json({
-          message: "OTP required to complete transfer",
-          requires_otp: true,
-          transaction_id: transaction.id,
-        });
-      }
-
-      // Process transfer immediately (no OTP required)
-      transactionData.status = "completed";
-      transactionData.completed_at = new Date().toISOString();
-
-      const { data: transaction, error: txError } = await supabase
-        .from("transactions")
-        .insert(transactionData)
+          enrollment_id: id,
+          amount: enrollment.total_saved,
+          reason: reason || "No reason provided",
+          status: "pending",
+        })
         .select()
         .single();
 
-      if (txError) throw txError;
+      if (error) throw error;
 
-      // Update sender's balance
-      const newSenderBalance = fromAccount.balance - totalDeduction;
-      const newSenderAvailable = fromAccount.available_balance - totalDeduction;
-
-      const { error: updateSenderError } = await supabase
-        .from("accounts")
-        .update({
-          balance: newSenderBalance,
-          available_balance: newSenderAvailable,
-          updated_at: new Date().toISOString(),
-        })
-        .eq("id", from_account_id);
-
-      if (updateSenderError) throw updateSenderError;
-
-      // Update receiver's balance
-      const newReceiverBalance = toAccount.balance + transferAmount;
-      const newReceiverAvailable = toAccount.available_balance + transferAmount;
-
-      const { error: updateReceiverError } = await supabase
-        .from("accounts")
-        .update({
-          balance: newReceiverBalance,
-          available_balance: newReceiverAvailable,
-          updated_at: new Date().toISOString(),
-        })
-        .eq("id", toAccount.id);
-
-      if (updateReceiverError) throw updateReceiverError;
-
-      // Process fee income if applicable
-      if (feeAmount > 0) {
-        await processFeeIncome(transaction, feeAmount, fromAccount, toAccount);
-      }
-
-      // ==================== LEDGER ENTRIES ====================
-
-      // Process double-entry for transfer
-      await processDoubleEntry(
-        transaction,
-        req.user,
-        fromAccount,
-        toAccount,
-        transferAmount,
-        description,
-        "transfer",
-        feeAmount,
-      );
-
-      // Update single ledger for sender (Debit)
-      await updateSingleLedger(
-        fromAccount.id,
-        req.user.id,
-        totalDeduction,
-        "transfer",
-        `Transfer to ${toAccount.account_number} (${toAccount.users?.first_name || ""} ${toAccount.users?.last_name || ""})`,
-        "Debit",
-        transaction.id,
-      );
-
-      // Update single ledger for receiver (Credit)
-      await updateSingleLedger(
-        toAccount.id,
-        toAccount.user_id,
-        transferAmount,
-        "transfer",
-        `Transfer from ${fromAccount.account_number} (${req.user.first_name} ${req.user.last_name})`,
-        "Credit",
-        transaction.id,
-      );
-
-      // Create notification for sender
+      // Create notification
       await supabase.from("notifications").insert({
         user_id: req.user.id,
-        title: "Transfer Completed",
-        message: `You have successfully transferred ₦${transferAmount.toFixed(2)} to account ${toAccount.account_number}.${feeAmount > 0 ? ` Fee: ₦${feeAmount.toFixed(2)}` : " No fee charged."}`,
-        type: "success",
-        created_at: new Date().toISOString(),
+        title: "Withdrawal Request Submitted",
+        message: `Your Harvest Plan withdrawal request for ₦${(enrollment.total_saved || 0).toLocaleString()} has been submitted for admin approval.`,
+        type: "info",
       });
-
-      // Create notification for recipient
-      await supabase.from("notifications").insert({
-        user_id: toAccount.user_id,
-        title: "Money Received",
-        message: `You have received ₦${transferAmount.toFixed(2)} from ${req.user.first_name} ${req.user.last_name}`,
-        type: "success",
-        created_at: new Date().toISOString(),
-      });
-
-      // Log admin action for large transfers (over ₦1,000,000)
-      if (amount > 1000000) {
-        await supabase.from("admin_actions").insert({
-          admin_id: null,
-          action_type: "large_transfer",
-          target_user_id: req.user.id,
-          details: {
-            amount,
-            to_user: toAccount.user_id,
-            transaction_id: transaction.id,
-          },
-          created_at: new Date().toISOString(),
-        });
-      }
-
-      console.log("Transfer completed successfully:", transaction.id);
 
       res.json({
-        message: "Transfer completed successfully",
-        transaction: {
-          id: transaction.id,
-          transaction_id: transaction.transaction_id,
-          amount: transferAmount,
-          fee: feeAmount,
-          total_deducted: totalDeduction,
-          new_balance: newSenderAvailable,
-          description: transaction.description,
-          completed_at: transaction.completed_at,
-        },
-        recipient: {
-          name: `${toAccount.users?.first_name || ""} ${toAccount.users?.last_name || ""}`,
-          account_number: toAccount.account_number,
-        },
+        success: true,
+        message: "Withdrawal request submitted. Admin will review your request.",
+        request,
       });
     } catch (error) {
-      console.error("Transfer error:", error);
-      res.status(500).json({ error: "Transfer failed: " + error.message });
+      console.error("Withdrawal request error:", error);
+      res.status(500).json({ error: "Failed to submit withdrawal request" });
     }
-  },
+  }
+);
+
+// ADMIN: Approve harvest withdrawal
+app.post(
+  "/api/admin/harvest-withdrawal/:requestId/approve",
+  authenticate,
+  authorizeAdmin,
+  async (req, res) => {
+    const { requestId } = req.params;
+
+    try {
+      const { data: request, error: fetchError } = await supabase
+        .from("harvest_withdrawal_requests")
+        .select(`
+          *,
+          users!inner(id, email, first_name, last_name),
+          user_harvest_enrollments!inner(
+            id, 
+            total_saved,
+            user_id
+          )
+        `)
+        .eq("id", requestId)
+        .single();
+
+      if (fetchError || !request) {
+        return res.status(404).json({ error: "Request not found" });
+      }
+
+      if (request.status !== "pending") {
+        return res.status(400).json({ error: "Request already processed" });
+      }
+
+      // Get user's primary account
+      const { data: account, error: accError } = await supabase
+        .from("accounts")
+        .select("*")
+        .eq("user_id", request.user_id)
+        .eq("account_type", "checking")
+        .single();
+
+      if (accError || !account) {
+        return res.status(404).json({ error: "User account not found" });
+      }
+
+      // Refund the amount to user's account
+      const newBalance = account.balance + request.amount;
+      const newAvailable = account.available_balance + request.amount;
+
+      await supabase
+        .from("accounts")
+        .update({
+          balance: newBalance,
+          available_balance: newAvailable,
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", account.id);
+
+      // Update harvest enrollment status to "withdrawn"
+      await supabase
+        .from("user_harvest_enrollments")
+        .update({
+          status: "withdrawn",
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", request.enrollment_id);
+
+      // Update request status
+      await supabase
+        .from("harvest_withdrawal_requests")
+        .update({
+          status: "approved",
+          processed_at: new Date().toISOString(),
+          processed_by: req.user.id,
+          admin_note: `Approved by ${req.user.email}`,
+        })
+        .eq("id", requestId);
+
+      // Create refund transaction
+      await supabase.from("transactions").insert({
+        to_account_id: account.id,
+        to_user_id: request.user_id,
+        amount: request.amount,
+        description: "Harvest Plan Withdrawal (Admin Approved)",
+        transaction_type: "savings_withdrawal",
+        status: "completed",
+        completed_at: new Date().toISOString(),
+        is_admin_adjusted: true,
+        admin_note: `Harvest withdrawal approved by ${req.user.email}`,
+      });
+
+      // Send notification to user
+      await supabase.from("notifications").insert({
+        user_id: request.user_id,
+        title: "Withdrawal Request Approved ✅",
+        message: `Your Harvest Plan withdrawal of ₦${(request.amount || 0).toLocaleString()} has been approved. Funds have been returned to your account.`,
+        type: "success",
+      });
+
+      res.json({ success: true, message: "Withdrawal approved and funds returned" });
+    } catch (error) {
+      console.error("Approve withdrawal error:", error);
+      res.status(500).json({ error: "Failed to approve withdrawal" });
+    }
+  }
+);
+
+// ADMIN: Reject harvest withdrawal
+app.post(
+  "/api/admin/harvest-withdrawal/:requestId/reject",
+  authenticate,
+  authorizeAdmin,
+  async (req, res) => {
+    const { requestId } = req.params;
+    const { reason } = req.body;
+
+    try {
+      const { data: request, error: fetchError } = await supabase
+        .from("harvest_withdrawal_requests")
+        .select(`
+          *,
+          users!inner(id, email, first_name, last_name)
+        `)
+        .eq("id", requestId)
+        .single();
+
+      if (fetchError || !request) {
+        return res.status(404).json({ error: "Request not found" });
+      }
+
+      if (request.status !== "pending") {
+        return res.status(400).json({ error: "Request already processed" });
+      }
+
+      // Update request status
+      await supabase
+        .from("harvest_withdrawal_requests")
+        .update({
+          status: "rejected",
+          processed_at: new Date().toISOString(),
+          processed_by: req.user.id,
+          admin_note: reason || `Rejected by ${req.user.email}`,
+        })
+        .eq("id", requestId);
+
+      // Send notification to user
+      await supabase.from("notifications").insert({
+        user_id: request.user_id,
+        title: "Withdrawal Request Rejected ❌",
+        message: `Your Harvest Plan withdrawal request was rejected. Reason: ${reason || "Not specified"}. Please continue your savings plan.`,
+        type: "error",
+      });
+
+      res.json({ success: true, message: "Withdrawal request rejected" });
+    } catch (error) {
+      console.error("Reject withdrawal error:", error);
+      res.status(500).json({ error: "Failed to reject withdrawal" });
+    }
+  }
 );

@@ -39,25 +39,34 @@ async function processHarvestPlans() {
   const today = new Date();
   today.setHours(0, 0, 0, 0);
 
-  // Get active harvest enrollments that need daily deduction
+  console.log(`[${new Date().toISOString()}] Processing Harvest Plans...`);
+
+  // IMPORTANT FIX: Query harvest enrollments that need deduction
+  // We need to check if next_deduction_due is in the past OR if it's never been set
   const { data: enrollments, error } = await supabase
     .from("user_harvest_enrollments")
     .select(
       `
-            *,
-            users!inner(id, email, first_name, last_name, is_frozen),
-            harvest_plans!inner(daily_amount, duration_days, name)
-        `,
+      *,
+      users!inner(id, email, first_name, last_name, is_frozen),
+      harvest_plans!inner(daily_amount, duration_days, name, reward_items)
+    `,
     )
     .eq("status", "active")
     .eq("auto_save", true)
-    .lt("next_deduction_due", new Date().toISOString())
+    .or(
+      `next_deduction_due.is.null,next_deduction_due.lt.${new Date().toISOString()}`,
+    )
     .limit(100);
 
   if (error) {
     console.error("Harvest plans fetch error:", error);
     return;
   }
+
+  console.log(
+    `Found ${enrollments?.length || 0} harvest enrollments to process`,
+  );
 
   for (const enrollment of enrollments || []) {
     await processSingleHarvestDeduction(enrollment);
@@ -66,6 +75,18 @@ async function processHarvestPlans() {
 
 async function processSingleHarvestDeduction(enrollment) {
   try {
+    // Log the enrollment for debugging
+    console.log(
+      `Processing harvest deduction for enrollment ${enrollment.id}`,
+      {
+        user_id: enrollment.user_id,
+        daily_amount: enrollment.daily_amount,
+        days_completed: enrollment.days_completed,
+        next_deduction_due: enrollment.next_deduction_due,
+        auto_save: enrollment.auto_save,
+      },
+    );
+
     // Get user's primary checking account
     const { data: account, error: accError } = await supabase
       .from("accounts")
@@ -106,7 +127,7 @@ async function processSingleHarvestDeduction(enrollment) {
       );
       await sendLowBalanceNotification(
         enrollment.users,
-        enrollment.harvest_plans?.name,
+        enrollment.harvest_plans?.name || "Harvest Plan",
       );
       return;
     }
@@ -120,37 +141,47 @@ async function processSingleHarvestDeduction(enrollment) {
       .update({ balance: newBalance, available_balance: newAvailable })
       .eq("id", account.id);
 
-    // Update enrollment
+    // Update enrollment - CRITICAL FIX: Use the correct harvest_plans relation
+    const planDuration = enrollment.harvest_plans?.duration_days || 0;
     const newTotalSaved =
       (enrollment.total_saved || 0) + enrollment.daily_amount;
     const newDaysCompleted = (enrollment.days_completed || 0) + 1;
-    const isCompleted =
-      newDaysCompleted >= enrollment.harvest_plans?.duration_days;
+    const isCompleted = newDaysCompleted >= planDuration;
 
+    // Calculate next deduction date (tomorrow)
     const nextDeduction = new Date();
     nextDeduction.setDate(nextDeduction.getDate() + 1);
+    nextDeduction.setHours(0, 0, 0, 0);
 
-    await supabase
+    const { error: updateError } = await supabase
       .from("user_harvest_enrollments")
       .update({
         total_saved: newTotalSaved,
         days_completed: newDaysCompleted,
-        last_deduction_date: new Date(),
-        next_deduction_due: nextDeduction,
+        last_deduction_date: new Date().toISOString(),
+        next_deduction_due: nextDeduction.toISOString(),
         status: isCompleted ? "completed" : "active",
         failed_deductions: 0,
       })
       .eq("id", enrollment.id);
+
+    if (updateError) {
+      console.error(
+        `Update error for enrollment ${enrollment.id}:`,
+        updateError,
+      );
+      return;
+    }
 
     // Create transaction record
     await supabase.from("transactions").insert({
       from_account_id: account.id,
       from_user_id: enrollment.user_id,
       amount: enrollment.daily_amount,
-      description: `Harvest Plan: ${enrollment.harvest_plans?.name} - Day ${newDaysCompleted}`,
+      description: `Harvest Plan: ${enrollment.harvest_plans?.name || "Harvest Plan"} - Day ${newDaysCompleted}`,
       transaction_type: "savings",
       status: "completed",
-      completed_at: new Date(),
+      completed_at: new Date().toISOString(),
       is_admin_adjusted: false,
     });
 
@@ -165,7 +196,7 @@ async function processSingleHarvestDeduction(enrollment) {
     });
 
     console.log(
-      `Harvest deduction completed for user ${enrollment.user_id}: ₦${enrollment.daily_amount}`,
+      `Harvest deduction completed for user ${enrollment.user_id}: ₦${enrollment.daily_amount}, Day ${newDaysCompleted}/${planDuration}`,
     );
 
     // Send completion notification if completed
