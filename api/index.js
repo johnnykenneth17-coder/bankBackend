@@ -3627,6 +3627,21 @@ app.post(
           break;
 
         case "target":
+          // Calculate days until withdrawal date
+          const withdrawalDateObj = new Date(target_withdrawal_date);
+          const startDateObj = new Date();
+          const daysUntil = Math.max(
+            1,
+            Math.ceil(
+              (withdrawalDateObj - startDateObj) / (1000 * 60 * 60 * 24),
+            ),
+          );
+
+          // FIXED: The amount user enters IS the daily savings amount
+          // They save that amount every day until withdrawal date
+          const targetDailyAmount = amount; // User's daily savings amount
+          const totalTargetAmount = amount * daysUntil; // Total they will save by withdrawal date
+
           // Deduct initial amount (first day's savings)
           await supabase
             .from("accounts")
@@ -3636,20 +3651,13 @@ app.post(
             })
             .eq("id", account.id);
 
-          const withdrawalDate = new Date(target_withdrawal_date);
-
-          // FIXED: The amount user enters IS the daily savings amount
-          // NOT divided by days - they save that amount every day
-          const targetDailyAmount = amount; // This is the user's daily savings amount
-          const totalTargetAmount = amount * daysUntil; // Total they will save by withdrawal date
-
           const { data: target, error: tError } = await supabase
             .from("target_savings")
             .insert({
               user_id: req.user.id,
               target_amount: totalTargetAmount, // Total expected savings
               daily_savings_amount: targetDailyAmount, // User's daily amount
-              withdrawal_date: withdrawalDate,
+              withdrawal_date: withdrawalDateObj,
               current_saved: amount, // First day's savings
               days_remaining: daysUntil - 1,
               last_deduction_date: new Date(),
