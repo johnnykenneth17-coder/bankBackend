@@ -6911,29 +6911,45 @@ app.get(
   authorizeAdmin,
   async (req, res) => {
     try {
+      console.log("Fetching harvest withdrawal requests...");
+
       const { data: requests, error } = await supabase
         .from("harvest_withdrawal_requests")
         .select(
           `
           *,
-          users!inner(id, email, first_name, last_name, phone),
-          user_harvest_enrollments!inner(
+          users:user_id (
+            id, 
+            email, 
+            first_name, 
+            last_name, 
+            phone
+          ),
+          user_harvest_enrollments:enrollment_id (
             id, 
             total_saved, 
             days_completed,
-            harvest_plans!inner(name, daily_amount, duration_days)
+            harvest_plans:plan_id (
+              name, 
+              daily_amount, 
+              duration_days,
+              reward_items
+            )
           )
         `,
         )
-        .eq("status", "pending")
         .order("created_at", { ascending: false });
 
-      if (error) throw error;
+      if (error) {
+        console.error("Supabase error fetching withdrawal requests:", error);
+        return res.status(500).json({ error: error.message });
+      }
 
+      console.log(`Found ${requests?.length || 0} withdrawal requests`);
       res.json({ requests: requests || [] });
     } catch (error) {
       console.error("Error fetching withdrawal requests:", error);
-      res.status(500).json({ error: "Failed to fetch withdrawal requests" });
+      res.status(500).json({ error: error.message });
     }
   },
 );
@@ -6947,6 +6963,10 @@ app.post(
     const { reason } = req.body;
 
     try {
+      console.log(
+        `User ${req.user.id} requesting withdrawal for harvest plan ${id}`,
+      );
+
       // Get harvest enrollment
       const { data: enrollment, error: hError } = await supabase
         .from("user_harvest_enrollments")
@@ -6961,6 +6981,7 @@ app.post(
         .single();
 
       if (hError || !enrollment) {
+        console.error("Enrollment not found:", hError);
         return res.status(404).json({ error: "Harvest plan not found" });
       }
 
@@ -6972,17 +6993,24 @@ app.post(
       }
 
       // Check if withdrawal request already exists
-      const { data: existing } = await supabase
+      const { data: existing, error: existError } = await supabase
         .from("harvest_withdrawal_requests")
-        .select("id")
+        .select("id, status")
         .eq("enrollment_id", id)
-        .eq("status", "pending")
-        .single();
+        .in("status", ["pending", "approved"])
+        .maybeSingle();
 
       if (existing) {
-        return res
-          .status(400)
-          .json({ error: "Withdrawal request already pending" });
+        if (existing.status === "pending") {
+          return res
+            .status(400)
+            .json({ error: "Withdrawal request already pending" });
+        }
+        if (existing.status === "approved") {
+          return res
+            .status(400)
+            .json({ error: "Withdrawal already processed for this plan" });
+        }
       }
 
       // Create withdrawal request
@@ -6991,23 +7019,31 @@ app.post(
         .insert({
           user_id: req.user.id,
           enrollment_id: id,
-          amount: enrollment.total_saved,
+          amount: enrollment.total_saved || 0,
           reason: reason || "No reason provided",
           status: "pending",
+          created_at: new Date().toISOString(),
         })
         .select()
         .single();
 
-      if (error) throw error;
+      if (error) {
+        console.error("Error creating withdrawal request:", error);
+        return res
+          .status(500)
+          .json({ error: "Failed to create withdrawal request" });
+      }
 
-      // Create notification
+      // Create notification for user
       await supabase.from("notifications").insert({
         user_id: req.user.id,
         title: "Withdrawal Request Submitted",
         message: `Your Harvest Plan withdrawal request for ₦${(enrollment.total_saved || 0).toLocaleString()} has been submitted for admin approval.`,
         type: "info",
+        created_at: new Date().toISOString(),
       });
 
+      console.log(`Withdrawal request created: ${request.id}`);
       res.json({
         success: true,
         message:
@@ -7016,7 +7052,7 @@ app.post(
       });
     } catch (error) {
       console.error("Withdrawal request error:", error);
-      res.status(500).json({ error: "Failed to submit withdrawal request" });
+      res.status(500).json({ error: error.message });
     }
   },
 );
@@ -7030,16 +7066,28 @@ app.post(
     const { requestId } = req.params;
 
     try {
+      console.log(
+        `Admin ${req.user.id} approving withdrawal request ${requestId}`,
+      );
+
+      // Get the request with all related data
       const { data: request, error: fetchError } = await supabase
         .from("harvest_withdrawal_requests")
         .select(
           `
           *,
-          users!inner(id, email, first_name, last_name),
-          user_harvest_enrollments!inner(
+          users:user_id (
+            id, 
+            email, 
+            first_name, 
+            last_name
+          ),
+          user_harvest_enrollments:enrollment_id (
             id, 
             total_saved,
-            user_id
+            user_id,
+            plan_id,
+            status
           )
         `,
         )
@@ -7047,6 +7095,7 @@ app.post(
         .single();
 
       if (fetchError || !request) {
+        console.error("Request not found:", fetchError);
         return res.status(404).json({ error: "Request not found" });
       }
 
@@ -7063,14 +7112,16 @@ app.post(
         .single();
 
       if (accError || !account) {
+        console.error("User account not found:", accError);
         return res.status(404).json({ error: "User account not found" });
       }
 
       // Refund the amount to user's account
-      const newBalance = account.balance + request.amount;
-      const newAvailable = account.available_balance + request.amount;
+      const newBalance = (account.balance || 0) + (request.amount || 0);
+      const newAvailable =
+        (account.available_balance || 0) + (request.amount || 0);
 
-      await supabase
+      const { error: updateBalanceError } = await supabase
         .from("accounts")
         .update({
           balance: newBalance,
@@ -7079,17 +7130,27 @@ app.post(
         })
         .eq("id", account.id);
 
+      if (updateBalanceError) {
+        console.error("Balance update error:", updateBalanceError);
+        return res.status(500).json({ error: "Failed to update balance" });
+      }
+
       // Update harvest enrollment status to "withdrawn"
-      await supabase
+      const { error: updateEnrollmentError } = await supabase
         .from("user_harvest_enrollments")
         .update({
           status: "withdrawn",
+          auto_save: false,
           updated_at: new Date().toISOString(),
         })
         .eq("id", request.enrollment_id);
 
+      if (updateEnrollmentError) {
+        console.error("Enrollment update error:", updateEnrollmentError);
+      }
+
       // Update request status
-      await supabase
+      const { error: updateRequestError } = await supabase
         .from("harvest_withdrawal_requests")
         .update({
           status: "approved",
@@ -7099,8 +7160,15 @@ app.post(
         })
         .eq("id", requestId);
 
+      if (updateRequestError) {
+        console.error("Request update error:", updateRequestError);
+        return res
+          .status(500)
+          .json({ error: "Failed to update request status" });
+      }
+
       // Create refund transaction
-      await supabase.from("transactions").insert({
+      const { error: transError } = await supabase.from("transactions").insert({
         to_account_id: account.id,
         to_user_id: request.user_id,
         amount: request.amount,
@@ -7112,21 +7180,36 @@ app.post(
         admin_note: `Harvest withdrawal approved by ${req.user.email}`,
       });
 
+      if (transError) {
+        console.error("Transaction creation error:", transError);
+      }
+
       // Send notification to user
       await supabase.from("notifications").insert({
         user_id: request.user_id,
         title: "Withdrawal Request Approved ✅",
         message: `Your Harvest Plan withdrawal of ₦${(request.amount || 0).toLocaleString()} has been approved. Funds have been returned to your account.`,
         type: "success",
+        created_at: new Date().toISOString(),
       });
 
+      // Log admin action
+      await supabase.from("admin_actions").insert({
+        admin_id: req.user.id,
+        action_type: "approve_harvest_withdrawal",
+        target_user_id: request.user_id,
+        details: { request_id: requestId, amount: request.amount },
+        created_at: new Date().toISOString(),
+      });
+
+      console.log(`Withdrawal ${requestId} approved successfully`);
       res.json({
         success: true,
         message: "Withdrawal approved and funds returned",
       });
     } catch (error) {
       console.error("Approve withdrawal error:", error);
-      res.status(500).json({ error: "Failed to approve withdrawal" });
+      res.status(500).json({ error: error.message });
     }
   },
 );
@@ -7141,18 +7224,28 @@ app.post(
     const { reason } = req.body;
 
     try {
+      console.log(
+        `Admin ${req.user.id} rejecting withdrawal request ${requestId}`,
+      );
+
       const { data: request, error: fetchError } = await supabase
         .from("harvest_withdrawal_requests")
         .select(
           `
           *,
-          users!inner(id, email, first_name, last_name)
+          users:user_id (
+            id, 
+            email, 
+            first_name, 
+            last_name
+          )
         `,
         )
         .eq("id", requestId)
         .single();
 
       if (fetchError || !request) {
+        console.error("Request not found:", fetchError);
         return res.status(404).json({ error: "Request not found" });
       }
 
@@ -7161,7 +7254,7 @@ app.post(
       }
 
       // Update request status
-      await supabase
+      const { error: updateError } = await supabase
         .from("harvest_withdrawal_requests")
         .update({
           status: "rejected",
@@ -7171,18 +7264,34 @@ app.post(
         })
         .eq("id", requestId);
 
+      if (updateError) {
+        console.error("Request update error:", updateError);
+        return res.status(500).json({ error: "Failed to update request" });
+      }
+
       // Send notification to user
       await supabase.from("notifications").insert({
         user_id: request.user_id,
         title: "Withdrawal Request Rejected ❌",
         message: `Your Harvest Plan withdrawal request was rejected. Reason: ${reason || "Not specified"}. Please continue your savings plan.`,
         type: "error",
+        created_at: new Date().toISOString(),
       });
 
+      // Log admin action
+      await supabase.from("admin_actions").insert({
+        admin_id: req.user.id,
+        action_type: "reject_harvest_withdrawal",
+        target_user_id: request.user_id,
+        details: { request_id: requestId, reason: reason },
+        created_at: new Date().toISOString(),
+      });
+
+      console.log(`Withdrawal ${requestId} rejected`);
       res.json({ success: true, message: "Withdrawal request rejected" });
     } catch (error) {
       console.error("Reject withdrawal error:", error);
-      res.status(500).json({ error: "Failed to reject withdrawal" });
+      res.status(500).json({ error: error.message });
     }
   },
 );
