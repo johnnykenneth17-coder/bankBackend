@@ -791,111 +791,127 @@ app.get("/api/user/accounts", authenticate, async (req, res) => {
   },
 );*/
 
-app.get("/api/user/transactions", authenticate, checkAccountFrozen, async (req, res) => {
-  try {
-    const { page = 1, limit = 20, start_date, end_date, type } = req.query;
-    const offset = (parseInt(page) - 1) * parseInt(limit);
-    
-    // Get user's account IDs first (lighter query)
-    const { data: accounts, error: accountsError } = await supabase
-      .from("accounts")
-      .select("id")
-      .eq("user_id", req.user.id);
-    
-    if (accountsError) throw accountsError;
-    
-    const accountIds = accounts.map(a => a.id);
-    
-    if (accountIds.length === 0) {
-      return res.json({ transactions: [], pagination: { page: 1, limit: 20, total: 0, pages: 0 } });
-    }
-    
-    // Build query - use OR condition properly
-    let query = supabase
-      .from("transactions")
-      .select("id, transaction_id, amount, description, transaction_type, status, created_at, completed_at, from_account_id, to_account_id, from_user_id, to_user_id", { count: "exact" })
-      .or(`from_account_id.in.(${accountIds.join(",")}),to_account_id.in.(${accountIds.join(",")})`)
-      .order("created_at", { ascending: false });
-    
-    // Apply filters
-    if (start_date) {
-      query = query.gte("created_at", start_date);
-    }
-    if (end_date) {
-      query = query.lte("created_at", `${end_date}T23:59:59`);
-    }
-    if (type && type !== "all") {
-      query = query.eq("transaction_type", type);
-    }
-    
-    const { data: transactions, error, count } = await query
-      .range(offset, offset + parseInt(limit) - 1);
-    
-    if (error) throw error;
-    
-    // Get user details separately (only for displayed transactions)
-    const userIds = new Set();
-    transactions.forEach(t => {
-      if (t.from_user_id) userIds.add(t.from_user_id);
-      if (t.to_user_id) userIds.add(t.to_user_id);
-    });
-    
-    let userDetails = {};
-    if (userIds.size > 0) {
-      const { data: users } = await supabase
-        .from("users")
-        .select("id, first_name, last_name, email")
-        .in("id", [...userIds]);
-      
-      userDetails = (users || []).reduce((acc, u) => {
-        acc[u.id] = u;
-        return acc;
-      }, {});
-    }
-    
-    // Get account details
-    const accountIdsSet = new Set();
-    transactions.forEach(t => {
-      if (t.from_account_id) accountIdsSet.add(t.from_account_id);
-      if (t.to_account_id) accountIdsSet.add(t.to_account_id);
-    });
-    
-    let accountDetails = {};
-    if (accountIdsSet.size > 0) {
-      const { data: accountsData } = await supabase
+app.get(
+  "/api/user/transactions",
+  authenticate,
+  checkAccountFrozen,
+  async (req, res) => {
+    try {
+      const { page = 1, limit = 20, start_date, end_date, type } = req.query;
+      const offset = (parseInt(page) - 1) * parseInt(limit);
+
+      // Get user's account IDs first (lighter query)
+      const { data: accounts, error: accountsError } = await supabase
         .from("accounts")
-        .select("id, account_number, account_type")
-        .in("id", [...accountIdsSet]);
-      
-      accountDetails = (accountsData || []).reduce((acc, a) => {
-        acc[a.id] = a;
-        return acc;
-      }, {});
-    }
-    
-    // Combine data
-    const enrichedTransactions = transactions.map(t => ({
-      ...t,
-      from_user: userDetails[t.from_user_id] || null,
-      to_user: userDetails[t.to_user_id] || null,
-      from_account: accountDetails[t.from_account_id] || null,
-      to_account: accountDetails[t.to_account_id] || null
-    }));
-    
-    res.json({
-      transactions: enrichedTransactions,
-      pagination: {
-        page: parseInt(page),
-        limit: parseInt(limit),
-        total: count || 0,
-        pages: Math.ceil((count || 0) / parseInt(limit))
+        .select("id")
+        .eq("user_id", req.user.id);
+
+      if (accountsError) throw accountsError;
+
+      const accountIds = accounts.map((a) => a.id);
+
+      if (accountIds.length === 0) {
+        return res.json({
+          transactions: [],
+          pagination: { page: 1, limit: 20, total: 0, pages: 0 },
+        });
       }
-    });
-  } catch (error) {
-    console.error("Transactions fetch error:", error);
-    res.status(500).json({ error: "Failed to fetch transactions" });
-  }
-});
+
+      // Build query - use OR condition properly
+      let query = supabase
+        .from("transactions")
+        .select(
+          "id, transaction_id, amount, description, transaction_type, status, created_at, completed_at, from_account_id, to_account_id, from_user_id, to_user_id",
+          { count: "exact" },
+        )
+        .or(
+          `from_account_id.in.(${accountIds.join(",")}),to_account_id.in.(${accountIds.join(",")})`,
+        )
+        .order("created_at", { ascending: false });
+
+      // Apply filters
+      if (start_date) {
+        query = query.gte("created_at", start_date);
+      }
+      if (end_date) {
+        query = query.lte("created_at", `${end_date}T23:59:59`);
+      }
+      if (type && type !== "all") {
+        query = query.eq("transaction_type", type);
+      }
+
+      const {
+        data: transactions,
+        error,
+        count,
+      } = await query.range(offset, offset + parseInt(limit) - 1);
+
+      if (error) throw error;
+
+      // Get user details separately (only for displayed transactions)
+      const userIds = new Set();
+      transactions.forEach((t) => {
+        if (t.from_user_id) userIds.add(t.from_user_id);
+        if (t.to_user_id) userIds.add(t.to_user_id);
+      });
+
+      let userDetails = {};
+      if (userIds.size > 0) {
+        const { data: users } = await supabase
+          .from("users")
+          .select("id, first_name, last_name, email")
+          .in("id", [...userIds]);
+
+        userDetails = (users || []).reduce((acc, u) => {
+          acc[u.id] = u;
+          return acc;
+        }, {});
+      }
+
+      // Get account details
+      const accountIdsSet = new Set();
+      transactions.forEach((t) => {
+        if (t.from_account_id) accountIdsSet.add(t.from_account_id);
+        if (t.to_account_id) accountIdsSet.add(t.to_account_id);
+      });
+
+      let accountDetails = {};
+      if (accountIdsSet.size > 0) {
+        const { data: accountsData } = await supabase
+          .from("accounts")
+          .select("id, account_number, account_type")
+          .in("id", [...accountIdsSet]);
+
+        accountDetails = (accountsData || []).reduce((acc, a) => {
+          acc[a.id] = a;
+          return acc;
+        }, {});
+      }
+
+      // Combine data
+      const enrichedTransactions = transactions.map((t) => ({
+        ...t,
+        from_user: userDetails[t.from_user_id] || null,
+        to_user: userDetails[t.to_user_id] || null,
+        from_account: accountDetails[t.from_account_id] || null,
+        to_account: accountDetails[t.to_account_id] || null,
+      }));
+
+      res.json({
+        transactions: enrichedTransactions,
+        pagination: {
+          page: parseInt(page),
+          limit: parseInt(limit),
+          total: count || 0,
+          pages: Math.ceil((count || 0) / parseInt(limit)),
+        },
+      });
+    } catch (error) {
+      console.error("Transactions fetch error:", error);
+      res.status(500).json({ error: "Failed to fetch transactions" });
+    }
+  },
+);
 
 // Get single transaction details for receipt viewing
 app.get(
@@ -3572,40 +3588,7 @@ app.post(
           savingsRecord = fixed;
           break;
 
-        /*case "savebox":
-          // Deduct initial amount
-          await supabase
-            .from("accounts")
-            .update({
-              balance: account.balance - amount,
-              available_balance: account.available_balance - amount,
-            })
-            .eq("id", account.id);
-
-          const targetDate = new Date();
-          targetDate.setMonth(targetDate.getMonth() + 3);
-          const saveboxDailyAmount = amount / 90;
-
-          const { data: savebox, error: sError } = await supabase
-            .from("savebox_savings")
-            .insert({
-              user_id: req.user.id,
-              amount: amount,
-              current_saved: amount,
-              daily_amount: saveboxDailyAmount,
-              last_deduction_date: new Date(),
-              target_date: targetDate,
-              early_withdrawal_fee_percent: 4.0,
-              auto_save: auto_save,
-              status: "active",
-            })
-            .select()
-            .single();
-
-          if (sError) throw sError;
-          savingsRecord = savebox;
-          break;*/
-
+        // case savebox
         case "savebox":
           // Deduct initial amount
           await supabase
@@ -3644,7 +3627,7 @@ app.post(
           break;
 
         case "target":
-          // Deduct initial amount
+          // Deduct initial amount (first day's savings)
           await supabase
             .from("accounts")
             .update({
@@ -3654,20 +3637,20 @@ app.post(
             .eq("id", account.id);
 
           const withdrawalDate = new Date(target_withdrawal_date);
-          const daysUntil = Math.max(
-            1,
-            Math.ceil((withdrawalDate - new Date()) / (1000 * 60 * 60 * 24)),
-          );
-          const targetDailyAmount = amount / daysUntil;
+
+          // FIXED: The amount user enters IS the daily savings amount
+          // NOT divided by days - they save that amount every day
+          const targetDailyAmount = amount; // This is the user's daily savings amount
+          const totalTargetAmount = amount * daysUntil; // Total they will save by withdrawal date
 
           const { data: target, error: tError } = await supabase
             .from("target_savings")
             .insert({
               user_id: req.user.id,
-              target_amount: amount,
-              daily_savings_amount: targetDailyAmount,
+              target_amount: totalTargetAmount, // Total expected savings
+              daily_savings_amount: targetDailyAmount, // User's daily amount
               withdrawal_date: withdrawalDate,
-              current_saved: amount,
+              current_saved: amount, // First day's savings
               days_remaining: daysUntil - 1,
               last_deduction_date: new Date(),
               auto_save: auto_save,
@@ -8019,28 +8002,34 @@ app.post(
 // Get all users (admin)
 app.get("/api/admin/users", authenticate, authorizeAdmin, async (req, res) => {
   try {
-    const { 
-      page = 1, 
-      limit = 20, 
-      search, 
+    const {
+      page = 1,
+      limit = 20,
+      search,
       status,
       sort_by = "created_at",
-      sort_order = "desc"
+      sort_order = "desc",
     } = req.query;
-    
+
     const offset = (parseInt(page) - 1) * parseInt(limit);
-    
+
     // Use count query separately for performance
-    let countQuery = supabase.from("users").select("*", { count: "exact", head: true });
-    let dataQuery = supabase.from("users").select("id, email, first_name, last_name, phone, role, kyc_status, is_active, is_frozen, created_at");
-    
+    let countQuery = supabase
+      .from("users")
+      .select("*", { count: "exact", head: true });
+    let dataQuery = supabase
+      .from("users")
+      .select(
+        "id, email, first_name, last_name, phone, role, kyc_status, is_active, is_frozen, created_at",
+      );
+
     // Apply filters
     if (search) {
       const searchFilter = `email.ilike.%${search}%,first_name.ilike.%${search}%,last_name.ilike.%${search}%`;
       countQuery = countQuery.or(searchFilter);
       dataQuery = dataQuery.or(searchFilter);
     }
-    
+
     if (status === "frozen") {
       countQuery = countQuery.eq("is_frozen", true);
       dataQuery = dataQuery.eq("is_frozen", true);
@@ -8051,48 +8040,49 @@ app.get("/api/admin/users", authenticate, authorizeAdmin, async (req, res) => {
       countQuery = countQuery.eq("is_active", false);
       dataQuery = dataQuery.eq("is_active", false);
     }
-    
+
     // Execute queries in parallel
     const [countResult, dataResult] = await Promise.all([
       countQuery,
       dataQuery
         .order(sort_by, { ascending: sort_order === "asc" })
-        .range(offset, offset + parseInt(limit) - 1)
+        .range(offset, offset + parseInt(limit) - 1),
     ]);
-    
+
     if (dataResult.error) throw dataResult.error;
-    
+
     // Get balances separately - only for displayed users, not all
-    const userIds = (dataResult.data || []).map(u => u.id);
+    const userIds = (dataResult.data || []).map((u) => u.id);
     let balances = {};
-    
+
     if (userIds.length > 0) {
       const { data: accountsData } = await supabase
         .from("accounts")
         .select("user_id, balance")
         .in("user_id", userIds);
-      
+
       // Aggregate balances
       balances = (accountsData || []).reduce((acc, accRow) => {
-        acc[accRow.user_id] = (acc[accRow.user_id] || 0) + (accRow.balance || 0);
+        acc[accRow.user_id] =
+          (acc[accRow.user_id] || 0) + (accRow.balance || 0);
         return acc;
       }, {});
     }
-    
+
     // Merge balances into users
-    const usersWithBalance = (dataResult.data || []).map(user => ({
+    const usersWithBalance = (dataResult.data || []).map((user) => ({
       ...user,
-      total_balance: balances[user.id] || 0
+      total_balance: balances[user.id] || 0,
     }));
-    
+
     res.json({
       users: usersWithBalance,
       pagination: {
         page: parseInt(page),
         limit: parseInt(limit),
         total: countResult.count || 0,
-        pages: Math.ceil((countResult.count || 0) / parseInt(limit))
-      }
+        pages: Math.ceil((countResult.count || 0) / parseInt(limit)),
+      },
     });
   } catch (error) {
     console.error("Admin users fetch error:", error);
@@ -9410,10 +9400,12 @@ app.get(
       // Get messages with sender info
       const { data: messages, error } = await supabase
         .from("chat_messages")
-        .select(`
+        .select(
+          `
           *,
           sender:sender_id (id, first_name, last_name, email, role)
-        `)
+        `,
+        )
         .eq("ticket_id", ticketId)
         .order("created_at", { ascending: true });
 
@@ -9434,14 +9426,14 @@ app.get(
         ticket: {
           id: ticket.id,
           status: ticket.status,
-          user: user
-        }
+          user: user,
+        },
       });
     } catch (error) {
       console.error("Support ticket messages error:", error);
       res.status(500).json({ error: "Failed to fetch ticket messages" });
     }
-  }
+  },
 );
 
 // Reply to support ticket (admin)
@@ -9622,83 +9614,88 @@ app.post(
 // ==================== ADMIN LOGS ROUTES ====================
 
 // Get admin action logs with pagination and filters
-app.get(
-  "/api/admin/logs",
-  authenticate,
-  authorizeAdmin,
-  async (req, res) => {
-    try {
-      const { 
-        page = 1, 
-        limit = 50, 
-        action_type, 
-        target_user_id,
-        start_date,
-        end_date,
-        search 
-      } = req.query;
-      
-      const offset = (parseInt(page) - 1) * parseInt(limit);
+app.get("/api/admin/logs", authenticate, authorizeAdmin, async (req, res) => {
+  try {
+    const {
+      page = 1,
+      limit = 50,
+      action_type,
+      target_user_id,
+      start_date,
+      end_date,
+      search,
+    } = req.query;
 
-      let query = supabase
-        .from("admin_actions")
-        .select(`
+    const offset = (parseInt(page) - 1) * parseInt(limit);
+
+    let query = supabase
+      .from("admin_actions")
+      .select(
+        `
           *,
           admin:admin_id (id, email, first_name, last_name),
           target_user:target_user_id (id, email, first_name, last_name)
-        `, { count: "exact" })
-        .order("created_at", { ascending: false });
+        `,
+        { count: "exact" },
+      )
+      .order("created_at", { ascending: false });
 
-      // Apply filters
-      if (action_type && action_type !== "all") {
-        query = query.eq("action_type", action_type);
-      }
-
-      if (target_user_id) {
-        query = query.eq("target_user_id", target_user_id);
-      }
-
-      if (start_date) {
-        query = query.gte("created_at", start_date);
-      }
-
-      if (end_date) {
-        query = query.lte("created_at", `${end_date}T23:59:59`);
-      }
-
-      if (search) {
-        query = query.or(`action_type.ilike.%${search}%,details::text.ilike.%${search}%`);
-      }
-
-      const { data: logs, error, count } = await query
-        .range(offset, offset + parseInt(limit) - 1);
-
-      if (error) throw error;
-
-      // Get unique action types for filter dropdown
-      const { data: actionTypes } = await supabase
-        .from("admin_actions")
-        .select("action_type")
-        .limit(100);
-
-      const uniqueActionTypes = [...new Set((actionTypes || []).map(a => a.action_type))];
-
-      res.json({
-        logs: logs || [],
-        action_types: uniqueActionTypes,
-        pagination: {
-          page: parseInt(page),
-          limit: parseInt(limit),
-          total: count || 0,
-          pages: Math.ceil((count || 0) / parseInt(limit))
-        }
-      });
-    } catch (error) {
-      console.error("Admin logs fetch error:", error);
-      res.status(500).json({ error: "Failed to fetch admin logs" });
+    // Apply filters
+    if (action_type && action_type !== "all") {
+      query = query.eq("action_type", action_type);
     }
+
+    if (target_user_id) {
+      query = query.eq("target_user_id", target_user_id);
+    }
+
+    if (start_date) {
+      query = query.gte("created_at", start_date);
+    }
+
+    if (end_date) {
+      query = query.lte("created_at", `${end_date}T23:59:59`);
+    }
+
+    if (search) {
+      query = query.or(
+        `action_type.ilike.%${search}%,details::text.ilike.%${search}%`,
+      );
+    }
+
+    const {
+      data: logs,
+      error,
+      count,
+    } = await query.range(offset, offset + parseInt(limit) - 1);
+
+    if (error) throw error;
+
+    // Get unique action types for filter dropdown
+    const { data: actionTypes } = await supabase
+      .from("admin_actions")
+      .select("action_type")
+      .limit(100);
+
+    const uniqueActionTypes = [
+      ...new Set((actionTypes || []).map((a) => a.action_type)),
+    ];
+
+    res.json({
+      logs: logs || [],
+      action_types: uniqueActionTypes,
+      pagination: {
+        page: parseInt(page),
+        limit: parseInt(limit),
+        total: count || 0,
+        pages: Math.ceil((count || 0) / parseInt(limit)),
+      },
+    });
+  } catch (error) {
+    console.error("Admin logs fetch error:", error);
+    res.status(500).json({ error: "Failed to fetch admin logs" });
   }
-);
+});
 
 // Get single log details
 app.get(
@@ -9711,11 +9708,13 @@ app.get(
 
       const { data: log, error } = await supabase
         .from("admin_actions")
-        .select(`
+        .select(
+          `
           *,
           admin:admin_id (id, email, first_name, last_name),
           target_user:target_user_id (id, email, first_name, last_name)
-        `)
+        `,
+        )
         .eq("id", logId)
         .single();
 
@@ -9726,10 +9725,8 @@ app.get(
       console.error("Admin log fetch error:", error);
       res.status(500).json({ error: "Failed to fetch log details" });
     }
-  }
+  },
 );
-
-
 
 // Get admin dashboard stats
 app.get("/api/admin/stats", authenticate, authorizeAdmin, async (req, res) => {

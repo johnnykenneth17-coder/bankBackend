@@ -76,17 +76,19 @@ async function processAllSavings() {
 async function processHarvestPlans() {
   const today = new Date();
   today.setHours(0, 0, 0, 0);
-  
+
   console.log(`[${new Date().toISOString()}] Processing Harvest Plans...`);
 
   // IMPORTANT: Use a simpler query first to debug
   const { data: enrollments, error } = await supabase
     .from("user_harvest_enrollments")
-    .select(`
+    .select(
+      `
       *,
       users!inner(id, email, first_name, last_name, is_frozen),
       harvest_plans!inner(daily_amount, duration_days, name, reward_items)
-    `)
+    `,
+    )
     .eq("status", "active")
     .eq("auto_save", true);
 
@@ -97,12 +99,14 @@ async function processHarvestPlans() {
 
   // Filter for those that need deduction (next_deduction_due is null OR in the past)
   const now = new Date().toISOString();
-  const needDeduction = (enrollments || []).filter(e => {
+  const needDeduction = (enrollments || []).filter((e) => {
     if (!e.next_deduction_due) return true;
     return new Date(e.next_deduction_due) <= new Date();
   });
 
-  console.log(`Found ${needDeduction.length} harvest enrollments needing deduction out of ${enrollments?.length || 0} total`);
+  console.log(
+    `Found ${needDeduction.length} harvest enrollments needing deduction out of ${enrollments?.length || 0} total`,
+  );
 
   for (const enrollment of needDeduction) {
     await processSingleHarvestDeduction(enrollment);
@@ -552,7 +556,14 @@ async function processTargetSavings() {
 
 async function processSingleTargetDeduction(saving) {
   try {
+    // The daily amount is stored directly - no calculation needed
     const dailyAmount = saving.daily_savings_amount;
+
+    if (!dailyAmount || dailyAmount <= 0) {
+      console.error(`Invalid daily amount for target savings ${saving.id}`);
+      await addToRetryQueue(saving.user_id, saving.id, "target", dailyAmount);
+      return;
+    }
 
     const { data: account, error: accError } = await supabase
       .from("accounts")
@@ -561,15 +572,25 @@ async function processSingleTargetDeduction(saving) {
       .eq("account_type", "checking")
       .single();
 
-    if (accError || !account) return;
+    if (accError || !account) {
+      console.error(`No account for user ${saving.user_id}`);
+      await addToRetryQueue(saving.user_id, saving.id, "target", dailyAmount);
+      return;
+    }
+
     if (saving.users?.is_frozen) return;
 
+    // Check if sufficient balance
     if (account.available_balance < dailyAmount) {
+      console.log(
+        `Insufficient balance for user ${saving.user_id} - adding to retry queue`,
+      );
       await addToRetryQueue(saving.user_id, saving.id, "target", dailyAmount);
       await sendLowBalanceNotification(saving.users, "Target Savings");
       return;
     }
 
+    // Deduct the DAILY amount (not divided)
     const newBalance = account.balance - dailyAmount;
     const newAvailable = account.available_balance - dailyAmount;
 
@@ -578,9 +599,15 @@ async function processSingleTargetDeduction(saving) {
       .update({ balance: newBalance, available_balance: newAvailable })
       .eq("id", account.id);
 
+    // Update savings record - add the daily amount to current_saved
     const newCurrentSaved = (saving.current_saved || 0) + dailyAmount;
     const newDaysRemaining = (saving.days_remaining || 0) - 1;
     const targetMet = newCurrentSaved >= saving.target_amount;
+
+    // Check if withdrawal date has passed
+    const withdrawalDate = new Date(saving.withdrawal_date);
+    const now = new Date();
+    const canWithdraw = withdrawalDate <= now || targetMet;
 
     await supabase
       .from("target_savings")
@@ -589,29 +616,47 @@ async function processSingleTargetDeduction(saving) {
         days_remaining: newDaysRemaining,
         last_deduction_date: new Date(),
         target_met: targetMet,
-        status: targetMet ? "completed" : "active",
+        status: canWithdraw ? "completed" : "active",
       })
       .eq("id", saving.id);
 
+    // Create transaction record
     await supabase.from("transactions").insert({
       from_account_id: account.id,
       from_user_id: saving.user_id,
       amount: dailyAmount,
-      description: `Target Savings: ₦${saving.target_amount.toFixed(2)} goal`,
+      description: `Target Savings - Daily deposit ₦${dailyAmount}`,
       transaction_type: "savings",
       status: "completed",
       completed_at: new Date(),
     });
 
+    // Create savings transaction record
+    await supabase.from("savings_transactions").insert({
+      user_id: saving.user_id,
+      savings_type: "target",
+      savings_id: saving.id,
+      amount: dailyAmount,
+      transaction_type: "deposit",
+      description: `Daily target savings deposit`,
+    });
+
     console.log(
-      `Target deduction completed for user ${saving.user_id}: ₦${dailyAmount}`,
+      `Target savings deduction completed for user ${saving.user_id}: ₦${dailyAmount}, Total: ₦${newCurrentSaved}`,
     );
 
-    if (targetMet) {
-      await sendTargetMetNotification(saving);
+    // Send completion notification if target met or date reached
+    if (targetMet || canWithdraw) {
+      await sendTargetCompletionNotification(saving);
     }
   } catch (error) {
     console.error(`Target savings error for user ${saving.user_id}:`, error);
+    await addToRetryQueue(
+      saving.user_id,
+      saving.id,
+      "target",
+      saving.daily_savings_amount,
+    );
   }
 }
 
