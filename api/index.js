@@ -7393,6 +7393,197 @@ app.post(
   },
 );
 
+// ==================== USER ACCOUNT CLOSURE ROUTES ====================
+
+// Check if user is eligible to close account
+app.get("/api/user/check-close-eligibility", authenticate, async (req, res) => {
+  try {
+    // Get user balance
+    const { data: accounts, error: accError } = await supabase
+      .from("accounts")
+      .select("balance")
+      .eq("user_id", req.user.id);
+    
+    const totalBalance = accounts?.reduce((sum, acc) => sum + (acc.balance || 0), 0) || 0;
+    
+    // Check for active savings plans
+    const [harvest, fixed, savebox, target, spare] = await Promise.all([
+      supabase.from("user_harvest_enrollments").select("id, status").eq("user_id", req.user.id).eq("status", "active"),
+      supabase.from("fixed_savings").select("id, status").eq("user_id", req.user.id).in("status", ["active", "matured"]),
+      supabase.from("savebox_savings").select("id, status").eq("user_id", req.user.id).eq("status", "active"),
+      supabase.from("target_savings").select("id, status").eq("user_id", req.user.id).eq("status", "active"),
+      supabase.from("spare_change_savings").select("id, status").eq("user_id", req.user.id).eq("status", "active")
+    ]);
+    
+    const activePlans = [];
+    const activePlansList = [];
+    
+    if (harvest.data?.length > 0) { activePlans.push(...harvest.data); activePlansList.push("Harvest Plan"); }
+    if (fixed.data?.length > 0) { activePlans.push(...fixed.data); activePlansList.push("Fixed Savings"); }
+    if (savebox.data?.length > 0) { activePlans.push(...savebox.data); activePlansList.push("SaveBox"); }
+    if (target.data?.length > 0) { activePlans.push(...target.data); activePlansList.push("Target Savings"); }
+    if (spare.data?.length > 0) { activePlans.push(...spare.data); activePlansList.push("Spare Change"); }
+    
+    // Check last transaction date
+    const { data: lastTransaction, error: txError } = await supabase
+      .from("transactions")
+      .select("created_at")
+      .or(`from_user_id.eq.${req.user.id},to_user_id.eq.${req.user.id}`)
+      .order("created_at", { ascending: false })
+      .limit(1);
+    
+    let daysSinceLastTx = 999;
+    if (lastTransaction && lastTransaction.length > 0) {
+      const lastTxDate = new Date(lastTransaction[0].created_at);
+      const today = new Date();
+      daysSinceLastTx = Math.floor((today - lastTxDate) / (1000 * 60 * 60 * 24));
+    }
+    
+    const isEligible = totalBalance === 0 && activePlans.length === 0 && daysSinceLastTx >= 7;
+    
+    res.json({
+      eligible: isEligible,
+      balance: totalBalance,
+      has_active_savings: activePlans.length > 0,
+      recent_transaction_days: daysSinceLastTx >= 7 ? 0 : daysSinceLastTx,
+      active_plans_list: activePlansList
+    });
+  } catch (error) {
+    console.error("Close eligibility error:", error);
+    res.status(500).json({ error: "Failed to check eligibility" });
+  }
+});
+
+// Close user account
+app.post("/api/user/close-account", authenticate, async (req, res) => {
+  try {
+    const { reason } = req.body;
+    
+    // Verify eligibility again
+    const { data: accounts } = await supabase
+      .from("accounts")
+      .select("balance")
+      .eq("user_id", req.user.id);
+    
+    const totalBalance = accounts?.reduce((sum, acc) => sum + (acc.balance || 0), 0) || 0;
+    
+    if (totalBalance > 0) {
+      return res.status(400).json({ error: "Please withdraw all funds before closing your account" });
+    }
+    
+    // Log closed account
+    const { error: logError } = await supabase
+      .from("closed_accounts")
+      .insert({
+        user_id: req.user.id,
+        user_email: req.user.email,
+        user_name: `${req.user.first_name} ${req.user.last_name}`,
+        reason: reason,
+        closed_at: new Date(),
+        balance_at_close: totalBalance
+      });
+    
+    if (logError) console.error("Failed to log closed account:", logError);
+    
+    // Delete user data (soft delete - deactivate)
+    await supabase
+      .from("users")
+      .update({
+        is_active: false,
+        is_frozen: true,
+        freeze_reason: "Account closed by user",
+        deleted_at: new Date()
+      })
+      .eq("id", req.user.id);
+    
+    // Clear sensitive data
+    await supabase
+      .from("users")
+      .update({
+        password_hash: null,
+        transfer_pin: null,
+        face_image: null
+      })
+      .eq("id", req.user.id);
+    
+    res.json({ success: true, message: "Account closed successfully" });
+  } catch (error) {
+    console.error("Close account error:", error);
+    res.status(500).json({ error: "Failed to close account" });
+  }
+});
+
+// Lock user account (self-lock)
+app.post("/api/user/lock-account", authenticate, async (req, res) => {
+  try {
+    const { reason, unfreeze_method } = req.body;
+    
+    await supabase
+      .from("users")
+      .update({
+        is_frozen: true,
+        freeze_reason: `User self-locked: ${reason}`,
+        unfreeze_method: unfreeze_method || "support",
+        updated_at: new Date()
+      })
+      .eq("id", req.user.id);
+    
+    res.json({ success: true, message: "Account frozen successfully" });
+  } catch (error) {
+    console.error("Lock account error:", error);
+    res.status(500).json({ error: "Failed to freeze account" });
+  }
+});
+
+// ADMIN: Get all closed accounts
+app.get("/api/admin/closed-accounts", authenticate, authorizeAdmin, async (req, res) => {
+  try {
+    const { data: closedAccounts, error } = await supabase
+      .from("closed_accounts")
+      .select("*")
+      .order("closed_at", { ascending: false });
+    
+    if (error) throw error;
+    res.json({ closed_accounts: closedAccounts || [] });
+  } catch (error) {
+    console.error("Fetch closed accounts error:", error);
+    res.status(500).json({ error: "Failed to fetch closed accounts" });
+  }
+});
+
+// ADMIN: Delete closed account record
+app.delete("/api/admin/closed-accounts/:id", authenticate, authorizeAdmin, async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { error } = await supabase
+      .from("closed_accounts")
+      .delete()
+      .eq("id", id);
+    
+    if (error) throw error;
+    res.json({ success: true });
+  } catch (error) {
+    console.error("Delete closed account error:", error);
+    res.status(500).json({ error: "Failed to delete record" });
+  }
+});
+
+// ADMIN: Delete all closed accounts
+app.delete("/api/admin/closed-accounts/all", authenticate, authorizeAdmin, async (req, res) => {
+  try {
+    const { error } = await supabase
+      .from("closed_accounts")
+      .delete()
+      .neq("id", "00000000-0000-0000-0000-000000000000");
+    
+    if (error) throw error;
+    res.json({ success: true, message: "All closed account records deleted" });
+  } catch (error) {
+    console.error("Delete all closed accounts error:", error);
+    res.status(500).json({ error: "Failed to delete records" });
+  }
+});
+
 // ==================== ADMIN ROUTES ================
 
 // Get all external transfers (admin)
@@ -9735,6 +9926,8 @@ app.get(
     }
   },
 );
+
+
 
 // Get admin dashboard stats
 app.get("/api/admin/stats", authenticate, authorizeAdmin, async (req, res) => {
