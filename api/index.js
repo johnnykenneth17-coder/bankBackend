@@ -615,6 +615,7 @@ app.put("/api/user/profile", authenticate, async (req, res) => {
 });
 
 // Change password
+
 app.post("/api/user/change-password", authenticate, async (req, res) => {
   try {
     const { current_password, new_password } = req.body;
