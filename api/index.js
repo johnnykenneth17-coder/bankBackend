@@ -618,27 +618,33 @@ app.put("/api/user/profile", authenticate, async (req, res) => {
 app.post("/api/user/change-password", authenticate, async (req, res) => {
   try {
     const { current_password, new_password } = req.body;
-
+    
+    console.log("Change password request for user:", req.user.id);
+    
     // Verify current password
-    const validPassword = await bcrypt.compare(
-      current_password,
-      req.user.password_hash,
-    );
+    const validPassword = await bcrypt.compare(current_password, req.user.password_hash);
     if (!validPassword) {
       return res.status(401).json({ error: "Current password is incorrect" });
     }
-
+    
     // Hash new password
     const hashedPassword = await bcrypt.hash(new_password, 10);
-
+    
     // Update password
     const { error } = await supabase
       .from("users")
-      .update({ password_hash: hashedPassword })
+      .update({ 
+        password_hash: hashedPassword,
+        updated_at: new Date().toISOString()
+      })
       .eq("id", req.user.id);
-
-    if (error) throw error;
-
+    
+    if (error) {
+      console.error("Database update error:", error);
+      return res.status(500).json({ error: "Failed to update password" });
+    }
+    
+    console.log("Password changed successfully for user:", req.user.id);
     res.json({ message: "Password changed successfully" });
   } catch (error) {
     console.error("Password change error:", error);
