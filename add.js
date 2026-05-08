@@ -1,29 +1,22 @@
-// In auth.js - Make sure password_hash is selected
-const authenticate = async (req, res, next) => {
-    try {
-        const token = req.header('Authorization')?.replace('Bearer ', '');
-        
-        if (!token) {
-            throw new Error();
-        }
+// Get user profile - Updated with age and identification
+app.get("/api/user/profile", authenticate, async (req, res) => {
+  try {
+    const { data: user, error } = await supabase
+      .from("users")
+      .select(
+        "id, email, first_name, last_name, phone, date_of_birth, age, address, city, country, postal_code, identification_type, identification_number, kyc_status, two_factor_enabled, is_frozen, freeze_reason, face_image, created_at",
+      )
+      .eq("id", req.user.id)
+      .single();
 
-        const decoded = jwt.verify(token, process.env.JWT_SECRET);
-        
-        // IMPORTANT: Select password_hash here
-        const { data: user, error } = await supabase
-            .from('users')
-            .select('id, email, first_name, last_name, role, is_active, is_frozen, freeze_reason, password_hash, phone, kyc_status')
-            .eq('id', decoded.userId)
-            .single();
+    if (error) throw error;
 
-        if (error || !user || !user.is_active) {
-            throw new Error();
-        }
+    console.log("Profile fetched for user:", user.id);
+    console.log("Face image in profile:", user.face_image ? "Yes" : "No");
 
-        req.user = user;
-        req.token = token;
-        next();
-    } catch (error) {
-        res.status(401).json({ error: 'Please authenticate' });
-    }
-};
+    res.json(user);
+  } catch (error) {
+    console.error("Profile fetch error:", error);
+    res.status(500).json({ error: "Failed to fetch profile" });
+  }
+});

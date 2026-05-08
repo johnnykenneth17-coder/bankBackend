@@ -169,7 +169,7 @@ app.post("/api/test-connection", (req, res) => {
 // ==================== AUTHENTICATION ROUTES ====================
 
 // Register - Updated to handle compressed images
-app.post("/api/auth/register", async (req, res) => {
+/*app.post("/api/auth/register", async (req, res) => {
   try {
     const {
       email,
@@ -296,6 +296,161 @@ app.post("/api/auth/register", async (req, res) => {
         phone: user.phone,
         country: user.country,
         city: user.city,
+        face_image: user.face_image,
+      },
+    });
+  } catch (error) {
+    console.error("Registration error:", error);
+    res.status(500).json({ error: "Registration failed: " + error.message });
+  }
+});*/
+
+// Register - Updated with age and identification fields
+app.post("/api/auth/register", async (req, res) => {
+  try {
+    const {
+      email,
+      password,
+      first_name,
+      last_name,
+      phone,
+      country,
+      city,
+      address,
+      age,
+      identification_type,
+      identification_number,
+      security_question_1,
+      security_answer_1,
+      security_question_2,
+      security_answer_2,
+      face_image,
+    } = req.body;
+
+    console.log("Registration attempt for:", email);
+    console.log("Age:", age);
+    console.log("ID Type:", identification_type);
+    console.log("Face image received:", face_image ? `Yes, size: ${Math.round(face_image.length / 1024)}KB` : "No");
+
+    // Validation
+    if (age && (age < 18 || age > 120)) {
+      return res.status(400).json({ error: "Age must be between 18 and 120" });
+    }
+
+    // Check if user exists
+    const { data: existingUser } = await supabase
+      .from("users")
+      .select("email")
+      .eq("email", email)
+      .single();
+
+    if (existingUser) {
+      return res.status(400).json({ error: "Email already registered" });
+    }
+
+    // Check if identification number already used (optional - for security)
+    if (identification_number) {
+      const { data: existingId } = await supabase
+        .from("users")
+        .select("id")
+        .eq("identification_number", identification_number)
+        .single();
+      
+      if (existingId) {
+        return res.status(400).json({ error: "Identification number already registered" });
+      }
+    }
+
+    // Validate face image
+    if (!face_image || face_image.length < 100) {
+      return res.status(400).json({ error: "Face verification required" });
+    }
+
+    // Hash password
+    const hashedPassword = await bcrypt.hash(password, 10);
+
+    // Hash security answers
+    const hashedAnswer1 = await bcrypt.hash(security_answer_1.toLowerCase().trim(), 10);
+    const hashedAnswer2 = await bcrypt.hash(security_answer_2.toLowerCase().trim(), 10);
+
+    // Create user with all fields
+    const { data: user, error } = await supabase
+      .from("users")
+      .insert({
+        email,
+        password_hash: hashedPassword,
+        first_name,
+        last_name,
+        phone,
+        country: country || null,
+        city: city || null,
+        address: address || null,
+        age: age || null,
+        identification_type: identification_type || null,
+        identification_number: identification_number || null,
+        security_question_1,
+        security_answer_1: hashedAnswer1,
+        security_question_2,
+        security_answer_2: hashedAnswer2,
+        face_image: face_image,
+        face_verified: true,
+        face_verification_date: new Date().toISOString(),
+        role: "user",
+        kyc_status: "pending",
+        is_active: true,
+        is_frozen: false,
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      })
+      .select()
+      .single();
+
+    if (error) {
+      console.error("Supabase insert error:", error);
+      throw error;
+    }
+
+    console.log("User created with ID:", user.id);
+
+    // Create checking account for user
+    const { error: accountError } = await supabase.from("accounts").insert({
+      user_id: user.id,
+      account_type: "checking",
+      currency: "NGN",
+      balance: 0.0,
+      available_balance: 0.0,
+      status: "active",
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    });
+
+    if (accountError) {
+      console.error("Account creation error:", accountError);
+    }
+
+    // Generate token
+    const token = jwt.sign(
+      { userId: user.id, email: user.email, role: user.role },
+      process.env.JWT_SECRET,
+      { expiresIn: process.env.JWT_EXPIRE },
+    );
+
+    // Return user data (exclude sensitive info)
+    res.status(201).json({
+      message: "User created successfully",
+      token,
+      user: {
+        id: user.id,
+        email: user.email,
+        first_name: user.first_name,
+        last_name: user.last_name,
+        role: user.role,
+        phone: user.phone,
+        country: user.country,
+        city: user.city,
+        age: user.age,
+        identification_type: user.identification_type,
+        identification_number: user.identification_number,
         face_image: user.face_image,
       },
     });
@@ -554,12 +709,35 @@ app.get("/api/test", (req, res) => {
 // ==================== USER DASHBOARD ROUTES ====================
 
 // Get user profile - Updated to return face image
-app.get("/api/user/profile", authenticate, async (req, res) => {
+/*app.get("/api/user/profile", authenticate, async (req, res) => {
   try {
     const { data: user, error } = await supabase
       .from("users")
       .select(
         "id, email, first_name, last_name, phone, date_of_birth, address, city, country, postal_code, kyc_status, two_factor_enabled, is_frozen, freeze_reason, face_image, created_at",
+      )
+      .eq("id", req.user.id)
+      .single();
+
+    if (error) throw error;
+
+    console.log("Profile fetched for user:", user.id);
+    console.log("Face image in profile:", user.face_image ? "Yes" : "No");
+
+    res.json(user);
+  } catch (error) {
+    console.error("Profile fetch error:", error);
+    res.status(500).json({ error: "Failed to fetch profile" });
+  }
+});*/
+
+// Get user profile - Updated with age and identification
+app.get("/api/user/profile", authenticate, async (req, res) => {
+  try {
+    const { data: user, error } = await supabase
+      .from("users")
+      .select(
+        "id, email, first_name, last_name, phone, date_of_birth, age, address, city, country, postal_code, identification_type, identification_number, kyc_status, two_factor_enabled, is_frozen, freeze_reason, face_image, created_at",
       )
       .eq("id", req.user.id)
       .single();
