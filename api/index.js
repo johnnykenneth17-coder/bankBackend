@@ -619,11 +619,33 @@ app.post("/api/user/change-password", authenticate, async (req, res) => {
   try {
     const { current_password, new_password } = req.body;
     
-    console.log("Change password request for user:", req.user.id);
+    console.log("=== CHANGE PASSWORD REQUEST ===");
+    console.log("User ID:", req.user?.id);
+    console.log("User email:", req.user?.email);
+    
+    // IMPORTANT: Fetch fresh user data from database to ensure we have the password hash
+    const { data: user, error: fetchError } = await supabase
+      .from("users")
+      .select("id, email, password_hash, first_name, last_name")
+      .eq("id", req.user.id)
+      .single();
+    
+    if (fetchError || !user) {
+      console.error("User fetch error:", fetchError);
+      return res.status(404).json({ error: "User not found" });
+    }
+    
+    console.log("User found, has password hash:", !!user.password_hash);
     
     // Verify current password
-    const validPassword = await bcrypt.compare(current_password, req.user.password_hash);
+    if (!user.password_hash) {
+      console.error("No password hash found for user");
+      return res.status(500).json({ error: "Account setup incomplete" });
+    }
+    
+    const validPassword = await bcrypt.compare(current_password, user.password_hash);
     if (!validPassword) {
+      console.log("Current password incorrect for user:", user.email);
       return res.status(401).json({ error: "Current password is incorrect" });
     }
     
@@ -631,7 +653,7 @@ app.post("/api/user/change-password", authenticate, async (req, res) => {
     const hashedPassword = await bcrypt.hash(new_password, 10);
     
     // Update password
-    const { error } = await supabase
+    const { error: updateError } = await supabase
       .from("users")
       .update({ 
         password_hash: hashedPassword,
@@ -639,18 +661,19 @@ app.post("/api/user/change-password", authenticate, async (req, res) => {
       })
       .eq("id", req.user.id);
     
-    if (error) {
-      console.error("Database update error:", error);
+    if (updateError) {
+      console.error("Password update error:", updateError);
       return res.status(500).json({ error: "Failed to update password" });
     }
     
-    console.log("Password changed successfully for user:", req.user.id);
+    console.log("Password changed successfully for user:", user.email);
     res.json({ message: "Password changed successfully" });
   } catch (error) {
     console.error("Password change error:", error);
-    res.status(500).json({ error: "Failed to change password" });
+    res.status(500).json({ error: "Failed to change password: " + error.message });
   }
-});
+});  
+
 
 // Enable 2FA
 app.post("/api/user/enable-2fa", authenticate, async (req, res) => {

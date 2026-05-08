@@ -1,40 +1,29 @@
-// In auth.js - Make sure this is correct
+// In auth.js - Make sure password_hash is selected
 const authenticate = async (req, res, next) => {
     try {
-        const authHeader = req.header('Authorization');
-        console.log("Auth header:", authHeader ? "Present" : "Missing");
-        
-        const token = authHeader?.replace('Bearer ', '');
+        const token = req.header('Authorization')?.replace('Bearer ', '');
         
         if (!token) {
-            console.log("No token provided");
-            return res.status(401).json({ error: 'Please authenticate' });
+            throw new Error();
         }
 
         const decoded = jwt.verify(token, process.env.JWT_SECRET);
-        console.log("Token decoded for user:", decoded.userId);
         
+        // IMPORTANT: Select password_hash here
         const { data: user, error } = await supabase
             .from('users')
-            .select('*')
+            .select('id, email, first_name, last_name, role, is_active, is_frozen, freeze_reason, password_hash, phone, kyc_status')
             .eq('id', decoded.userId)
             .single();
 
-        if (error || !user) {
-            console.log("User not found:", error);
-            return res.status(401).json({ error: 'User not found' });
-        }
-        
-        if (!user.is_active) {
-            console.log("User inactive:", user.id);
-            return res.status(401).json({ error: 'Account is deactivated' });
+        if (error || !user || !user.is_active) {
+            throw new Error();
         }
 
         req.user = user;
         req.token = token;
         next();
     } catch (error) {
-        console.error("Authentication error:", error.message);
         res.status(401).json({ error: 'Please authenticate' });
     }
 };
