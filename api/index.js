@@ -3953,11 +3953,15 @@ app.get("/api/user/push-settings", authenticate, async (req, res) => {
   }
 });
 
-// Update push notification settings
+// Update push notification settings (FIXED - handles duplicate key properly)
 app.post("/api/user/push-settings", authenticate, async (req, res) => {
   try {
+    console.log("Updating push settings for user:", req.user.id);
+    console.log("Request body:", req.body);
+    
     const { transfers, savings, promotions, security, bills, notifications_enabled } = req.body;
 
+    // Prepare update data
     const updateData = {
       updated_at: new Date().toISOString()
     };
@@ -3969,24 +3973,58 @@ app.post("/api/user/push-settings", authenticate, async (req, res) => {
     if (bills !== undefined) updateData.bills = bills;
     if (notifications_enabled !== undefined) updateData.notifications_enabled = notifications_enabled;
 
+    // CRITICAL FIX: Use upsert with onConflict to handle duplicate key properly
     const { data, error } = await supabase
       .from("user_push_settings")
       .upsert({
         user_id: req.user.id,
         ...updateData
+      }, {
+        onConflict: 'user_id',  // This tells Supabase to update if user_id exists
+        ignoreDuplicates: false  // Don't ignore, update instead
       })
       .select()
       .single();
 
     if (error) {
-      console.error("Push settings update error:", error);
-      return res.status(500).json({ error: "Failed to update push settings" });
+      console.error("Upsert error:", error);
+      
+      // Fallback: Try update first, then insert
+      const { data: updateData_result, error: updateError } = await supabase
+        .from("user_push_settings")
+        .update(updateData)
+        .eq("user_id", req.user.id)
+        .select()
+        .single();
+      
+      if (updateError || !updateData_result) {
+        // If update fails, try insert
+        const { data: insertData, error: insertError } = await supabase
+          .from("user_push_settings")
+          .insert({
+            user_id: req.user.id,
+            ...updateData
+          })
+          .select()
+          .single();
+        
+        if (insertError) {
+          console.error("Insert fallback error:", insertError);
+          return res.status(500).json({ error: "Failed to save push settings: " + insertError.message });
+        }
+        
+        return res.json({ success: true, settings: insertData });
+      }
+      
+      return res.json({ success: true, settings: updateData_result });
     }
 
+    console.log("Push settings saved successfully:", data);
     res.json({ success: true, settings: data });
+    
   } catch (error) {
     console.error("Push settings update error:", error);
-    res.status(500).json({ error: "Failed to update push settings" });
+    res.status(500).json({ error: "Failed to update push settings: " + error.message });
   }
 });
 
