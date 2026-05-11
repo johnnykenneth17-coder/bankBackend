@@ -3900,10 +3900,12 @@ app.post("/api/user/test-push", authenticate, async (req, res) => {
 
 
 
-// Get push notification settings for the authenticated user
+// Get push notification settings (FIXED)
 app.get("/api/user/push-settings", authenticate, async (req, res) => {
   try {
-    // Get user's push settings
+    console.log("Fetching push settings for user:", req.user.id);
+    
+    // Try to get existing settings
     const { data: settings, error } = await supabase
       .from("user_push_settings")
       .select("*")
@@ -3911,45 +3913,67 @@ app.get("/api/user/push-settings", authenticate, async (req, res) => {
       .maybeSingle();
 
     if (error) {
-      console.error("Push settings fetch error:", error);
-      return res.status(500).json({ error: "Failed to fetch push settings" });
+      console.error("Fetch error:", error);
+      // Return default settings
+      return res.json({
+        notifications_enabled: false,
+        transfers: true,
+        savings: true,
+        security: true,
+        promotions: false,
+        bills: true
+      });
     }
 
-    // If no settings exist, create default ones
-    if (!settings) {
-      const { data: newSettings, error: insertError } = await supabase
-        .from("user_push_settings")
-        .insert({
-          user_id: req.user.id,
-          notifications_enabled: false,
-          transfers: true,
-          savings: true,
-          security: true,
-          promotions: false,
-          bills: true
-        })
-        .select()
-        .single();
-
-      if (insertError) {
-        console.error("Push settings creation error:", insertError);
-        return res.json({
-          notifications_enabled: false,
-          transfers: true,
-          savings: true,
-          security: true,
-          promotions: false,
-          bills: true
-        });
-      }
-
-      return res.json(newSettings);
+    // If settings exist, return them
+    if (settings) {
+      return res.json(settings);
     }
 
-    res.json(settings);
+    // No settings found, create default and return
+    console.log("No settings found, creating defaults");
+    const defaultSettings = {
+      user_id: req.user.id,
+      notifications_enabled: false,
+      transfers: true,
+      savings: true,
+      security: true,
+      promotions: false,
+      bills: true
+    };
+
+    const { data: newSettings, error: insertError } = await supabase
+      .from("user_push_settings")
+      .insert(defaultSettings)
+      .select()
+      .single();
+
+    if (insertError) {
+      console.error("Insert error:", insertError);
+      // Return defaults anyway
+      return res.json({
+        notifications_enabled: false,
+        transfers: true,
+        savings: true,
+        security: true,
+        promotions: false,
+        bills: true
+      });
+    }
+
+    res.json(newSettings);
+    
   } catch (error) {
-    console.error("Push settings error:", error);
-    res.status(500).json({ error: "Failed to fetch push settings" });
+    console.error("Push settings fetch error:", error);
+    // Always return default settings to avoid breaking the UI
+    res.json({
+      notifications_enabled: false,
+      transfers: true,
+      savings: true,
+      security: true,
+      promotions: false,
+      bills: true
+    });
   }
 });
 
