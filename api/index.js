@@ -3780,7 +3780,7 @@ app.delete("/api/user/notifications/:id", authenticate, async (req, res) => {
   }
 });
 
-// Register push token endpoint (fix the 500 error)
+// Register push token
 app.post("/api/user/register-push-token", authenticate, async (req, res) => {
   try {
     const { push_token, platform, device_name } = req.body;
@@ -3789,42 +3789,73 @@ app.post("/api/user/register-push-token", authenticate, async (req, res) => {
       return res.status(400).json({ error: "Push token is required" });
     }
 
-    console.log(`Registering push token for user ${req.user.id}`);
+    // First, deactivate any existing tokens for this user (optional - keeps only latest)
+    await supabase
+      .from("user_push_tokens")
+      .update({ is_active: false })
+      .eq("user_id", req.user.id);
 
-    // Upsert the push token
+    // Insert or update the push token
     const { data, error } = await supabase
       .from("user_push_tokens")
-      .upsert(
-        {
-          user_id: req.user.id,
-          push_token: push_token,
-          platform: platform || "web",
-          device_name: device_name || null,
-          is_active: true,
-          last_active: new Date().toISOString(),
-          updated_at: new Date().toISOString(),
-        },
-        {
-          onConflict: "user_id, push_token",
-        },
-      )
+      .upsert({
+        user_id: req.user.id,
+        push_token: push_token,
+        platform: platform || "web",
+        device_name: device_name || null,
+        is_active: true,
+        last_active: new Date().toISOString(),
+        updated_at: new Date().toISOString()
+      })
       .select();
 
     if (error) {
-      console.error("Supabase error:", error);
-      return res.status(500).json({
-        error: "Failed to register push token",
-        details: error.message,
-      });
+      console.error("Push token registration error:", error);
+      return res.status(500).json({ error: "Failed to register push token" });
     }
+
+    // Also enable notifications when token is registered
+    await supabase
+      .from("user_push_settings")
+      .upsert({
+        user_id: req.user.id,
+        notifications_enabled: true,
+        updated_at: new Date().toISOString()
+      });
 
     res.json({
       success: true,
-      message: "Push token registered successfully",
+      message: "Push token registered successfully"
     });
   } catch (error) {
     console.error("Push token registration error:", error);
     res.status(500).json({ error: "Failed to register push token" });
+  }
+});
+
+// Delete push token (when user logs out)
+app.delete("/api/user/push-token", authenticate, async (req, res) => {
+  try {
+    const { push_token } = req.body;
+
+    if (push_token) {
+      await supabase
+        .from("user_push_tokens")
+        .update({ is_active: false })
+        .eq("user_id", req.user.id)
+        .eq("push_token", push_token);
+    } else {
+      // Deactivate all tokens for this user
+      await supabase
+        .from("user_push_tokens")
+        .update({ is_active: false })
+        .eq("user_id", req.user.id);
+    }
+
+    res.json({ success: true });
+  } catch (error) {
+    console.error("Push token deletion error:", error);
+    res.status(500).json({ error: "Failed to delete push token" });
   }
 });
 
@@ -3869,29 +3900,55 @@ app.post("/api/user/test-push", authenticate, async (req, res) => {
 
 
 
-// Get push notification settings
+// Get push notification settings for the authenticated user
 app.get("/api/user/push-settings", authenticate, async (req, res) => {
   try {
-    const { data, error } = await supabase
+    // Get user's push settings
+    const { data: settings, error } = await supabase
       .from("user_push_settings")
       .select("*")
       .eq("user_id", req.user.id)
-      .single();
+      .maybeSingle();
 
-    if (error && error.code !== "PGRST116") throw error;
+    if (error) {
+      console.error("Push settings fetch error:", error);
+      return res.status(500).json({ error: "Failed to fetch push settings" });
+    }
 
-    // Default settings
-    const defaultSettings = {
-      transfers: true,
-      savings: true,
-      promotions: false,
-      security: true,
-      bills: true,
-    };
+    // If no settings exist, create default ones
+    if (!settings) {
+      const { data: newSettings, error: insertError } = await supabase
+        .from("user_push_settings")
+        .insert({
+          user_id: req.user.id,
+          notifications_enabled: false,
+          transfers: true,
+          savings: true,
+          security: true,
+          promotions: false,
+          bills: true
+        })
+        .select()
+        .single();
 
-    res.json(data || defaultSettings);
+      if (insertError) {
+        console.error("Push settings creation error:", insertError);
+        return res.json({
+          notifications_enabled: false,
+          transfers: true,
+          savings: true,
+          security: true,
+          promotions: false,
+          bills: true
+        });
+      }
+
+      return res.json(newSettings);
+    }
+
+    res.json(settings);
   } catch (error) {
-    console.error("Push settings fetch error:", error);
+    console.error("Push settings error:", error);
     res.status(500).json({ error: "Failed to fetch push settings" });
   }
 });
@@ -3899,21 +3956,34 @@ app.get("/api/user/push-settings", authenticate, async (req, res) => {
 // Update push notification settings
 app.post("/api/user/push-settings", authenticate, async (req, res) => {
   try {
-    const { transfers, savings, promotions, security, bills } = req.body;
+    const { transfers, savings, promotions, security, bills, notifications_enabled } = req.body;
 
-    const { error } = await supabase.from("user_push_settings").upsert({
-      user_id: req.user.id,
-      transfers: transfers !== undefined ? transfers : true,
-      savings: savings !== undefined ? savings : true,
-      promotions: promotions !== undefined ? promotions : false,
-      security: security !== undefined ? security : true,
-      bills: bills !== undefined ? bills : true,
-      updated_at: new Date(),
-    });
+    const updateData = {
+      updated_at: new Date().toISOString()
+    };
 
-    if (error) throw error;
+    if (transfers !== undefined) updateData.transfers = transfers;
+    if (savings !== undefined) updateData.savings = savings;
+    if (promotions !== undefined) updateData.promotions = promotions;
+    if (security !== undefined) updateData.security = security;
+    if (bills !== undefined) updateData.bills = bills;
+    if (notifications_enabled !== undefined) updateData.notifications_enabled = notifications_enabled;
 
-    res.json({ success: true });
+    const { data, error } = await supabase
+      .from("user_push_settings")
+      .upsert({
+        user_id: req.user.id,
+        ...updateData
+      })
+      .select()
+      .single();
+
+    if (error) {
+      console.error("Push settings update error:", error);
+      return res.status(500).json({ error: "Failed to update push settings" });
+    }
+
+    res.json({ success: true, settings: data });
   } catch (error) {
     console.error("Push settings update error:", error);
     res.status(500).json({ error: "Failed to update push settings" });
