@@ -13,20 +13,90 @@ const router = express.Router();
 const nodemailer = require("nodemailer");
 const webpush = require("web-push");
 
-// Add this if missing (adjust path if your folder structure is different)
-const {
-  authenticate,
-  authorizeAdmin,
-  checkAccountFrozen,
-  logAdminAction,
-  otpRateLimiter,
-} = require("../middleware/auth"); // ← relative path from api/index.js
-
 // ONLY NOW declare app
 const app = express();
 
+const rateLimit = require("express-rate-limit");
+//const helmet = require('helmet');
+const crypto = require("crypto");
+
+// Store failed attempts in memory (use Redis in production)
+const failedAttempts = new Map();
+const suspiciousActivities = new Map();
+
+// Enhanced rate limiting
+const strictLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 5,
+  message: { error: "Too many requests. Please try again later." },
+  skipSuccessfulRequests: true,
+  keyGenerator: (req) => {
+    return req.ip + (req.body.email || "");
+  },
+});
+
+const authLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: 10,
+  message: { error: "Too many authentication attempts. Try again later." },
+  skipSuccessfulRequests: true,
+});
+
+const transferLimiter = rateLimit({
+  windowMs: 60 * 60 * 1000,
+  max: 20,
+  message: { error: "Transfer limit reached. Try again later." },
+});
+
+// Enhanced security headers
+app.use(
+  helmet({
+    contentSecurityPolicy: {
+      directives: {
+        defaultSrc: ["'self'"],
+        styleSrc: [
+          "'self'",
+          "'unsafe-inline'",
+          "https://fonts.googleapis.com",
+          "https://cdnjs.cloudflare.com",
+        ],
+        scriptSrc: [
+          "'self'",
+          "'unsafe-inline'",
+          "'unsafe-eval'",
+          "https://cdnjs.cloudflare.com",
+          "https://cdn.jsdelivr.net",
+        ],
+        fontSrc: [
+          "'self'",
+          "https://fonts.gstatic.com",
+          "https://cdnjs.cloudflare.com",
+        ],
+        imgSrc: ["'self'", "data:", "https:"],
+        connectSrc: [
+          "'self'",
+          "https://bank-backend-blush.vercel.app",
+          "https://*.supabase.co",
+        ],
+        frameSrc: ["'none'"],
+        objectSrc: ["'none'"],
+        baseUri: ["'self'"],
+        formAction: ["'self'"],
+        upgradeInsecureRequests: [],
+      },
+    },
+    hsts: {
+      maxAge: 31536000,
+      includeSubDomains: true,
+      preload: true,
+    },
+    noSniff: true,
+    referrerPolicy: { policy: "strict-origin-when-cross-origin" },
+  }),
+);
+
 // Security middleware FIRST (after app is declared)
-app.use(helmet());
+//app.use(helmet());
 
 // Then cors
 app.use(
@@ -64,12 +134,6 @@ app.use(express.json());
 app.use(morgan("combined"));
 app.use(express.json({ limit: "2mb" }));
 app.use(express.urlencoded({ extended: true, limit: "2mb" }));
-
-// Import the main router
-//const mainRouter = require("./router");
-
-// Mount all API routes - THIS GOES BEFORE any other route handlers
-//app.use("/api", mainRouter);
 
 // Supabase client
 const supabase = createClient(
@@ -132,6 +196,311 @@ const transporter = nodemailer.createTransport({
   },
 });
 
+// Fraud detection function
+async function detectFraudulentActivity(userId, transferData) {
+  const reasons = [];
+  let severity = "low";
+
+  try {
+    // Get recent transactions (last 24 hours)
+    const { data: recentTx } = await supabase
+      .from("transactions")
+      .select("amount, created_at")
+      .eq("from_user_id", userId)
+      .gte(
+        "created_at",
+        new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString(),
+      );
+
+    // Check for unusually large amount
+    const dailyTotal = (recentTx || []).reduce((sum, tx) => sum + tx.amount, 0);
+    if (transferData.amount > 500000) {
+      reasons.push("Amount exceeds ₦500,000 threshold");
+      severity = "high";
+    }
+
+    // Check daily limit
+    if (dailyTotal + transferData.amount > 1000000) {
+      reasons.push("Daily transfer limit exceeded");
+      severity = "high";
+    }
+
+    // Check for rapid successive transfers
+    const lastMinute = (recentTx || []).filter(
+      (tx) => new Date(tx.created_at) > new Date(Date.now() - 60 * 1000),
+    );
+    if (lastMinute.length > 3) {
+      reasons.push("Multiple transfers in short period");
+      severity = "medium";
+    }
+
+    // Check if beneficiary is new
+    const { data: existingBeneficiary } = await supabase
+      .from("beneficiaries")
+      .select("id")
+      .eq("user_id", userId)
+      .eq("account_number", transferData.to_account);
+
+    if (!existingBeneficiary || existingBeneficiary.length === 0) {
+      reasons.push("Transfer to new beneficiary");
+      severity = severity === "high" ? "high" : "medium";
+    }
+
+    // Check for unusual time (late night)
+    const hour = new Date().getHours();
+    if (hour >= 23 || hour <= 5) {
+      reasons.push("Unusual transaction time");
+      severity = severity === "high" ? "high" : "medium";
+    }
+  } catch (error) {
+    console.error("Fraud detection error:", error);
+  }
+
+  return {
+    isSuspicious: reasons.length > 0,
+    reasons,
+    severity,
+    reference: reasons.length > 0 ? `FLAG${Date.now()}` : null,
+  };
+}
+
+// Security logging function
+async function logSecurityEvent(userId, eventType, details = {}) {
+  try {
+    await supabase.from("security_logs").insert({
+      user_id: userId,
+      event_type: eventType,
+      details: details,
+      ip_address: details.ip || null,
+      timestamp: new Date().toISOString(),
+    });
+  } catch (error) {
+    console.error("Security logging error:", error);
+  }
+}
+
+// Notification function
+async function createNotification(userId, title, message, type = "info") {
+  try {
+    await supabase.from("notifications").insert({
+      user_id: userId,
+      title: title,
+      message: message,
+      type: type,
+      created_at: new Date().toISOString(),
+    });
+  } catch (error) {
+    console.error("Notification error:", error);
+  }
+}
+
+// OTP email function
+async function sendOTPEmail(email, otp) {
+  try {
+    await transporter.sendMail({
+      from: process.env.SMTP_FROM,
+      to: email,
+      subject: "Your FEECENT Verification Code",
+      html: `
+        <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+          <h2 style="color: #6b21a8;">FEECENT Security Code</h2>
+          <p>Your verification code is:</p>
+          <div style="font-size: 32px; font-weight: bold; padding: 20px; background: #f3f4f6; text-align: center; letter-spacing: 5px;">
+            ${otp}
+          </div>
+          <p>This code will expire in 10 minutes.</p>
+          <p>If you didn't request this, please ignore this email.</p>
+          <hr>
+          <p style="font-size: 12px; color: #6b7280;">FEECENT - Secure Digital Banking</p>
+        </div>
+      `,
+    });
+  } catch (error) {
+    console.error("OTP email error:", error);
+  }
+}
+
+// OTP SMS function
+async function sendOTPSMS(phoneNumber, otp) {
+  // Implement SMS sending via service like Twilio, Africa's Talking, etc.
+  console.log(`Sending OTP ${otp} to ${phoneNumber}`);
+}
+
+// Add this if missing (adjust path if your folder structure is different)
+const {
+  authenticate,
+  authorizeAdmin,
+  checkAccountFrozen,
+  logAdminAction,
+  otpRateLimiter,
+} = require("../middleware/auth"); // ← relative path from api/index.js
+
+// ==================== SECURITY MONITORING ENDPOINTS ====================
+
+// Log security events
+app.post("/api/security/events", authenticate, async (req, res) => {
+  try {
+    const { events } = req.body;
+
+    if (!events || !Array.isArray(events)) {
+      return res.status(400).json({ error: "Invalid events data" });
+    }
+
+    // Log each event to security_logs table
+    for (const event of events) {
+      await supabase.from("security_logs").insert({
+        user_id: req.user.id,
+        event_type: event.type,
+        details: event.details,
+        ip_address: req.ip,
+        user_agent: event.userAgent || req.headers["user-agent"],
+        timestamp: new Date(event.timestamp || Date.now()),
+      });
+    }
+
+    res.json({ success: true, logged: events.length });
+  } catch (error) {
+    console.error("Security events error:", error);
+    // Always return 200 to avoid client-side errors
+    res.json({ success: false, error: error.message });
+  }
+});
+
+// Send heartbeat (keep session alive)
+app.post("/api/security/heartbeat", authenticate, async (req, res) => {
+  try {
+    // Update last activity timestamp in user_sessions table
+    const sessionToken = req.headers.authorization?.split(" ")[1];
+
+    if (sessionToken) {
+      await supabase
+        .from("user_sessions")
+        .update({ last_activity: new Date().toISOString() })
+        .eq("session_token", sessionToken)
+        .eq("user_id", req.user.id)
+        .eq("is_active", true);
+    }
+
+    res.json({ success: true, timestamp: new Date().toISOString() });
+  } catch (error) {
+    console.error("Heartbeat error:", error);
+    res.json({ success: false });
+  }
+});
+
+// Check if session is compromised
+app.get("/api/security/check-session", authenticate, async (req, res) => {
+  try {
+    const sessionToken = req.headers.authorization?.split(" ")[1];
+
+    if (!sessionToken) {
+      return res.json({ isCompromised: false });
+    }
+
+    // Check for multiple active sessions from different IPs/UserAgents
+    const { data: sessions, error } = await supabase
+      .from("user_sessions")
+      .select("id, ip_address, user_agent, created_at")
+      .eq("user_id", req.user.id)
+      .eq("is_active", true)
+      .neq("session_token", sessionToken);
+
+    if (error) {
+      console.error("Session check error:", error);
+      return res.json({ isCompromised: false });
+    }
+
+    // If there are multiple active sessions from different locations within a short time
+    const suspicious = sessions && sessions.length > 2;
+
+    res.json({
+      isCompromised: suspicious,
+      active_sessions_count: sessions?.length || 0,
+    });
+  } catch (error) {
+    console.error("Session check error:", error);
+    res.json({ isCompromised: false });
+  }
+});
+
+// Get user's security events (for their own dashboard)
+app.get("/api/user/security-events", authenticate, async (req, res) => {
+  try {
+    const { limit = 50 } = req.query;
+
+    const { data: events, error } = await supabase
+      .from("security_logs")
+      .select("*")
+      .eq("user_id", req.user.id)
+      .order("timestamp", { ascending: false })
+      .limit(parseInt(limit));
+
+    if (error) throw error;
+
+    res.json({ events: events || [] });
+  } catch (error) {
+    console.error("Security events fetch error:", error);
+    res.status(500).json({ error: "Failed to fetch security events" });
+  }
+});
+
+// Revoke all other sessions (security feature)
+app.post(
+  "/api/security/revoke-other-sessions",
+  authenticate,
+  async (req, res) => {
+    try {
+      const currentToken = req.headers.authorization?.split(" ")[1];
+
+      if (!currentToken) {
+        return res.status(400).json({ error: "Invalid session" });
+      }
+
+      // Deactivate all other sessions
+      const { error } = await supabase
+        .from("user_sessions")
+        .update({ is_active: false, expires_at: new Date().toISOString() })
+        .eq("user_id", req.user.id)
+        .neq("session_token", currentToken);
+
+      if (error) throw error;
+
+      // Log security event
+      await supabase.from("security_logs").insert({
+        user_id: req.user.id,
+        event_type: "revoked_other_sessions",
+        details: { action: "user_initiated" },
+        ip_address: req.ip,
+      });
+
+      res.json({ success: true, message: "Other sessions revoked" });
+    } catch (error) {
+      console.error("Revoke sessions error:", error);
+      res.status(500).json({ error: "Failed to revoke sessions" });
+    }
+  },
+);
+
+// Validate session endpoint
+app.get("/api/auth/validate-session", authenticate, async (req, res) => {
+  try {
+    // Check if user still exists and is active
+    const { data: user, error } = await supabase
+      .from("users")
+      .select("id, is_active, is_frozen")
+      .eq("id", req.user.id)
+      .single();
+
+    if (error || !user || !user.is_active || user.is_frozen) {
+      return res.status(401).json({ error: "Session invalid" });
+    }
+
+    res.json({ valid: true });
+  } catch (error) {
+    res.status(401).json({ error: "Session validation failed" });
+  }
+});
+
 // ==================== API CONNECTION TEST ENDPOINT ====================
 // Simple test endpoint to verify API is running and properly deployed
 app.get("/api/test-connection", (req, res) => {
@@ -168,143 +537,6 @@ app.post("/api/test-connection", (req, res) => {
 
 // ==================== AUTHENTICATION ROUTES ====================
 
-// Register - Updated to handle compressed images
-/*app.post("/api/auth/register", async (req, res) => {
-  try {
-    const {
-      email,
-      password,
-      first_name,
-      last_name,
-      phone,
-      country,
-      city,
-      address,
-      security_question_1,
-      security_answer_1,
-      security_question_2,
-      security_answer_2,
-      face_image,
-    } = req.body;
-
-    console.log("Registration attempt for:", email);
-    console.log(
-      "Face image received:",
-      face_image
-        ? `Yes, size: ${Math.round(face_image.length / 1024)}KB`
-        : "No",
-    );
-
-    // Check if user exists
-    const { data: existingUser } = await supabase
-      .from("users")
-      .select("email")
-      .eq("email", email)
-      .single();
-
-    if (existingUser) {
-      return res.status(400).json({ error: "Email already registered" });
-    }
-
-    // Validate face image (should be present)
-    if (!face_image || face_image.length < 100) {
-      return res.status(400).json({ error: "Face verification required" });
-    }
-
-    // Hash password
-    const hashedPassword = await bcrypt.hash(password, 10);
-
-    // Hash security answers
-    const hashedAnswer1 = await bcrypt.hash(
-      security_answer_1.toLowerCase().trim(),
-      10,
-    );
-    const hashedAnswer2 = await bcrypt.hash(
-      security_answer_2.toLowerCase().trim(),
-      10,
-    );
-
-    // Create user with all fields
-    const { data: user, error } = await supabase
-      .from("users")
-      .insert({
-        email,
-        password_hash: hashedPassword,
-        first_name,
-        last_name,
-        phone,
-        country: country || null,
-        city: city || null,
-        address: address || null,
-        security_question_1,
-        security_answer_1: hashedAnswer1,
-        security_question_2,
-        security_answer_2: hashedAnswer2,
-        face_image: face_image,
-        face_verified: true,
-        face_verification_date: new Date().toISOString(),
-        role: "user",
-        kyc_status: "pending",
-        is_active: true,
-        is_frozen: false,
-        created_at: new Date().toISOString(),
-        updated_at: new Date().toISOString(),
-      })
-      .select()
-      .single();
-
-    if (error) {
-      console.error("Supabase insert error:", error);
-      throw error;
-    }
-
-    console.log("User created with ID:", user.id);
-
-    // Create checking account for user
-    const { error: accountError } = await supabase.from("accounts").insert({
-      user_id: user.id,
-      account_type: "checking",
-      currency: "NGN",
-      balance: 0.0,
-      available_balance: 0.0,
-      status: "active",
-      created_at: new Date().toISOString(),
-      updated_at: new Date().toISOString(),
-    });
-
-    if (accountError) {
-      console.error("Account creation error:", accountError);
-    }
-
-    // Generate token
-    const token = jwt.sign(
-      { userId: user.id, email: user.email, role: user.role },
-      process.env.JWT_SECRET,
-      { expiresIn: process.env.JWT_EXPIRE },
-    );
-
-    // Return user data
-    res.status(201).json({
-      message: "User created successfully",
-      token,
-      user: {
-        id: user.id,
-        email: user.email,
-        first_name: user.first_name,
-        last_name: user.last_name,
-        role: user.role,
-        phone: user.phone,
-        country: user.country,
-        city: user.city,
-        face_image: user.face_image,
-      },
-    });
-  } catch (error) {
-    console.error("Registration error:", error);
-    res.status(500).json({ error: "Registration failed: " + error.message });
-  }
-});*/
-
 // Register - Updated with age and identification fields
 app.post("/api/auth/register", async (req, res) => {
   try {
@@ -330,7 +562,12 @@ app.post("/api/auth/register", async (req, res) => {
     console.log("Registration attempt for:", email);
     console.log("Age:", age);
     console.log("ID Type:", identification_type);
-    console.log("Face image received:", face_image ? `Yes, size: ${Math.round(face_image.length / 1024)}KB` : "No");
+    console.log(
+      "Face image received:",
+      face_image
+        ? `Yes, size: ${Math.round(face_image.length / 1024)}KB`
+        : "No",
+    );
 
     // Validation
     if (age && (age < 18 || age > 120)) {
@@ -355,9 +592,11 @@ app.post("/api/auth/register", async (req, res) => {
         .select("id")
         .eq("identification_number", identification_number)
         .single();
-      
+
       if (existingId) {
-        return res.status(400).json({ error: "Identification number already registered" });
+        return res
+          .status(400)
+          .json({ error: "Identification number already registered" });
       }
     }
 
@@ -370,8 +609,14 @@ app.post("/api/auth/register", async (req, res) => {
     const hashedPassword = await bcrypt.hash(password, 10);
 
     // Hash security answers
-    const hashedAnswer1 = await bcrypt.hash(security_answer_1.toLowerCase().trim(), 10);
-    const hashedAnswer2 = await bcrypt.hash(security_answer_2.toLowerCase().trim(), 10);
+    const hashedAnswer1 = await bcrypt.hash(
+      security_answer_1.toLowerCase().trim(),
+      10,
+    );
+    const hashedAnswer2 = await bcrypt.hash(
+      security_answer_2.toLowerCase().trim(),
+      10,
+    );
 
     // Create user with all fields
     const { data: user, error } = await supabase
@@ -461,7 +706,7 @@ app.post("/api/auth/register", async (req, res) => {
 });
 
 // Login
-app.post("/api/auth/login", async (req, res) => {
+/*app.post("/api/auth/login", async (req, res) => {
   try {
     const { email, password } = req.body;
 
@@ -498,6 +743,148 @@ app.post("/api/auth/login", async (req, res) => {
     // Generate token
     const token = jwt.sign(
       { userId: user.id, email: user.email, role: user.role },
+      process.env.JWT_SECRET,
+      { expiresIn: process.env.JWT_EXPIRE },
+    );
+
+    res.json({
+      token,
+      user: {
+        id: user.id,
+        email: user.email,
+        first_name: user.first_name,
+        last_name: user.last_name,
+        role: user.role,
+        is_frozen: user.is_frozen,
+        kyc_status: user.kyc_status,
+      },
+    });
+  } catch (error) {
+    console.error("Login error:", error);
+    res.status(500).json({ error: "Login failed" });
+  }
+});*/
+
+// Enhanced login with rate limiting and device fingerprint
+app.post("/api/auth/login", authLimiter, async (req, res) => {
+  try {
+    const { email, password, fingerprint } = req.body;
+    const ip = req.ip;
+
+    // Check failed attempts
+    const attemptsKey = `${ip}:${email}`;
+    const attempts = failedAttempts.get(attemptsKey) || {
+      count: 0,
+      firstAttempt: Date.now(),
+    };
+
+    // Reset after 15 minutes
+    if (Date.now() - attempts.firstAttempt > 15 * 60 * 1000) {
+      attempts.count = 0;
+      attempts.firstAttempt = Date.now();
+    }
+
+    if (attempts.count >= 5) {
+      return res.status(429).json({
+        error: "Too many failed attempts. Account temporarily locked.",
+      });
+    }
+
+    // Get user
+    const { data: user, error } = await supabase
+      .from("users")
+      .select("*")
+      .eq("email", email)
+      .single();
+
+    if (error || !user) {
+      attempts.count++;
+      failedAttempts.set(attemptsKey, attempts);
+      return res.status(401).json({ error: "Invalid credentials" });
+    }
+
+    // Check password
+    const validPassword = await bcrypt.compare(password, user.password_hash);
+    if (!validPassword) {
+      attempts.count++;
+      failedAttempts.set(attemptsKey, attempts);
+
+      // Log failed attempt
+      await logSecurityEvent(user.id, "failed_login", { ip, fingerprint });
+
+      return res.status(401).json({ error: "Invalid credentials" });
+    }
+
+    // Check if account is active
+    if (!user.is_active) {
+      return res.status(403).json({ error: "Account is deactivated" });
+    }
+
+    // Check if account is frozen
+    if (user.is_frozen) {
+      return res.status(403).json({
+        error: "Account frozen",
+        freeze_reason: user.freeze_reason,
+        unfreeze_method: user.unfreeze_method,
+      });
+    }
+
+    // Check device fingerprint (if provided)
+    if (
+      fingerprint &&
+      user.device_fingerprint &&
+      fingerprint !== user.device_fingerprint
+    ) {
+      await logSecurityEvent(user.id, "new_device_login", { ip, fingerprint });
+      // Don't block, just notify
+    }
+
+    // Update device fingerprint
+    if (fingerprint && !user.device_fingerprint) {
+      await supabase
+        .from("users")
+        .update({ device_fingerprint: fingerprint })
+        .eq("id", user.id);
+    }
+
+    // Clear failed attempts on successful login
+    failedAttempts.delete(attemptsKey);
+
+    // Log successful login
+    await logSecurityEvent(user.id, "successful_login", { ip, fingerprint });
+
+    // Check 2FA
+    if (user.two_factor_enabled) {
+      // Generate and send OTP
+      const otp = Math.floor(100000 + Math.random() * 900000).toString();
+      const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
+
+      await supabase.from("otps").insert({
+        user_id: user.id,
+        otp_code: otp,
+        otp_type: "login",
+        expires_at: expiresAt,
+      });
+
+      // Send OTP via email
+      await sendOTPEmail(user.email, otp);
+
+      return res.json({
+        requiresTwoFactor: true,
+        userId: user.id,
+        message: "OTP sent to your email",
+      });
+    }
+
+    // Generate token with device info
+    const token = jwt.sign(
+      {
+        userId: user.id,
+        email: user.email,
+        role: user.role,
+        fingerprint: fingerprint,
+        issuedAt: Date.now(),
+      },
       process.env.JWT_SECRET,
       { expiresIn: process.env.JWT_EXPIRE },
     );
@@ -797,62 +1184,66 @@ app.put("/api/user/profile", authenticate, async (req, res) => {
 app.post("/api/user/change-password", authenticate, async (req, res) => {
   try {
     const { current_password, new_password } = req.body;
-    
+
     console.log("=== CHANGE PASSWORD REQUEST ===");
     console.log("User ID:", req.user?.id);
     console.log("User email:", req.user?.email);
-    
+
     // IMPORTANT: Fetch fresh user data from database to ensure we have the password hash
     const { data: user, error: fetchError } = await supabase
       .from("users")
       .select("id, email, password_hash, first_name, last_name")
       .eq("id", req.user.id)
       .single();
-    
+
     if (fetchError || !user) {
       console.error("User fetch error:", fetchError);
       return res.status(404).json({ error: "User not found" });
     }
-    
+
     console.log("User found, has password hash:", !!user.password_hash);
-    
+
     // Verify current password
     if (!user.password_hash) {
       console.error("No password hash found for user");
       return res.status(500).json({ error: "Account setup incomplete" });
     }
-    
-    const validPassword = await bcrypt.compare(current_password, user.password_hash);
+
+    const validPassword = await bcrypt.compare(
+      current_password,
+      user.password_hash,
+    );
     if (!validPassword) {
       console.log("Current password incorrect for user:", user.email);
       return res.status(401).json({ error: "Current password is incorrect" });
     }
-    
+
     // Hash new password
     const hashedPassword = await bcrypt.hash(new_password, 10);
-    
+
     // Update password
     const { error: updateError } = await supabase
       .from("users")
-      .update({ 
+      .update({
         password_hash: hashedPassword,
-        updated_at: new Date().toISOString()
+        updated_at: new Date().toISOString(),
       })
       .eq("id", req.user.id);
-    
+
     if (updateError) {
       console.error("Password update error:", updateError);
       return res.status(500).json({ error: "Failed to update password" });
     }
-    
+
     console.log("Password changed successfully for user:", user.email);
     res.json({ message: "Password changed successfully" });
   } catch (error) {
     console.error("Password change error:", error);
-    res.status(500).json({ error: "Failed to change password: " + error.message });
+    res
+      .status(500)
+      .json({ error: "Failed to change password: " + error.message });
   }
-});  
-
+});
 
 // Enable 2FA
 app.post("/api/user/enable-2fa", authenticate, async (req, res) => {
@@ -1222,7 +1613,7 @@ app.get(
 );
 
 // Transfer money - COMPLETE FIXED VERSION with double-entry ledger
-app.post(
+/*app.post(
   "/api/user/transfer",
   authenticate,
   checkAccountFrozen,
@@ -1528,6 +1919,276 @@ app.post(
       });
     } catch (error) {
       console.error("Transfer error:", error);
+      res.status(500).json({ error: "Transfer failed: " + error.message });
+    }
+  },
+);*/
+
+// Enhanced transfer with fraud detection
+app.post(
+  "/api/user/transfer",
+  authenticate,
+  checkAccountFrozen,
+  transferLimiter,
+  async (req, res) => {
+    try {
+      const {
+        from_account_id,
+        to_account_number,
+        amount,
+        description,
+        requires_otp = true,
+      } = req.body;
+
+      // Validate amount
+      if (!amount || amount <= 0 || amount > 1000000) {
+        return res.status(400).json({ error: "Invalid amount" });
+      }
+
+      // Get source account
+      const { data: fromAccount, error: fromError } = await supabase
+        .from("accounts")
+        .select("*, users!inner(id, email, first_name, last_name)")
+        .eq("id", from_account_id)
+        .eq("user_id", req.user.id)
+        .single();
+
+      if (fromError || !fromAccount) {
+        return res.status(404).json({ error: "Source account not found" });
+      }
+
+      // Check balance
+      if (fromAccount.available_balance < amount) {
+        return res.status(400).json({ error: "Insufficient funds" });
+      }
+
+      // Get destination account
+      const { data: toAccount, error: toError } = await supabase
+        .from("accounts")
+        .select("*, users!inner(id, email, first_name, last_name, is_frozen)")
+        .eq("account_number", to_account_number)
+        .single();
+
+      if (toError || !toAccount) {
+        return res.status(404).json({ error: "Destination account not found" });
+      }
+
+      // Prevent self-transfer
+      if (toAccount.user_id === req.user.id) {
+        return res
+          .status(400)
+          .json({ error: "Cannot transfer to your own account" });
+      }
+
+      // Check if destination account is frozen
+      if (toAccount.users?.is_frozen) {
+        return res.status(400).json({ error: "Destination account is frozen" });
+      }
+
+      // Run fraud detection
+      const fraudResult = await detectFraudulentActivity(req.user.id, {
+        amount,
+        to_account: toAccount.account_number,
+        to_user_id: toAccount.user_id,
+        from_account: fromAccount.account_number,
+      });
+
+      if (fraudResult.isSuspicious) {
+        // Flag transaction for review
+        await logSecurityEvent(req.user.id, "suspicious_transfer", {
+          amount,
+          to_account: toAccount.account_number,
+          reasons: fraudResult.reasons,
+        });
+
+        // Hold transaction for review
+        if (fraudResult.severity === "high") {
+          return res.status(403).json({
+            error:
+              "Transaction flagged for security review. Please contact support.",
+            reference: fraudResult.reference,
+          });
+        }
+      }
+
+      // Calculate fee
+      let feeAmount = 0;
+      if (amount >= 10000) {
+        feeAmount = 50;
+      }
+
+      const totalDeduction = amount + feeAmount;
+
+      // Check balance with fee
+      if (fromAccount.available_balance < totalDeduction) {
+        return res.status(400).json({
+          error: `Insufficient funds. Amount: ₦${amount} + Fee: ₦${feeAmount} = ₦${totalDeduction}`,
+        });
+      }
+
+      // Generate transaction ID with timestamp
+      const transactionId = `TXN${Date.now()}${Math.floor(Math.random() * 10000)}`;
+
+      // Create transaction record
+      const transactionData = {
+        transaction_id: transactionId,
+        from_account_id,
+        to_account_id: toAccount.id,
+        from_user_id: req.user.id,
+        to_user_id: toAccount.user_id,
+        amount: amount,
+        fee_amount: feeAmount,
+        description: description || `Transfer to ${toAccount.account_number}`,
+        transaction_type: "transfer",
+        status: "pending",
+        ip_address: req.ip,
+        user_agent: req.headers["user-agent"],
+        created_at: new Date().toISOString(),
+      };
+
+      // Check for OTP requirement (large amounts)
+      const isLargeAmount = amount > 100000;
+      const needsOTP = requires_otp || isLargeAmount;
+
+      if (needsOTP && process.env.OTP_MODE === "on") {
+        transactionData.requires_otp = true;
+
+        const { data: transaction, error: txError } = await supabase
+          .from("transactions")
+          .insert(transactionData)
+          .select()
+          .single();
+
+        if (txError) throw txError;
+
+        // Generate OTP
+        const otpCode = Math.floor(100000 + Math.random() * 900000).toString();
+        const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
+
+        await supabase.from("otps").insert({
+          user_id: req.user.id,
+          transaction_id: transaction.id,
+          otp_code: otpCode,
+          otp_type: "transfer",
+          expires_at: expiresAt,
+        });
+
+        // Send OTP via email and SMS
+        await sendOTPEmail(fromAccount.users.email, otpCode);
+        await sendOTPSMS(req.user.phone, otpCode);
+
+        return res.json({
+          message: "OTP required to complete transfer",
+          requires_otp: true,
+          transaction_id: transaction.id,
+        });
+      }
+
+      // Process transfer immediately
+      transactionData.status = "completed";
+      transactionData.completed_at = new Date().toISOString();
+
+      const { data: transaction, error: txError } = await supabase
+        .from("transactions")
+        .insert(transactionData)
+        .select()
+        .single();
+
+      if (txError) throw txError;
+
+      // Update balances with transaction
+      const newSenderBalance = fromAccount.balance - totalDeduction;
+      const newSenderAvailable = fromAccount.available_balance - totalDeduction;
+
+      const { error: updateSenderError } = await supabase
+        .from("accounts")
+        .update({
+          balance: newSenderBalance,
+          available_balance: newSenderAvailable,
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", from_account_id);
+
+      if (updateSenderError) throw updateSenderError;
+
+      const newReceiverBalance = toAccount.balance + amount;
+      const newReceiverAvailable = toAccount.available_balance + amount;
+
+      const { error: updateReceiverError } = await supabase
+        .from("accounts")
+        .update({
+          balance: newReceiverBalance,
+          available_balance: newReceiverAvailable,
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", toAccount.id);
+
+      if (updateReceiverError) throw updateReceiverError;
+
+      // Record in single ledger
+      await updateSingleLedger(
+        fromAccount.id,
+        req.user.id,
+        totalDeduction,
+        "transfer",
+        `Transfer to ${toAccount.account_number}`,
+        "Debit",
+        transaction.id,
+      );
+
+      await updateSingleLedger(
+        toAccount.id,
+        toAccount.user_id,
+        amount,
+        "transfer",
+        `Transfer from ${fromAccount.account_number}`,
+        "Credit",
+        transaction.id,
+      );
+
+      // Create notifications
+      await createNotification(
+        req.user.id,
+        "Transfer Completed",
+        `You transferred ₦${amount.toLocaleString()} to ${toAccount.account_number}. Fee: ₦${feeAmount}`,
+        "success",
+      );
+      await createNotification(
+        toAccount.user_id,
+        "Money Received",
+        `You received ₦${amount.toLocaleString()} from ${fromAccount.users.first_name} ${fromAccount.users.last_name}`,
+        "success",
+      );
+
+      // Log successful transfer
+      await logSecurityEvent(req.user.id, "transfer_completed", {
+        amount,
+        to_account: toAccount.account_number,
+        transaction_id: transaction.id,
+      });
+
+      res.json({
+        message: "Transfer completed successfully",
+        transaction: {
+          id: transaction.id,
+          transaction_id: transaction.transaction_id,
+          amount: amount,
+          fee: feeAmount,
+          total_deducted: totalDeduction,
+          new_balance: newSenderAvailable,
+          description: transaction.description,
+          completed_at: transaction.completed_at,
+        },
+        recipient: {
+          name: `${toAccount.users?.first_name || ""} ${toAccount.users?.last_name || ""}`,
+          account_number: toAccount.account_number,
+        },
+      });
+    } catch (error) {
+      console.error("Transfer error:", error);
+      await logSecurityEvent(req.user.id, "transfer_failed", {
+        error: error.message,
+      });
       res.status(500).json({ error: "Transfer failed: " + error.message });
     }
   },
@@ -7611,27 +8272,63 @@ app.get("/api/user/check-close-eligibility", authenticate, async (req, res) => {
       .from("accounts")
       .select("balance")
       .eq("user_id", req.user.id);
-    
-    const totalBalance = accounts?.reduce((sum, acc) => sum + (acc.balance || 0), 0) || 0;
-    
+
+    const totalBalance =
+      accounts?.reduce((sum, acc) => sum + (acc.balance || 0), 0) || 0;
+
     // Check for active savings plans
     const [harvest, fixed, savebox, target, spare] = await Promise.all([
-      supabase.from("user_harvest_enrollments").select("id, status").eq("user_id", req.user.id).eq("status", "active"),
-      supabase.from("fixed_savings").select("id, status").eq("user_id", req.user.id).in("status", ["active", "matured"]),
-      supabase.from("savebox_savings").select("id, status").eq("user_id", req.user.id).eq("status", "active"),
-      supabase.from("target_savings").select("id, status").eq("user_id", req.user.id).eq("status", "active"),
-      supabase.from("spare_change_savings").select("id, status").eq("user_id", req.user.id).eq("status", "active")
+      supabase
+        .from("user_harvest_enrollments")
+        .select("id, status")
+        .eq("user_id", req.user.id)
+        .eq("status", "active"),
+      supabase
+        .from("fixed_savings")
+        .select("id, status")
+        .eq("user_id", req.user.id)
+        .in("status", ["active", "matured"]),
+      supabase
+        .from("savebox_savings")
+        .select("id, status")
+        .eq("user_id", req.user.id)
+        .eq("status", "active"),
+      supabase
+        .from("target_savings")
+        .select("id, status")
+        .eq("user_id", req.user.id)
+        .eq("status", "active"),
+      supabase
+        .from("spare_change_savings")
+        .select("id, status")
+        .eq("user_id", req.user.id)
+        .eq("status", "active"),
     ]);
-    
+
     const activePlans = [];
     const activePlansList = [];
-    
-    if (harvest.data?.length > 0) { activePlans.push(...harvest.data); activePlansList.push("Harvest Plan"); }
-    if (fixed.data?.length > 0) { activePlans.push(...fixed.data); activePlansList.push("Fixed Savings"); }
-    if (savebox.data?.length > 0) { activePlans.push(...savebox.data); activePlansList.push("SaveBox"); }
-    if (target.data?.length > 0) { activePlans.push(...target.data); activePlansList.push("Target Savings"); }
-    if (spare.data?.length > 0) { activePlans.push(...spare.data); activePlansList.push("Spare Change"); }
-    
+
+    if (harvest.data?.length > 0) {
+      activePlans.push(...harvest.data);
+      activePlansList.push("Harvest Plan");
+    }
+    if (fixed.data?.length > 0) {
+      activePlans.push(...fixed.data);
+      activePlansList.push("Fixed Savings");
+    }
+    if (savebox.data?.length > 0) {
+      activePlans.push(...savebox.data);
+      activePlansList.push("SaveBox");
+    }
+    if (target.data?.length > 0) {
+      activePlans.push(...target.data);
+      activePlansList.push("Target Savings");
+    }
+    if (spare.data?.length > 0) {
+      activePlans.push(...spare.data);
+      activePlansList.push("Spare Change");
+    }
+
     // Check last transaction date
     const { data: lastTransaction, error: txError } = await supabase
       .from("transactions")
@@ -7639,22 +8336,25 @@ app.get("/api/user/check-close-eligibility", authenticate, async (req, res) => {
       .or(`from_user_id.eq.${req.user.id},to_user_id.eq.${req.user.id}`)
       .order("created_at", { ascending: false })
       .limit(1);
-    
+
     let daysSinceLastTx = 999;
     if (lastTransaction && lastTransaction.length > 0) {
       const lastTxDate = new Date(lastTransaction[0].created_at);
       const today = new Date();
-      daysSinceLastTx = Math.floor((today - lastTxDate) / (1000 * 60 * 60 * 24));
+      daysSinceLastTx = Math.floor(
+        (today - lastTxDate) / (1000 * 60 * 60 * 24),
+      );
     }
-    
-    const isEligible = totalBalance === 0 && activePlans.length === 0 && daysSinceLastTx >= 7;
-    
+
+    const isEligible =
+      totalBalance === 0 && activePlans.length === 0 && daysSinceLastTx >= 7;
+
     res.json({
       eligible: isEligible,
       balance: totalBalance,
       has_active_savings: activePlans.length > 0,
       recent_transaction_days: daysSinceLastTx >= 7 ? 0 : daysSinceLastTx,
-      active_plans_list: activePlansList
+      active_plans_list: activePlansList,
     });
   } catch (error) {
     console.error("Close eligibility error:", error);
@@ -7666,33 +8366,36 @@ app.get("/api/user/check-close-eligibility", authenticate, async (req, res) => {
 app.post("/api/user/close-account", authenticate, async (req, res) => {
   try {
     const { reason } = req.body;
-    
+
     // Verify eligibility again
     const { data: accounts } = await supabase
       .from("accounts")
       .select("balance")
       .eq("user_id", req.user.id);
-    
-    const totalBalance = accounts?.reduce((sum, acc) => sum + (acc.balance || 0), 0) || 0;
-    
+
+    const totalBalance =
+      accounts?.reduce((sum, acc) => sum + (acc.balance || 0), 0) || 0;
+
     if (totalBalance > 0) {
-      return res.status(400).json({ error: "Please withdraw all funds before closing your account" });
+      return res
+        .status(400)
+        .json({
+          error: "Please withdraw all funds before closing your account",
+        });
     }
-    
+
     // Log closed account
-    const { error: logError } = await supabase
-      .from("closed_accounts")
-      .insert({
-        user_id: req.user.id,
-        user_email: req.user.email,
-        user_name: `${req.user.first_name} ${req.user.last_name}`,
-        reason: reason,
-        closed_at: new Date(),
-        balance_at_close: totalBalance
-      });
-    
+    const { error: logError } = await supabase.from("closed_accounts").insert({
+      user_id: req.user.id,
+      user_email: req.user.email,
+      user_name: `${req.user.first_name} ${req.user.last_name}`,
+      reason: reason,
+      closed_at: new Date(),
+      balance_at_close: totalBalance,
+    });
+
     if (logError) console.error("Failed to log closed account:", logError);
-    
+
     // Delete user data (soft delete - deactivate)
     await supabase
       .from("users")
@@ -7700,20 +8403,20 @@ app.post("/api/user/close-account", authenticate, async (req, res) => {
         is_active: false,
         is_frozen: true,
         freeze_reason: "Account closed by user",
-        deleted_at: new Date()
+        deleted_at: new Date(),
       })
       .eq("id", req.user.id);
-    
+
     // Clear sensitive data
     await supabase
       .from("users")
       .update({
         password_hash: null,
         transfer_pin: null,
-        face_image: null
+        face_image: null,
       })
       .eq("id", req.user.id);
-    
+
     res.json({ success: true, message: "Account closed successfully" });
   } catch (error) {
     console.error("Close account error:", error);
@@ -7725,17 +8428,17 @@ app.post("/api/user/close-account", authenticate, async (req, res) => {
 app.post("/api/user/lock-account", authenticate, async (req, res) => {
   try {
     const { reason, unfreeze_method } = req.body;
-    
+
     await supabase
       .from("users")
       .update({
         is_frozen: true,
         freeze_reason: `User self-locked: ${reason}`,
         unfreeze_method: unfreeze_method || "support",
-        updated_at: new Date()
+        updated_at: new Date(),
       })
       .eq("id", req.user.id);
-    
+
     res.json({ success: true, message: "Account frozen successfully" });
   } catch (error) {
     console.error("Lock account error:", error);
@@ -7744,53 +8447,71 @@ app.post("/api/user/lock-account", authenticate, async (req, res) => {
 });
 
 // ADMIN: Get all closed accounts
-app.get("/api/admin/closed-accounts", authenticate, authorizeAdmin, async (req, res) => {
-  try {
-    const { data: closedAccounts, error } = await supabase
-      .from("closed_accounts")
-      .select("*")
-      .order("closed_at", { ascending: false });
-    
-    if (error) throw error;
-    res.json({ closed_accounts: closedAccounts || [] });
-  } catch (error) {
-    console.error("Fetch closed accounts error:", error);
-    res.status(500).json({ error: "Failed to fetch closed accounts" });
-  }
-});
+app.get(
+  "/api/admin/closed-accounts",
+  authenticate,
+  authorizeAdmin,
+  async (req, res) => {
+    try {
+      const { data: closedAccounts, error } = await supabase
+        .from("closed_accounts")
+        .select("*")
+        .order("closed_at", { ascending: false });
+
+      if (error) throw error;
+      res.json({ closed_accounts: closedAccounts || [] });
+    } catch (error) {
+      console.error("Fetch closed accounts error:", error);
+      res.status(500).json({ error: "Failed to fetch closed accounts" });
+    }
+  },
+);
 
 // ADMIN: Delete closed account record
-app.delete("/api/admin/closed-accounts/:id", authenticate, authorizeAdmin, async (req, res) => {
-  try {
-    const { id } = req.params;
-    const { error } = await supabase
-      .from("closed_accounts")
-      .delete()
-      .eq("id", id);
-    
-    if (error) throw error;
-    res.json({ success: true });
-  } catch (error) {
-    console.error("Delete closed account error:", error);
-    res.status(500).json({ error: "Failed to delete record" });
-  }
-});
+app.delete(
+  "/api/admin/closed-accounts/:id",
+  authenticate,
+  authorizeAdmin,
+  async (req, res) => {
+    try {
+      const { id } = req.params;
+      const { error } = await supabase
+        .from("closed_accounts")
+        .delete()
+        .eq("id", id);
+
+      if (error) throw error;
+      res.json({ success: true });
+    } catch (error) {
+      console.error("Delete closed account error:", error);
+      res.status(500).json({ error: "Failed to delete record" });
+    }
+  },
+);
 
 // ADMIN: Delete all closed accounts
-app.delete("/api/admin/closed-accounts/all", authenticate, authorizeAdmin, async (req, res) => {
-  try {
-    const { error } = await supabase
-      .from("closed_accounts")
-      .delete()
-      .neq("id", "00000000-0000-0000-0000-000000000000");
-    
-    if (error) throw error;
-    res.json({ success: true, message: "All closed account records deleted" });
-  } catch (error) {
-    console.error("Delete all closed accounts error:", error);
-    res.status(500).json({ error: "Failed to delete records" });
-  }
-});
+app.delete(
+  "/api/admin/closed-accounts/all",
+  authenticate,
+  authorizeAdmin,
+  async (req, res) => {
+    try {
+      const { error } = await supabase
+        .from("closed_accounts")
+        .delete()
+        .neq("id", "00000000-0000-0000-0000-000000000000");
+
+      if (error) throw error;
+      res.json({
+        success: true,
+        message: "All closed account records deleted",
+      });
+    } catch (error) {
+      console.error("Delete all closed accounts error:", error);
+      res.status(500).json({ error: "Failed to delete records" });
+    }
+  },
+);
 
 // ==================== ADMIN ROUTES ================
 
@@ -10134,8 +10855,6 @@ app.get(
     }
   },
 );
-
-
 
 // Get admin dashboard stats
 app.get("/api/admin/stats", authenticate, authorizeAdmin, async (req, res) => {

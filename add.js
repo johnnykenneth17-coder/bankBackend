@@ -1,22 +1,22 @@
-// Get user profile - Updated with age and identification
-app.get("/api/user/profile", authenticate, async (req, res) => {
+
+
+// Validate session endpoint
+app.get('/api/auth/validate-session', authenticate, async (req, res) => {
   try {
+    // Check if user still exists and is active
     const { data: user, error } = await supabase
-      .from("users")
-      .select(
-        "id, email, first_name, last_name, phone, date_of_birth, age, address, city, country, postal_code, identification_type, identification_number, kyc_status, two_factor_enabled, is_frozen, freeze_reason, face_image, created_at",
-      )
-      .eq("id", req.user.id)
+      .from('users')
+      .select('id, is_active, is_frozen')
+      .eq('id', req.user.id)
       .single();
-
-    if (error) throw error;
-
-    console.log("Profile fetched for user:", user.id);
-    console.log("Face image in profile:", user.face_image ? "Yes" : "No");
-
-    res.json(user);
+    
+    if (error || !user || !user.is_active || user.is_frozen) {
+      return res.status(401).json({ error: 'Session invalid' });
+    }
+    
+    res.json({ valid: true });
   } catch (error) {
-    console.error("Profile fetch error:", error);
-    res.status(500).json({ error: "Failed to fetch profile" });
+    res.status(401).json({ error: 'Session validation failed' });
   }
 });
+
