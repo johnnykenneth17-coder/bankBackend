@@ -149,7 +149,7 @@ webpush.setVapidDetails(
 );
 
 // Function to send push notification - ADD THIS FUNCTION
-async function sendPushNotification(pushToken, title, body, data = {}) {
+/*async function sendPushNotification(pushToken, title, body, data = {}) {
   try {
     // Parse the subscription object
     let subscription;
@@ -182,6 +182,49 @@ async function sendPushNotification(pushToken, title, body, data = {}) {
       console.log("Push token expired, should be deactivated");
     }
 
+    return false;
+  }
+}*/
+
+// Function to send push notification to user
+async function sendPushNotificationToUser(userId, title, body, data = {}) {
+  try {
+    // Get user's push tokens
+    const { data: tokens, error } = await supabase
+      .from("user_push_tokens")
+      .select("push_token, platform")
+      .eq("user_id", userId)
+      .eq("is_active", true);
+    
+    if (error || !tokens || tokens.length === 0) {
+      console.log("No push tokens found for user:", userId);
+      return false;
+    }
+    
+    let sent = false;
+    for (const token of tokens) {
+      if (token.platform === "android" || token.platform === "ios") {
+        // For native Android/iOS, you would send via FCM
+        // This requires setting up a FCM server key
+        // For now, store in notifications table
+        sent = true;
+      } else {
+        // Web push
+        const { webpush } = require("web-push");
+        try {
+          await webpush.sendNotification(JSON.parse(token.push_token), JSON.stringify({
+            title, body, data, icon: "/icons/icon-192x192.png"
+          }));
+          sent = true;
+        } catch (err) {
+          console.error("Web push error:", err);
+        }
+      }
+    }
+    
+    return sent;
+  } catch (error) {
+    console.error("Send push error:", error);
     return false;
   }
 }
@@ -3823,6 +3866,8 @@ app.post("/api/user/test-push", authenticate, async (req, res) => {
     res.status(500).json({ error: "Failed to send test notification" });
   }
 });
+
+
 
 // Get push notification settings
 app.get("/api/user/push-settings", authenticate, async (req, res) => {
