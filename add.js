@@ -1,76 +1,117 @@
-// Get push notification settings (FIXED)
-app.get("/api/user/push-settings", authenticate, async (req, res) => {
+// Register push token - FIXED VERSION
+app.post("/api/user/register-push-token", authenticate, async (req, res) => {
   try {
-    console.log("Fetching push settings for user:", req.user.id);
+    const { push_token, platform, device_name } = req.body;
     
-    // Try to get existing settings
-    const { data: settings, error } = await supabase
+    console.log("=== REGISTER PUSH TOKEN ===");
+    console.log("User ID:", req.user.id);
+    console.log("Platform:", platform);
+    console.log("Token length:", push_token?.length);
+    
+    if (!push_token) {
+      return res.status(400).json({ error: "Push token is required" });
+    }
+    
+    // First, check if token already exists and reactivate it
+    const { data: existingToken } = await supabase
+      .from("user_push_tokens")
+      .select("id")
+      .eq("user_id", req.user.id)
+      .eq("push_token", push_token)
+      .maybeSingle();
+    
+    if (existingToken) {
+      // Reactivate existing token
+      const { error: updateError } = await supabase
+        .from("user_push_tokens")
+        .update({ 
+          is_active: true, 
+          last_active: new Date().toISOString(),
+          updated_at: new Date().toISOString()
+        })
+        .eq("id", existingToken.id);
+      
+      if (updateError) {
+        console.error("Update error:", updateError);
+      }
+    } else {
+      // Insert new token
+      const { error: insertError } = await supabase
+        .from("user_push_tokens")
+        .insert({
+          user_id: req.user.id,
+          push_token: push_token,
+          platform: platform || "android",
+          device_name: device_name || null,
+          is_active: true,
+          last_active: new Date().toISOString(),
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString()
+        });
+      
+      if (insertError) {
+        console.error("Insert error:", insertError);
+        // Check if it's a duplicate key error
+        if (insertError.code === "23505") {
+          // Duplicate - try to reactivate instead
+          const { error: reactivateError } = await supabase
+            .from("user_push_tokens")
+            .update({ 
+              is_active: true, 
+              last_active: new Date().toISOString(),
+              updated_at: new Date().toISOString()
+            })
+            .eq("user_id", req.user.id)
+            .eq("push_token", push_token);
+          
+          if (reactivateError) {
+            console.error("Reactivate error:", reactivateError);
+          }
+        } else {
+          return res.status(500).json({ error: "Failed to register push token: " + insertError.message });
+        }
+      }
+    }
+    
+    // Also ensure push settings exist
+    const { data: existingSettings } = await supabase
       .from("user_push_settings")
-      .select("*")
+      .select("id")
       .eq("user_id", req.user.id)
       .maybeSingle();
-
-    if (error) {
-      console.error("Fetch error:", error);
-      // Return default settings
-      return res.json({
-        notifications_enabled: false,
-        transfers: true,
-        savings: true,
-        security: true,
-        promotions: false,
-        bills: true
-      });
+    
+    if (!existingSettings) {
+      await supabase
+        .from("user_push_settings")
+        .insert({
+          user_id: req.user.id,
+          notifications_enabled: true,
+          transfers: true,
+          savings: true,
+          security: true,
+          promotions: false,
+          bills: true,
+          updated_at: new Date().toISOString()
+        });
+    } else {
+      // Update notifications_enabled to true since they're registering
+      await supabase
+        .from("user_push_settings")
+        .update({ 
+          notifications_enabled: true,
+          updated_at: new Date().toISOString()
+        })
+        .eq("user_id", req.user.id);
     }
-
-    // If settings exist, return them
-    if (settings) {
-      return res.json(settings);
-    }
-
-    // No settings found, create default and return
-    console.log("No settings found, creating defaults");
-    const defaultSettings = {
-      user_id: req.user.id,
-      notifications_enabled: false,
-      transfers: true,
-      savings: true,
-      security: true,
-      promotions: false,
-      bills: true
-    };
-
-    const { data: newSettings, error: insertError } = await supabase
-      .from("user_push_settings")
-      .insert(defaultSettings)
-      .select()
-      .single();
-
-    if (insertError) {
-      console.error("Insert error:", insertError);
-      // Return defaults anyway
-      return res.json({
-        notifications_enabled: false,
-        transfers: true,
-        savings: true,
-        security: true,
-        promotions: false,
-        bills: true
-      });
-    }
-
-    res.json(newSettings);
+    
+    console.log("Push token registered successfully for user:", req.user.id);
+    res.json({ 
+      success: true, 
+      message: "Push token registered successfully" 
+    });
     
   } catch (error) {
-    console.error("Push settings fetch error:", error);
-    // Always return default settings to avoid breaking the UI
-    res.json({
-      notifications_enabled: false,
-      transfers: true,
-      savings: true,
-      security: true,
-      promotions: false,
-      bills: true
-    });
+    console.error("Push token registration error:", error);
+    res.status(500).json({ error: "Failed to register push token: " + error.message });
   }
 });
