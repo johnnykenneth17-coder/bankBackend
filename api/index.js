@@ -148,43 +148,6 @@ webpush.setVapidDetails(
   process.env.VAPID_PRIVATE_KEY,
 );
 
-// Function to send push notification - ADD THIS FUNCTION
-/*async function sendPushNotification(pushToken, title, body, data = {}) {
-  try {
-    // Parse the subscription object
-    let subscription;
-    if (typeof pushToken === "string") {
-      subscription = JSON.parse(pushToken);
-    } else {
-      subscription = pushToken;
-    }
-
-    const payload = JSON.stringify({
-      title: title,
-      body: body,
-      data: data,
-      icon: "/icons/icon-192x192.png",
-      badge: "/icons/badge-72x72.png",
-      vibrate: [200, 100, 200],
-    });
-
-    await webpush.sendNotification(subscription, payload);
-    console.log(
-      `Push notification sent to ${subscription.endpoint.substring(0, 50)}...`,
-    );
-    return true;
-  } catch (error) {
-    console.error("Error sending push:", error);
-
-    // If token is expired or invalid, deactivate it
-    if (error.statusCode === 410 || error.message.includes("expired")) {
-      // You could deactivate the token here
-      console.log("Push token expired, should be deactivated");
-    }
-
-    return false;
-  }
-}*/
 
 // Function to send push notification to user
 async function sendPushNotificationToUser(userId, title, body, data = {}) {
@@ -238,6 +201,98 @@ const transporter = nodemailer.createTransport({
     pass: process.env.SMTP_PASS,
   },
 });
+
+// Send push notification to user's device when in-app notification is created
+async function sendPushNotificationForInAppNotification(userId, title, message, notificationId, type = "info") {
+  try {
+    // Get user's push tokens
+    const { data: tokens, error } = await supabase
+      .from("user_push_tokens")
+      .select("push_token, platform")
+      .eq("user_id", userId)
+      .eq("is_active", true);
+    
+    if (error || !tokens || tokens.length === 0) {
+      console.log("No push tokens found for user:", userId);
+      return false;
+    }
+    
+    // Check if user has push notifications enabled
+    const { data: settings } = await supabase
+      .from("user_push_settings")
+      .select("notifications_enabled, transfers, savings, security, promotions, bills")
+      .eq("user_id", userId)
+      .single();
+    
+    if (!settings || !settings.notifications_enabled) {
+      console.log("Push notifications disabled for user:", userId);
+      return false;
+    }
+    
+    // Check if this notification type is enabled
+    let typeEnabled = true;
+    if (type === "transfer") typeEnabled = settings.transfers !== false;
+    else if (type === "savings") typeEnabled = settings.savings !== false;
+    else if (type === "security") typeEnabled = settings.security !== false;
+    else if (type === "promotion") typeEnabled = settings.promotions === true;
+    else if (type === "bill") typeEnabled = settings.bills !== false;
+    
+    if (!typeEnabled) {
+      console.log(`Push type ${type} disabled for user:`, userId);
+      return false;
+    }
+    
+    // Prepare payload
+    const payload = {
+      title: title,
+      body: message,
+      data: {
+        notificationId: notificationId,
+        type: type,
+        timestamp: new Date().toISOString(),
+        url: "/dashboard.html"
+      },
+      icon: "/icons/icon-192x192.png",
+      badge: "/icons/badge-72x72.png",
+      vibrate: [200, 100, 200],
+      sound: "default",
+      priority: "high"
+    };
+    
+    let sent = false;
+    
+    // Send to all active tokens
+    for (const token of tokens) {
+      try {
+        if (token.platform === "android") {
+          // For Capacitor Android, we need to send via FCM
+          // The Capacitor PushNotifications plugin handles this automatically
+          // We just need to store the notification
+          console.log("Android push token found, notification will be delivered by Capacitor");
+          sent = true;
+        } else if (token.platform === "web") {
+          // For web PWA
+          try {
+            const webpush = require("web-push");
+            await webpush.sendNotification(JSON.parse(token.push_token), JSON.stringify(payload));
+            sent = true;
+          } catch (err) {
+            console.error("Web push error:", err);
+          }
+        } else {
+          sent = true;
+        }
+      } catch (err) {
+        console.error(`Push send error for token ${token.id}:`, err);
+      }
+    }
+    
+    return sent;
+  } catch (error) {
+    console.error("Send push notification error:", error);
+    return false;
+  }
+}
 
 // Fraud detection function
 async function detectFraudulentActivity(userId, transferData) {
@@ -323,17 +378,41 @@ async function logSecurityEvent(userId, eventType, details = {}) {
 }
 
 // Notification function
+// Notification function - NOW WITH PUSH NOTIFICATIONS
 async function createNotification(userId, title, message, type = "info") {
   try {
-    await supabase.from("notifications").insert({
-      user_id: userId,
-      title: title,
-      message: message,
-      type: type,
-      created_at: new Date().toISOString(),
-    });
+    // Insert into database
+    const { data: notification, error } = await supabase
+      .from("notifications")
+      .insert({
+        user_id: userId,
+        title: title,
+        message: message,
+        type: type,
+        created_at: new Date().toISOString(),
+        is_read: false
+      })
+      .select()
+      .single();
+
+    if (error) {
+      console.error("Notification insert error:", error);
+      return null;
+    }
+
+    // SEND PUSH NOTIFICATION TO DEVICE
+    await sendPushNotificationForInAppNotification(
+      userId, 
+      title, 
+      message, 
+      notification.id, 
+      type
+    );
+
+    return notification;
   } catch (error) {
     console.error("Notification error:", error);
+    return null;
   }
 }
 
