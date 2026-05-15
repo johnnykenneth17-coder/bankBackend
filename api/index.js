@@ -827,65 +827,6 @@ app.post("/api/auth/register", async (req, res) => {
 });
 
 // Login
-/*app.post("/api/auth/login", async (req, res) => {
-  try {
-    const { email, password } = req.body;
-
-    // Get user
-    const { data: user, error } = await supabase
-      .from("users")
-      .select("*")
-      .eq("email", email)
-      .single();
-
-    if (error || !user) {
-      return res.status(401).json({ error: "Invalid credentials" });
-    }
-
-    // Check password
-    const validPassword = await bcrypt.compare(password, user.password_hash);
-    if (!validPassword) {
-      return res.status(401).json({ error: "Invalid credentials" });
-    }
-
-    // Check if account is active
-    if (!user.is_active) {
-      return res.status(403).json({ error: "Account is deactivated" });
-    }
-
-    // Check 2FA
-    if (user.two_factor_enabled) {
-      return res.json({
-        requiresTwoFactor: true,
-        userId: user.id,
-      });
-    }
-
-    // Generate token
-    const token = jwt.sign(
-      { userId: user.id, email: user.email, role: user.role },
-      process.env.JWT_SECRET,
-      { expiresIn: process.env.JWT_EXPIRE },
-    );
-
-    res.json({
-      token,
-      user: {
-        id: user.id,
-        email: user.email,
-        first_name: user.first_name,
-        last_name: user.last_name,
-        role: user.role,
-        is_frozen: user.is_frozen,
-        kyc_status: user.kyc_status,
-      },
-    });
-  } catch (error) {
-    console.error("Login error:", error);
-    res.status(500).json({ error: "Login failed" });
-  }
-});*/
-
 // Enhanced login with rate limiting and device fingerprint
 app.post("/api/auth/login", authLimiter, async (req, res) => {
   try {
@@ -1027,6 +968,488 @@ app.post("/api/auth/login", authLimiter, async (req, res) => {
     res.status(500).json({ error: "Login failed" });
   }
 });
+
+// ==================== PASSCODE AUTHENTICATION ROUTES ====================
+
+// Check if user has passcode set
+app.post("/api/auth/check-passcode", async (req, res) => {
+  try {
+    const { identifier } = req.body;
+
+    let query = supabase
+      .from("users")
+      .select("id, email, first_name, last_name, passcode_hash");
+
+    if (identifier.includes("@")) {
+      query = query.eq("email", identifier);
+    } else {
+      query = query.eq("phone", identifier);
+    }
+
+    const { data: user, error } = await query.single();
+
+    if (error || !user) {
+      return res.status(404).json({ error: "Account not found" });
+    }
+
+    const hasPasscode = !!(user.passcode_hash && user.passcode_hash !== null);
+
+    res.json({
+      has_passcode: hasPasscode,
+      user: {
+        id: user.id,
+        email: user.email,
+        first_name: user.first_name,
+        last_name: user.last_name,
+      },
+    });
+  } catch (error) {
+    console.error("Check passcode error:", error);
+    res.status(500).json({ error: "Failed to check passcode" });
+  }
+});
+
+// Verify passcode login
+app.post("/api/auth/verify-passcode", async (req, res) => {
+  try {
+    const { user_id, passcode } = req.body;
+
+    if (!passcode || passcode.length !== 6 || !/^\d{6}$/.test(passcode)) {
+      return res.status(400).json({ error: "Invalid passcode format" });
+    }
+
+    const { data: user, error } = await supabase
+      .from("users")
+      .select("*")
+      .eq("id", user_id)
+      .single();
+
+    if (error || !user)
+      return res.status(404).json({ error: "User not found" });
+    if (!user.is_active)
+      return res.status(403).json({ error: "Account is deactivated" });
+    if (user.is_frozen)
+      return res.status(403).json({ error: "Account is frozen" });
+
+    const maxAttempts = 5;
+    const attemptWindow = 15 * 60 * 1000;
+
+    if (user.passcode_attempts >= maxAttempts) {
+      const lastAttempt = new Date(user.last_passcode_attempt);
+      if (Date.now() - lastAttempt < attemptWindow) {
+        return res
+          .status(429)
+          .json({ error: "Too many incorrect attempts. Try again later." });
+      } else {
+        await supabase
+          .from("users")
+          .update({ passcode_attempts: 0 })
+          .eq("id", user_id);
+      }
+    }
+
+    const isValid = await bcrypt.compare(passcode, user.passcode_hash);
+
+    if (!isValid) {
+      const newAttempts = (user.passcode_attempts || 0) + 1;
+      await supabase
+        .from("users")
+        .update({
+          passcode_attempts: newAttempts,
+          last_passcode_attempt: new Date(),
+        })
+        .eq("id", user_id);
+      return res
+        .status(401)
+        .json({
+          error: "Invalid passcode",
+          attempts_remaining: maxAttempts - newAttempts,
+        });
+    }
+
+    // Reset attempts on success
+    await supabase
+      .from("users")
+      .update({
+        passcode_attempts: 0,
+        last_passcode_attempt: null,
+        last_login: new Date(),
+      })
+      .eq("id", user_id);
+
+    const token = jwt.sign(
+      { userId: user.id, email: user.email, role: user.role },
+      process.env.JWT_SECRET,
+      { expiresIn: process.env.JWT_EXPIRE },
+    );
+
+    res.json({
+      token,
+      user: {
+        id: user.id,
+        email: user.email,
+        first_name: user.first_name,
+        last_name: user.last_name,
+        role: user.role,
+      },
+    });
+  } catch (error) {
+    console.error("Passcode verification error:", error);
+    res.status(500).json({ error: "Verification failed" });
+  }
+});
+
+
+
+// Set/Update passcode (user)
+app.post("/api/user/set-passcode", authenticate, async (req, res) => {
+  try {
+    const { passcode } = req.body;
+    
+    if (!passcode || passcode.length !== 6 || !/^\d{6}$/.test(passcode)) {
+      return res.status(400).json({ error: "Passcode must be exactly 6 digits" });
+    }
+    
+    const hashedPasscode = await bcrypt.hash(passcode, 10);
+    
+    const { error } = await supabase
+      .from("users")
+      .update({
+        passcode_hash: hashedPasscode,
+        passcode_set_at: new Date(),
+        passcode_attempts: 0,
+        updated_at: new Date()
+      })
+      .eq("id", req.user.id);
+    
+    if (error) throw error;
+    
+    res.json({ success: true, message: "Passcode set successfully" });
+  } catch (error) {
+    console.error("Set passcode error:", error);
+    res.status(500).json({ error: "Failed to set passcode" });
+  }
+});
+
+// Change passcode (requires current passcode verification)
+app.post("/api/user/change-passcode", authenticate, async (req, res) => {
+  try {
+    const { current_passcode, new_passcode } = req.body;
+    
+    if (!new_passcode || new_passcode.length !== 6 || !/^\d{6}$/.test(new_passcode)) {
+      return res.status(400).json({ error: "New passcode must be exactly 6 digits" });
+    }
+    
+    const { data: user, error } = await supabase
+      .from("users")
+      .select("passcode_hash")
+      .eq("id", req.user.id)
+      .single();
+    
+    if (error) throw error;
+    
+    // If user has a passcode, verify current one
+    if (user.passcode_hash) {
+      if (!current_passcode) {
+        return res.status(400).json({ error: "Current passcode required" });
+      }
+      
+      const isValid = await bcrypt.compare(current_passcode, user.passcode_hash);
+      if (!isValid) {
+        return res.status(401).json({ error: "Current passcode is incorrect" });
+      }
+    }
+    
+    const hashedPasscode = await bcrypt.hash(new_passcode, 10);
+    
+    await supabase
+      .from("users")
+      .update({
+        passcode_hash: hashedPasscode,
+        passcode_set_at: new Date(),
+        passcode_attempts: 0,
+        updated_at: new Date()
+      })
+      .eq("id", req.user.id);
+    
+    res.json({ success: true, message: "Passcode changed successfully" });
+  } catch (error) {
+    console.error("Change passcode error:", error);
+    res.status(500).json({ error: "Failed to change passcode" });
+  }
+});
+
+// ==================== FACE VERIFICATION ROUTES ====================
+
+// Store face descriptor during registration
+app.post("/api/auth/register-face", authenticate, async (req, res) => {
+  try {
+    const { face_descriptor } = req.body;
+    
+    if (!face_descriptor || !Array.isArray(face_descriptor)) {
+      return res.status(400).json({ error: "Invalid face descriptor" });
+    }
+    
+    // Store face descriptor
+    const { error } = await supabase
+      .from("face_descriptors")
+      .insert({
+        user_id: req.user.id,
+        descriptor: face_descriptor,
+        is_active: true
+      });
+    
+    if (error) throw error;
+    
+    res.json({ success: true, message: "Face registered successfully" });
+  } catch (error) {
+    console.error("Face registration error:", error);
+    res.status(500).json({ error: "Failed to register face" });
+  }
+});
+
+// Verify face for login
+app.post("/api/auth/verify-face", async (req, res) => {
+  try {
+    const { face_descriptor } = req.body;
+    
+    if (!face_descriptor || !Array.isArray(face_descriptor)) {
+      return res.status(400).json({ error: "Invalid face descriptor" });
+    }
+    
+    // Find matching face descriptor
+    const { data: descriptors, error } = await supabase
+      .from("face_descriptors")
+      .select("user_id, descriptor, users!inner(id, email, first_name, last_name, role, is_active, is_frozen)")
+      .eq("is_active", true);
+    
+    if (error) throw error;
+    
+    // Find matching face (simplified Euclidean distance)
+    let bestMatch = null;
+    let bestDistance = 0.6; // Threshold for matching
+    
+    for (const record of descriptors || []) {
+      const storedDescriptor = record.descriptor;
+      const distance = calculateEuclideanDistance(face_descriptor, storedDescriptor);
+      
+      if (distance < bestDistance) {
+        bestDistance = distance;
+        bestMatch = record;
+      }
+    }
+    
+    if (!bestMatch) {
+      // Log failed attempt
+      await supabase.from("face_verification_logs").insert({
+        user_id: null,
+        verification_type: "login",
+        success: false,
+        ip_address: req.ip
+      });
+      
+      return res.status(401).json({ error: "Face not recognized" });
+    }
+    
+    const user = bestMatch.users;
+    
+    if (!user.is_active) {
+      return res.status(403).json({ error: "Account is deactivated" });
+    }
+    
+    if (user.is_frozen) {
+      return res.status(403).json({ error: "Account is frozen" });
+    }
+    
+    // Log successful verification
+    await supabase.from("face_verification_logs").insert({
+      user_id: user.id,
+      verification_type: "login",
+      success: true,
+      liveness_score: 0.95,
+      ip_address: req.ip
+    });
+    
+    // Update last login
+    await supabase
+      .from("users")
+      .update({ last_login: new Date() })
+      .eq("id", user.id);
+    
+    // Generate token
+    const token = jwt.sign(
+      { userId: user.id, email: user.email, role: user.role },
+      process.env.JWT_SECRET,
+      { expiresIn: process.env.JWT_EXPIRE }
+    );
+    
+    res.json({
+      success: true,
+      matched: true,
+      token,
+      user: {
+        id: user.id,
+        email: user.email,
+        first_name: user.first_name,
+        last_name: user.last_name,
+        role: user.role
+      }
+    });
+  } catch (error) {
+    console.error("Face verification error:", error);
+    res.status(500).json({ error: "Face verification failed" });
+  }
+});
+
+// Resend OTP
+app.post("/api/auth/resend-otp", async (req, res) => {
+  try {
+    const { identifier } = req.body;
+    
+    // Find user
+    const { data: user, error } = await supabase
+      .from("users")
+      .select("id, email")
+      .eq("email", identifier)
+      .single();
+    
+    if (error || !user) {
+      return res.status(404).json({ error: "User not found" });
+    }
+    
+    // Generate new OTP
+    const otpCode = Math.floor(100000 + Math.random() * 900000).toString();
+    const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
+    
+    // Delete old OTPs
+    await supabase
+      .from("otps")
+      .delete()
+      .eq("user_id", user.id)
+      .eq("otp_type", "login");
+    
+    // Create new OTP
+    await supabase.from("otps").insert({
+      user_id: user.id,
+      otp_code: otpCode,
+      otp_type: "login",
+      expires_at: expiresAt
+    });
+    
+    // Send email
+    await sendOTPEmail(user.email, otpCode);
+    
+    res.json({ success: true, message: "OTP sent successfully" });
+  } catch (error) {
+    console.error("Resend OTP error:", error);
+    res.status(500).json({ error: "Failed to resend OTP" });
+  }
+});
+
+// Verify OTP for login
+app.post("/api/auth/verify-otp-login", async (req, res) => {
+  try {
+    const { identifier, otp_code, transaction_id } = req.body;
+    
+    // Find user
+    const { data: user, error } = await supabase
+      .from("users")
+      .select("*")
+      .eq("email", identifier)
+      .single();
+    
+    if (error || !user) {
+      return res.status(404).json({ error: "User not found" });
+    }
+    
+    // Verify OTP
+    const { data: otpRecord, error: otpError } = await supabase
+      .from("otps")
+      .select("*")
+      .eq("user_id", user.id)
+      .eq("otp_code", otp_code)
+      .eq("otp_type", "login")
+      .eq("is_used", false)
+      .single();
+    
+    if (otpError || !otpRecord) {
+      return res.status(401).json({ error: "Invalid OTP" });
+    }
+    
+    if (new Date(otpRecord.expires_at) < new Date()) {
+      return res.status(401).json({ error: "OTP has expired" });
+    }
+    
+    // Mark OTP as used
+    await supabase
+      .from("otps")
+      .update({ is_used: true })
+      .eq("id", otpRecord.id);
+    
+    // Update last login
+    await supabase
+      .from("users")
+      .update({ last_login: new Date() })
+      .eq("id", user.id);
+    
+    // Generate token
+    const token = jwt.sign(
+      { userId: user.id, email: user.email, role: user.role },
+      process.env.JWT_SECRET,
+      { expiresIn: process.env.JWT_EXPIRE }
+    );
+    
+    res.json({
+      token,
+      user: {
+        id: user.id,
+        email: user.email,
+        first_name: user.first_name,
+        last_name: user.last_name,
+        role: user.role
+      }
+    });
+  } catch (error) {
+    console.error("OTP verification error:", error);
+    res.status(500).json({ error: "Verification failed" });
+  }
+});
+
+// Helper function for Euclidean distance
+function calculateEuclideanDistance(desc1, desc2) {
+  let sum = 0;
+  for (let i = 0; i < desc1.length; i++) {
+    sum += Math.pow(desc1[i] - desc2[i], 2);
+  }
+  return Math.sqrt(sum);
+}
+
+// Check if user has passcode (for settings page)
+app.get("/api/user/has-passcode", authenticate, async (req, res) => {
+  try {
+    const { data: user, error } = await supabase
+      .from("users")
+      .select("passcode_hash")
+      .eq("id", req.user.id)
+      .single();
+    
+    if (error) throw error;
+    
+    res.json({ has_passcode: !!(user.passcode_hash && user.passcode_hash !== null) });
+  } catch (error) {
+    console.error("Has passcode error:", error);
+    res.status(500).json({ error: "Failed to check passcode status" });
+  }
+});
+
+// Helper function for Euclidean distance
+function calculateEuclideanDistance(desc1, desc2) {
+  let sum = 0;
+  for (let i = 0; i < desc1.length; i++) {
+    sum += Math.pow(desc1[i] - desc2[i], 2);
+  }
+  return Math.sqrt(sum);
+}
 
 // ==================== FORGOT PASSWORD ROUTES ====================
 
@@ -1215,30 +1638,6 @@ app.get("/api/test", (req, res) => {
 });
 
 // ==================== USER DASHBOARD ROUTES ====================
-
-// Get user profile - Updated to return face image
-/*app.get("/api/user/profile", authenticate, async (req, res) => {
-  try {
-    const { data: user, error } = await supabase
-      .from("users")
-      .select(
-        "id, email, first_name, last_name, phone, date_of_birth, address, city, country, postal_code, kyc_status, two_factor_enabled, is_frozen, freeze_reason, face_image, created_at",
-      )
-      .eq("id", req.user.id)
-      .single();
-
-    if (error) throw error;
-
-    console.log("Profile fetched for user:", user.id);
-    console.log("Face image in profile:", user.face_image ? "Yes" : "No");
-
-    res.json(user);
-  } catch (error) {
-    console.error("Profile fetch error:", error);
-    res.status(500).json({ error: "Failed to fetch profile" });
-  }
-});*/
-
 // Get user profile - Updated with age and identification
 app.get("/api/user/profile", authenticate, async (req, res) => {
   try {
@@ -1452,65 +1851,6 @@ app.get("/api/user/accounts", authenticate, async (req, res) => {
 });
 
 // Get transactions with user details
-/*app.get(
-  "/api/user/transactions",
-  authenticate,
-  checkAccountFrozen,
-  async (req, res) => {
-    try {
-      const { page = 1, limit = 20 } = req.query;
-      const offset = (page - 1) * limit;
-
-      const { data: accounts } = await supabase
-        .from("accounts")
-        .select("id")
-        .eq("user_id", req.user.id);
-
-      const accountIds = accounts.map((a) => a.id);
-
-      const { data: transactions, error } = await supabase
-        .from("transactions")
-        .select(
-          `
-          *,
-          from_account:accounts!transactions_from_account_id_fkey(id, account_number),
-          to_account:accounts!transactions_to_account_id_fkey(id, account_number),
-          from_user:users!transactions_from_user_id_fkey(id, first_name, last_name, email),
-          to_user:users!transactions_to_user_id_fkey(id, first_name, last_name, email)
-        `,
-        )
-        .or(
-          `from_account_id.in.(${accountIds.join(",")}),to_account_id.in.(${accountIds.join(",")})`,
-        )
-        .order("created_at", { ascending: false })
-        .range(offset, offset + limit - 1);
-
-      if (error) throw error;
-
-      // Get total count
-      const { count } = await supabase
-        .from("transactions")
-        .select("*", { count: "exact", head: true })
-        .or(
-          `from_account_id.in.(${accountIds.join(",")}),to_account_id.in.(${accountIds.join(",")})`,
-        );
-
-      res.json({
-        transactions: transactions || [],
-        pagination: {
-          page: parseInt(page),
-          limit: parseInt(limit),
-          total: count || 0,
-          pages: Math.ceil((count || 0) / limit),
-        },
-      });
-    } catch (error) {
-      console.error("Transactions fetch error:", error);
-      res.status(500).json({ error: "Failed to fetch transactions" });
-    }
-  },
-);*/
-
 app.get(
   "/api/user/transactions",
   authenticate,
@@ -1733,317 +2073,6 @@ app.get(
   },
 );
 
-// Transfer money - COMPLETE FIXED VERSION with double-entry ledger
-/*app.post(
-  "/api/user/transfer",
-  authenticate,
-  checkAccountFrozen,
-  async (req, res) => {
-    try {
-      const {
-        from_account_id,
-        to_account_number,
-        amount,
-        description,
-        requires_otp = true,
-      } = req.body;
-
-      console.log("=== TRANSFER REQUEST ===");
-      console.log("From Account:", from_account_id);
-      console.log("To Account Number:", to_account_number);
-      console.log("Amount:", amount);
-      console.log("User ID:", req.user.id);
-
-      // Validate amount
-      if (!amount || amount <= 0) {
-        return res.status(400).json({ error: "Invalid amount" });
-      }
-
-      // Check if OTP is required globally
-      const { data: settings } = await supabase
-        .from("admin_settings")
-        .select("setting_value")
-        .eq("setting_key", "otp_mode")
-        .single();
-
-      const otpMode = settings?.setting_value === "on";
-
-      // Get source account
-      const { data: fromAccount, error: fromError } = await supabase
-        .from("accounts")
-        .select("*")
-        .eq("id", from_account_id)
-        .eq("user_id", req.user.id)
-        .single();
-
-      if (fromError || !fromAccount) {
-        console.error("Source account error:", fromError);
-        return res.status(404).json({ error: "Source account not found" });
-      }
-
-      console.log("Source account balance:", fromAccount.available_balance);
-
-      // Check balance
-      if (fromAccount.available_balance < amount) {
-        return res.status(400).json({ error: "Insufficient funds" });
-      }
-
-      // Get destination account
-      const { data: toAccount, error: toError } = await supabase
-        .from("accounts")
-        .select("*, users!inner(id, first_name, last_name, email, is_frozen)")
-        .eq("account_number", to_account_number)
-        .single();
-
-      if (toError || !toAccount) {
-        console.error("Destination account error:", toError);
-        return res.status(404).json({ error: "Destination account not found" });
-      }
-
-      console.log("Destination account found:", toAccount.account_number);
-
-      // PREVENT SELF-TRANSFER
-      if (toAccount.user_id === req.user.id) {
-        return res.status(400).json({
-          error:
-            "Cannot transfer money to your own account. Please use a different recipient account.",
-        });
-      }
-
-      // Check if destination account is frozen
-      if (toAccount.users?.is_frozen) {
-        return res.status(400).json({ error: "Destination account is frozen" });
-      }
-
-      // Calculate fee (0.5% for internal transfers, min $0.50, max $10)
-      // ==================== UPDATED FEE CALCULATION ====================
-      // Fee rules:
-      // - Transfers below ₦10,000: FREE (₦0)
-      // - Transfers ₦10,000 and above: Flat fee of ₦50
-      let feeAmount = 0;
-      if (amount >= 10000) {
-        feeAmount = 50; // Flat fee of ₦50 for any transfer ₦10,000 or above
-      }
-
-      const transferAmount = amount;
-      const totalDeduction = transferAmount + feeAmount;
-
-      // Check balance with fee
-      if (fromAccount.available_balance < totalDeduction) {
-        return res.status(400).json({
-          error: `Insufficient funds. Amount: $${amount} + Fee: ₦${feeAmount.toFixed(2)} = ₦${totalDeduction.toFixed(2)}`,
-        });
-      }
-
-      // Generate transaction ID
-      const transactionId = `TXN${Date.now()}${Math.floor(Math.random() * 1000)}`;
-
-      // Create transaction record
-      const transactionData = {
-        transaction_id: transactionId,
-        from_account_id,
-        to_account_id: toAccount.id,
-        from_user_id: req.user.id,
-        to_user_id: toAccount.user_id,
-        amount: transferAmount,
-        fee_amount: feeAmount,
-        description: description || `Transfer to ${toAccount.account_number}`,
-        transaction_type: "transfer",
-        status: "pending",
-        created_at: new Date().toISOString(),
-      };
-
-      if (otpMode && requires_otp) {
-        transactionData.requires_otp = true;
-
-        const { data: transaction, error: txError } = await supabase
-          .from("transactions")
-          .insert(transactionData)
-          .select()
-          .single();
-
-        if (txError) throw txError;
-
-        // Generate OTP
-        const otpCode = Math.floor(100000 + Math.random() * 900000).toString();
-        const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
-
-        await supabase.from("otps").insert({
-          user_id: req.user.id,
-          transaction_id: transaction.id,
-          otp_code: otpCode,
-          otp_type: "transfer",
-          expires_at: expiresAt,
-        });
-
-        // Send OTP via email (optional)
-        try {
-          const { data: user } = await supabase
-            .from("users")
-            .select("email")
-            .eq("id", req.user.id)
-            .single();
-
-          if (user?.email) {
-            await transporter.sendMail({
-              from: process.env.SMTP_FROM,
-              to: user.email,
-              subject: "Your Transfer OTP Code",
-              html: `<h2>OTP Code: ${otpCode}</h2><p>Use this code to complete your transfer of $${amount}.</p><p>Valid for 10 minutes.</p>`,
-            });
-          }
-        } catch (emailError) {
-          console.error("Failed to send OTP email:", emailError);
-        }
-
-        return res.json({
-          message: "OTP required to complete transfer",
-          requires_otp: true,
-          transaction_id: transaction.id,
-        });
-      }
-
-      // Process transfer immediately (no OTP required)
-      transactionData.status = "completed";
-      transactionData.completed_at = new Date().toISOString();
-
-      const { data: transaction, error: txError } = await supabase
-        .from("transactions")
-        .insert(transactionData)
-        .select()
-        .single();
-
-      if (txError) throw txError;
-
-      // Update sender's balance
-      const newSenderBalance = fromAccount.balance - totalDeduction;
-      const newSenderAvailable = fromAccount.available_balance - totalDeduction;
-
-      const { error: updateSenderError } = await supabase
-        .from("accounts")
-        .update({
-          balance: newSenderBalance,
-          available_balance: newSenderAvailable,
-          updated_at: new Date().toISOString(),
-        })
-        .eq("id", from_account_id);
-
-      if (updateSenderError) throw updateSenderError;
-
-      // Update receiver's balance
-      const newReceiverBalance = toAccount.balance + transferAmount;
-      const newReceiverAvailable = toAccount.available_balance + transferAmount;
-
-      const { error: updateReceiverError } = await supabase
-        .from("accounts")
-        .update({
-          balance: newReceiverBalance,
-          available_balance: newReceiverAvailable,
-          updated_at: new Date().toISOString(),
-        })
-        .eq("id", toAccount.id);
-
-      if (updateReceiverError) throw updateReceiverError;
-
-      // Process fee income if applicable
-      if (feeAmount > 0) {
-        await processFeeIncome(transaction, feeAmount, fromAccount, toAccount);
-      }
-
-      // ==================== LEDGER ENTRIES ====================
-
-      // Process double-entry for transfer
-      await processDoubleEntry(
-        transaction,
-        req.user,
-        fromAccount,
-        toAccount,
-        transferAmount,
-        description,
-        "transfer",
-        feeAmount,
-      );
-
-      // Update single ledger for sender (Debit)
-      await updateSingleLedger(
-        fromAccount.id,
-        req.user.id,
-        totalDeduction,
-        "transfer",
-        `Transfer to ${toAccount.account_number} (${toAccount.users?.first_name || ""} ${toAccount.users?.last_name || ""})`,
-        "Debit",
-        transaction.id,
-      );
-
-      // Update single ledger for receiver (Credit)
-      await updateSingleLedger(
-        toAccount.id,
-        toAccount.user_id,
-        transferAmount,
-        "transfer",
-        `Transfer from ${fromAccount.account_number} (${req.user.first_name} ${req.user.last_name})`,
-        "Credit",
-        transaction.id,
-      );
-
-      // Create notification for sender
-      await supabase.from("notifications").insert({
-        user_id: req.user.id,
-        title: "Transfer Completed",
-        message: `You have successfully transferred ₦${transferAmount.toFixed(2)} to account ${toAccount.account_number}. Fee: ₦${feeAmount.toFixed(2)}`,
-        type: "success",
-        created_at: new Date().toISOString(),
-      });
-
-      // Create notification for recipient
-      await supabase.from("notifications").insert({
-        user_id: toAccount.user_id,
-        title: "Money Received",
-        message: `You have received ₦${transferAmount.toFixed(2)} from ${req.user.first_name} ${req.user.last_name}`,
-        type: "success",
-        created_at: new Date().toISOString(),
-      });
-
-      // Log admin action for large transfers (over $1000)
-      if (amount > 1000) {
-        await supabase.from("admin_actions").insert({
-          admin_id: null,
-          action_type: "large_transfer",
-          target_user_id: req.user.id,
-          details: {
-            amount,
-            to_user: toAccount.user_id,
-            transaction_id: transaction.id,
-          },
-          created_at: new Date().toISOString(),
-        });
-      }
-
-      console.log("Transfer completed successfully:", transaction.id);
-
-      res.json({
-        message: "Transfer completed successfully",
-        transaction: {
-          id: transaction.id,
-          transaction_id: transaction.transaction_id,
-          amount: transferAmount,
-          fee: feeAmount,
-          total_deducted: totalDeduction,
-          new_balance: newSenderAvailable,
-          description: transaction.description,
-          completed_at: transaction.completed_at,
-        },
-        recipient: {
-          name: `${toAccount.users?.first_name || ""} ${toAccount.users?.last_name || ""}`,
-          account_number: toAccount.account_number,
-        },
-      });
-    } catch (error) {
-      console.error("Transfer error:", error);
-      res.status(500).json({ error: "Transfer failed: " + error.message });
-    }
-  },
-);*/
 
 // Enhanced transfer with fraud detection
 app.post(
