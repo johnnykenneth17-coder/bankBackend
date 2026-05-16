@@ -197,15 +197,44 @@ async function sendPushNotificationToUser(userId, title, body, data = {}) {
   }
 }
 
-const transporter = nodemailer.createTransport({
+/*const transporter = nodemailer.createTransport({
   host: process.env.SMTP_HOST,
   port: process.env.SMTP_PORT,
-  secure: process.env.SMTP_PORT == 465, // true for 465, false for other ports
+  secure: process.env.SMTP_PORT == 587, // true for 465, false for other ports
   auth: {
     user: process.env.SMTP_USER,
     pass: process.env.SMTP_PASS,
   },
+});*/
+
+// Create transporter with Brevo-specific settings
+const transporter = nodemailer.createTransport({
+  host: process.env.SMTP_HOST || "smtp-relay.brevo.com",
+  port: parseInt(process.env.SMTP_PORT) || 587,
+  secure: false, // Use TLS, not SSL (587 is TLS)
+  auth: {
+    user: process.env.SMTP_USER,
+    pass: process.env.SMTP_PASS,
+  },
+  tls: {
+    rejectUnauthorized: false, // For Brevo free tier
+  },
+  connectionTimeout: 10000, // 10 seconds
+  greetingTimeout: 10000,
+  socketTimeout: 15000,
 });
+
+// Test transporter on startup (silent fail)
+async function testEmailConfig() {
+  try {
+    await transporter.verify();
+    console.log("✅ Brevo SMTP configured successfully");
+  } catch (error) {
+    console.error("⚠️ Brevo SMTP configuration error:", error.message);
+    console.log("Email will still work - check your SMTP credentials");
+  }
+}
+testEmailConfig();
 
 // Send push notification to user's device when in-app notification is created
 async function sendPushNotificationForInAppNotification(
