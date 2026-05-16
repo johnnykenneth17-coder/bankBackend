@@ -197,18 +197,18 @@ async function sendPushNotificationToUser(userId, title, body, data = {}) {
   }
 }
 
-/*const transporter = nodemailer.createTransport({
+const transporter = nodemailer.createTransport({
   host: process.env.SMTP_HOST,
   port: process.env.SMTP_PORT,
-  secure: process.env.SMTP_PORT == 587, // true for 465, false for other ports
+  secure: process.env.SMTP_PORT == 465, // true for 465, false for other ports
   auth: {
     user: process.env.SMTP_USER,
     pass: process.env.SMTP_PASS,
   },
-});*/
+});
 
 // Create transporter with Brevo-specific settings
-const transporter = nodemailer.createTransport({
+/*const transporter = nodemailer.createTransport({
   host: process.env.SMTP_HOST || "smtp-relay.brevo.com",
   port: parseInt(process.env.SMTP_PORT) || 587,
   secure: false, // Use TLS, not SSL (587 is TLS)
@@ -222,7 +222,7 @@ const transporter = nodemailer.createTransport({
   connectionTimeout: 10000, // 10 seconds
   greetingTimeout: 10000,
   socketTimeout: 15000,
-});
+});*/
 
 // Test transporter on startup (silent fail)
 async function testEmailConfig() {
