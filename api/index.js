@@ -561,7 +561,7 @@ async function sendOTPEmail(email, otp) {
 
 // ==================== SMS CONFIGURATION (AFRICA'S TALKING) ====================
 
-const africastalking = require("africastalking");
+//const africastalking = require("africastalking");
 
 // Initialize Africa's Talking (only if API key exists)
 let africasTalkingClient = null;
