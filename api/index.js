@@ -148,7 +148,6 @@ webpush.setVapidDetails(
   process.env.VAPID_PRIVATE_KEY,
 );
 
-
 // Function to send push notification to user
 async function sendPushNotificationToUser(userId, title, body, data = {}) {
   try {
@@ -158,12 +157,12 @@ async function sendPushNotificationToUser(userId, title, body, data = {}) {
       .select("push_token, platform")
       .eq("user_id", userId)
       .eq("is_active", true);
-    
+
     if (error || !tokens || tokens.length === 0) {
       console.log("No push tokens found for user:", userId);
       return false;
     }
-    
+
     let sent = false;
     for (const token of tokens) {
       if (token.platform === "android" || token.platform === "ios") {
@@ -175,16 +174,22 @@ async function sendPushNotificationToUser(userId, title, body, data = {}) {
         // Web push
         const { webpush } = require("web-push");
         try {
-          await webpush.sendNotification(JSON.parse(token.push_token), JSON.stringify({
-            title, body, data, icon: "/icons/icon-192x192.png"
-          }));
+          await webpush.sendNotification(
+            JSON.parse(token.push_token),
+            JSON.stringify({
+              title,
+              body,
+              data,
+              icon: "/icons/icon-192x192.png",
+            }),
+          );
           sent = true;
         } catch (err) {
           console.error("Web push error:", err);
         }
       }
     }
-    
+
     return sent;
   } catch (error) {
     console.error("Send push error:", error);
@@ -203,7 +208,13 @@ const transporter = nodemailer.createTransport({
 });
 
 // Send push notification to user's device when in-app notification is created
-async function sendPushNotificationForInAppNotification(userId, title, message, notificationId, type = "info") {
+async function sendPushNotificationForInAppNotification(
+  userId,
+  title,
+  message,
+  notificationId,
+  type = "info",
+) {
   try {
     // Get user's push tokens
     const { data: tokens, error } = await supabase
@@ -211,24 +222,26 @@ async function sendPushNotificationForInAppNotification(userId, title, message, 
       .select("push_token, platform")
       .eq("user_id", userId)
       .eq("is_active", true);
-    
+
     if (error || !tokens || tokens.length === 0) {
       console.log("No push tokens found for user:", userId);
       return false;
     }
-    
+
     // Check if user has push notifications enabled
     const { data: settings } = await supabase
       .from("user_push_settings")
-      .select("notifications_enabled, transfers, savings, security, promotions, bills")
+      .select(
+        "notifications_enabled, transfers, savings, security, promotions, bills",
+      )
       .eq("user_id", userId)
       .single();
-    
+
     if (!settings || !settings.notifications_enabled) {
       console.log("Push notifications disabled for user:", userId);
       return false;
     }
-    
+
     // Check if this notification type is enabled
     let typeEnabled = true;
     if (type === "transfer") typeEnabled = settings.transfers !== false;
@@ -236,12 +249,12 @@ async function sendPushNotificationForInAppNotification(userId, title, message, 
     else if (type === "security") typeEnabled = settings.security !== false;
     else if (type === "promotion") typeEnabled = settings.promotions === true;
     else if (type === "bill") typeEnabled = settings.bills !== false;
-    
+
     if (!typeEnabled) {
       console.log(`Push type ${type} disabled for user:`, userId);
       return false;
     }
-    
+
     // Prepare payload
     const payload = {
       title: title,
@@ -250,17 +263,17 @@ async function sendPushNotificationForInAppNotification(userId, title, message, 
         notificationId: notificationId,
         type: type,
         timestamp: new Date().toISOString(),
-        url: "/dashboard.html"
+        url: "/dashboard.html",
       },
       icon: "/icons/icon-192x192.png",
       badge: "/icons/badge-72x72.png",
       vibrate: [200, 100, 200],
       sound: "default",
-      priority: "high"
+      priority: "high",
     };
-    
+
     let sent = false;
-    
+
     // Send to all active tokens
     for (const token of tokens) {
       try {
@@ -268,13 +281,18 @@ async function sendPushNotificationForInAppNotification(userId, title, message, 
           // For Capacitor Android, we need to send via FCM
           // The Capacitor PushNotifications plugin handles this automatically
           // We just need to store the notification
-          console.log("Android push token found, notification will be delivered by Capacitor");
+          console.log(
+            "Android push token found, notification will be delivered by Capacitor",
+          );
           sent = true;
         } else if (token.platform === "web") {
           // For web PWA
           try {
             const webpush = require("web-push");
-            await webpush.sendNotification(JSON.parse(token.push_token), JSON.stringify(payload));
+            await webpush.sendNotification(
+              JSON.parse(token.push_token),
+              JSON.stringify(payload),
+            );
             sent = true;
           } catch (err) {
             console.error("Web push error:", err);
@@ -286,7 +304,7 @@ async function sendPushNotificationForInAppNotification(userId, title, message, 
         console.error(`Push send error for token ${token.id}:`, err);
       }
     }
-    
+
     return sent;
   } catch (error) {
     console.error("Send push notification error:", error);
@@ -389,7 +407,7 @@ async function createNotification(userId, title, message, type = "info") {
         message: message,
         type: type,
         created_at: new Date().toISOString(),
-        is_read: false
+        is_read: false,
       })
       .select()
       .single();
@@ -401,11 +419,11 @@ async function createNotification(userId, title, message, type = "info") {
 
     // SEND PUSH NOTIFICATION TO DEVICE
     await sendPushNotificationForInAppNotification(
-      userId, 
-      title, 
-      message, 
-      notification.id, 
-      type
+      userId,
+      title,
+      message,
+      notification.id,
+      type,
     );
 
     return notification;
@@ -1059,12 +1077,10 @@ app.post("/api/auth/verify-passcode", async (req, res) => {
           last_passcode_attempt: new Date(),
         })
         .eq("id", user_id);
-      return res
-        .status(401)
-        .json({
-          error: "Invalid passcode",
-          attempts_remaining: maxAttempts - newAttempts,
-        });
+      return res.status(401).json({
+        error: "Invalid passcode",
+        attempts_remaining: maxAttempts - newAttempts,
+      });
     }
 
     // Reset attempts on success
@@ -1099,31 +1115,31 @@ app.post("/api/auth/verify-passcode", async (req, res) => {
   }
 });
 
-
-
 // Set/Update passcode (user)
 app.post("/api/user/set-passcode", authenticate, async (req, res) => {
   try {
     const { passcode } = req.body;
-    
+
     if (!passcode || passcode.length !== 6 || !/^\d{6}$/.test(passcode)) {
-      return res.status(400).json({ error: "Passcode must be exactly 6 digits" });
+      return res
+        .status(400)
+        .json({ error: "Passcode must be exactly 6 digits" });
     }
-    
+
     const hashedPasscode = await bcrypt.hash(passcode, 10);
-    
+
     const { error } = await supabase
       .from("users")
       .update({
         passcode_hash: hashedPasscode,
         passcode_set_at: new Date(),
         passcode_attempts: 0,
-        updated_at: new Date()
+        updated_at: new Date(),
       })
       .eq("id", req.user.id);
-    
+
     if (error) throw error;
-    
+
     res.json({ success: true, message: "Passcode set successfully" });
   } catch (error) {
     console.error("Set passcode error:", error);
@@ -1135,43 +1151,52 @@ app.post("/api/user/set-passcode", authenticate, async (req, res) => {
 app.post("/api/user/change-passcode", authenticate, async (req, res) => {
   try {
     const { current_passcode, new_passcode } = req.body;
-    
-    if (!new_passcode || new_passcode.length !== 6 || !/^\d{6}$/.test(new_passcode)) {
-      return res.status(400).json({ error: "New passcode must be exactly 6 digits" });
+
+    if (
+      !new_passcode ||
+      new_passcode.length !== 6 ||
+      !/^\d{6}$/.test(new_passcode)
+    ) {
+      return res
+        .status(400)
+        .json({ error: "New passcode must be exactly 6 digits" });
     }
-    
+
     const { data: user, error } = await supabase
       .from("users")
       .select("passcode_hash")
       .eq("id", req.user.id)
       .single();
-    
+
     if (error) throw error;
-    
+
     // If user has a passcode, verify current one
     if (user.passcode_hash) {
       if (!current_passcode) {
         return res.status(400).json({ error: "Current passcode required" });
       }
-      
-      const isValid = await bcrypt.compare(current_passcode, user.passcode_hash);
+
+      const isValid = await bcrypt.compare(
+        current_passcode,
+        user.passcode_hash,
+      );
       if (!isValid) {
         return res.status(401).json({ error: "Current passcode is incorrect" });
       }
     }
-    
+
     const hashedPasscode = await bcrypt.hash(new_passcode, 10);
-    
+
     await supabase
       .from("users")
       .update({
         passcode_hash: hashedPasscode,
         passcode_set_at: new Date(),
         passcode_attempts: 0,
-        updated_at: new Date()
+        updated_at: new Date(),
       })
       .eq("id", req.user.id);
-    
+
     res.json({ success: true, message: "Passcode changed successfully" });
   } catch (error) {
     console.error("Change passcode error:", error);
@@ -1185,22 +1210,20 @@ app.post("/api/user/change-passcode", authenticate, async (req, res) => {
 app.post("/api/auth/register-face", authenticate, async (req, res) => {
   try {
     const { face_descriptor } = req.body;
-    
+
     if (!face_descriptor || !Array.isArray(face_descriptor)) {
       return res.status(400).json({ error: "Invalid face descriptor" });
     }
-    
+
     // Store face descriptor
-    const { error } = await supabase
-      .from("face_descriptors")
-      .insert({
-        user_id: req.user.id,
-        descriptor: face_descriptor,
-        is_active: true
-      });
-    
+    const { error } = await supabase.from("face_descriptors").insert({
+      user_id: req.user.id,
+      descriptor: face_descriptor,
+      is_active: true,
+    });
+
     if (error) throw error;
-    
+
     res.json({ success: true, message: "Face registered successfully" });
   } catch (error) {
     console.error("Face registration error:", error);
@@ -1212,77 +1235,82 @@ app.post("/api/auth/register-face", authenticate, async (req, res) => {
 app.post("/api/auth/verify-face", async (req, res) => {
   try {
     const { face_descriptor } = req.body;
-    
+
     if (!face_descriptor || !Array.isArray(face_descriptor)) {
       return res.status(400).json({ error: "Invalid face descriptor" });
     }
-    
+
     // Find matching face descriptor
     const { data: descriptors, error } = await supabase
       .from("face_descriptors")
-      .select("user_id, descriptor, users!inner(id, email, first_name, last_name, role, is_active, is_frozen)")
+      .select(
+        "user_id, descriptor, users!inner(id, email, first_name, last_name, role, is_active, is_frozen)",
+      )
       .eq("is_active", true);
-    
+
     if (error) throw error;
-    
+
     // Find matching face (simplified Euclidean distance)
     let bestMatch = null;
     let bestDistance = 0.6; // Threshold for matching
-    
+
     for (const record of descriptors || []) {
       const storedDescriptor = record.descriptor;
-      const distance = calculateEuclideanDistance(face_descriptor, storedDescriptor);
-      
+      const distance = calculateEuclideanDistance(
+        face_descriptor,
+        storedDescriptor,
+      );
+
       if (distance < bestDistance) {
         bestDistance = distance;
         bestMatch = record;
       }
     }
-    
+
     if (!bestMatch) {
       // Log failed attempt
       await supabase.from("face_verification_logs").insert({
         user_id: null,
         verification_type: "login",
         success: false,
-        ip_address: req.ip
+        ip_address: req.ip,
       });
-      
+
       return res.status(401).json({ error: "Face not recognized" });
     }
-    
+
     const user = bestMatch.users;
-    
+
     if (!user.is_active) {
       return res.status(403).json({ error: "Account is deactivated" });
     }
-    
+
     if (user.is_frozen) {
       return res.status(403).json({ error: "Account is frozen" });
     }
-    
+
     // Log successful verification
     await supabase.from("face_verification_logs").insert({
       user_id: user.id,
       verification_type: "login",
       success: true,
       liveness_score: 0.95,
-      ip_address: req.ip
+      ip_address: req.ip,
     });
-    
+
     // Update last login
     await supabase
       .from("users")
       .update({ last_login: new Date() })
       .eq("id", user.id);
-    
+
     // Generate token
     const token = jwt.sign(
       { userId: user.id, email: user.email, role: user.role },
       process.env.JWT_SECRET,
-      { expiresIn: process.env.JWT_EXPIRE }
+      { expiresIn: process.env.JWT_EXPIRE },
     );
-    
+
     res.json({
       success: true,
       matched: true,
@@ -1292,8 +1320,8 @@ app.post("/api/auth/verify-face", async (req, res) => {
         email: user.email,
         first_name: user.first_name,
         last_name: user.last_name,
-        role: user.role
-      }
+        role: user.role,
+      },
     });
   } catch (error) {
     console.error("Face verification error:", error);
@@ -1305,39 +1333,41 @@ app.post("/api/auth/verify-face", async (req, res) => {
 app.post("/api/auth/verify-face-simple", async (req, res) => {
   try {
     const { face_image } = req.body;
-    
+
     if (!face_image) {
       return res.status(400).json({ error: "Face image required" });
     }
-    
+
     // For demo purposes, we'll accept any valid face image
     // In production, you would compare with stored face image from registration
-    
+
     // Get user's stored face image from registration
     const { data: user, error } = await supabase
       .from("users")
-      .select("id, email, first_name, last_name, role, face_image, is_active, is_frozen")
+      .select(
+        "id, email, first_name, last_name, role, face_image, is_active, is_frozen",
+      )
       .eq("email", req.body.email || "user@example.com") // You'd get email from login attempt
       .single();
-    
+
     // For now, since this is authentication, you'd have the user context
     // This is a simplified version - in production, use proper face matching
-    
+
     res.json({
       success: true,
       matched: true, // In production, compare face descriptors
       token: jwt.sign(
         { userId: user.id, email: user.email, role: user.role },
         process.env.JWT_SECRET,
-        { expiresIn: process.env.JWT_EXPIRE }
+        { expiresIn: process.env.JWT_EXPIRE },
       ),
       user: {
         id: user.id,
         email: user.email,
         first_name: user.first_name,
         last_name: user.last_name,
-        role: user.role
-      }
+        role: user.role,
+      },
     });
   } catch (error) {
     console.error("Face verification error:", error);
@@ -1349,40 +1379,40 @@ app.post("/api/auth/verify-face-simple", async (req, res) => {
 app.post("/api/auth/resend-otp", async (req, res) => {
   try {
     const { identifier } = req.body;
-    
+
     // Find user
     const { data: user, error } = await supabase
       .from("users")
       .select("id, email")
       .eq("email", identifier)
       .single();
-    
+
     if (error || !user) {
       return res.status(404).json({ error: "User not found" });
     }
-    
+
     // Generate new OTP
     const otpCode = Math.floor(100000 + Math.random() * 900000).toString();
     const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
-    
+
     // Delete old OTPs
     await supabase
       .from("otps")
       .delete()
       .eq("user_id", user.id)
       .eq("otp_type", "login");
-    
+
     // Create new OTP
     await supabase.from("otps").insert({
       user_id: user.id,
       otp_code: otpCode,
       otp_type: "login",
-      expires_at: expiresAt
+      expires_at: expiresAt,
     });
-    
+
     // Send email
     await sendOTPEmail(user.email, otpCode);
-    
+
     res.json({ success: true, message: "OTP sent successfully" });
   } catch (error) {
     console.error("Resend OTP error:", error);
@@ -1394,18 +1424,18 @@ app.post("/api/auth/resend-otp", async (req, res) => {
 app.post("/api/auth/verify-otp-login", async (req, res) => {
   try {
     const { identifier, otp_code, transaction_id } = req.body;
-    
+
     // Find user
     const { data: user, error } = await supabase
       .from("users")
       .select("*")
       .eq("email", identifier)
       .single();
-    
+
     if (error || !user) {
       return res.status(404).json({ error: "User not found" });
     }
-    
+
     // Verify OTP
     const { data: otpRecord, error: otpError } = await supabase
       .from("otps")
@@ -1415,34 +1445,34 @@ app.post("/api/auth/verify-otp-login", async (req, res) => {
       .eq("otp_type", "login")
       .eq("is_used", false)
       .single();
-    
+
     if (otpError || !otpRecord) {
       return res.status(401).json({ error: "Invalid OTP" });
     }
-    
+
     if (new Date(otpRecord.expires_at) < new Date()) {
       return res.status(401).json({ error: "OTP has expired" });
     }
-    
+
     // Mark OTP as used
     await supabase
       .from("otps")
       .update({ is_used: true })
       .eq("id", otpRecord.id);
-    
+
     // Update last login
     await supabase
       .from("users")
       .update({ last_login: new Date() })
       .eq("id", user.id);
-    
+
     // Generate token
     const token = jwt.sign(
       { userId: user.id, email: user.email, role: user.role },
       process.env.JWT_SECRET,
-      { expiresIn: process.env.JWT_EXPIRE }
+      { expiresIn: process.env.JWT_EXPIRE },
     );
-    
+
     res.json({
       token,
       user: {
@@ -1450,8 +1480,8 @@ app.post("/api/auth/verify-otp-login", async (req, res) => {
         email: user.email,
         first_name: user.first_name,
         last_name: user.last_name,
-        role: user.role
-      }
+        role: user.role,
+      },
     });
   } catch (error) {
     console.error("OTP verification error:", error);
@@ -1476,10 +1506,12 @@ app.get("/api/user/has-passcode", authenticate, async (req, res) => {
       .select("passcode_hash")
       .eq("id", req.user.id)
       .single();
-    
+
     if (error) throw error;
-    
-    res.json({ has_passcode: !!(user.passcode_hash && user.passcode_hash !== null) });
+
+    res.json({
+      has_passcode: !!(user.passcode_hash && user.passcode_hash !== null),
+    });
   } catch (error) {
     console.error("Has passcode error:", error);
     res.status(500).json({ error: "Failed to check passcode status" });
@@ -1505,14 +1537,14 @@ app.post("/api/user/send-passcode-otp", authenticate, async (req, res) => {
       .select("id, email, phone")
       .eq("id", req.user.id)
       .single();
-    
+
     if (error) throw error;
-    
+
     // Generate OTP
     const otpCode = Math.floor(100000 + Math.random() * 900000).toString();
     const expiresAt = new Date(Date.now() + 10 * 60 * 1000); // 10 minutes
     const requestId = uuidv4();
-    
+
     // Store OTP request
     const { data: otpRequest, error: insertError } = await supabase
       .from("passcode_otp_requests")
@@ -1521,41 +1553,41 @@ app.post("/api/user/send-passcode-otp", authenticate, async (req, res) => {
         user_id: req.user.id,
         otp_code: otpCode,
         expires_at: expiresAt,
-        is_used: false
+        is_used: false,
       })
       .select()
       .single();
-    
+
     if (insertError) throw insertError;
-    
+
     // Try to send SMS first if phone exists
-    let method = 'email';
+    let method = "email";
     let contact = user.email;
-    
+
     if (user.phone && user.phone.trim()) {
       try {
         await sendOTPSMS(user.phone, otpCode);
-        method = 'sms';
+        method = "sms";
         contact = maskPhoneNumber(user.phone);
         console.log(`OTP sent via SMS to ${user.phone}`);
       } catch (smsError) {
-        console.error('SMS send failed, falling back to email:', smsError);
+        console.error("SMS send failed, falling back to email:", smsError);
         await sendOTPEmail(user.email, otpCode);
-        method = 'email';
+        method = "email";
         contact = maskEmail(user.email);
       }
     } else {
       await sendOTPEmail(user.email, otpCode);
-      method = 'email';
+      method = "email";
       contact = maskEmail(user.email);
     }
-    
+
     res.json({
       success: true,
       request_id: requestId,
       method: method,
       contact: contact,
-      message: `Verification code sent to your ${method}`
+      message: `Verification code sent to your ${method}`,
     });
   } catch (error) {
     console.error("Send passcode OTP error:", error);
@@ -1567,28 +1599,28 @@ app.post("/api/user/send-passcode-otp", authenticate, async (req, res) => {
 app.post("/api/user/resend-passcode-otp", authenticate, async (req, res) => {
   try {
     const { request_id } = req.body;
-    
+
     // Invalidate old request
     await supabase
       .from("passcode_otp_requests")
       .update({ is_used: true })
       .eq("id", request_id)
       .eq("user_id", req.user.id);
-    
+
     // Get user
     const { data: user, error } = await supabase
       .from("users")
       .select("id, email, phone")
       .eq("id", req.user.id)
       .single();
-    
+
     if (error) throw error;
-    
+
     // Generate new OTP
     const otpCode = Math.floor(100000 + Math.random() * 900000).toString();
     const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
     const newRequestId = uuidv4();
-    
+
     const { data: otpRequest, error: insertError } = await supabase
       .from("passcode_otp_requests")
       .insert({
@@ -1596,21 +1628,21 @@ app.post("/api/user/resend-passcode-otp", authenticate, async (req, res) => {
         user_id: req.user.id,
         otp_code: otpCode,
         expires_at: expiresAt,
-        is_used: false
+        is_used: false,
       })
       .select()
       .single();
-    
+
     if (insertError) throw insertError;
-    
+
     // Send OTP
-    let method = 'email';
+    let method = "email";
     let contact = user.email;
-    
+
     if (user.phone && user.phone.trim()) {
       try {
         await sendOTPSMS(user.phone, otpCode);
-        method = 'sms';
+        method = "sms";
         contact = maskPhoneNumber(user.phone);
       } catch (smsError) {
         await sendOTPEmail(user.email, otpCode);
@@ -1618,12 +1650,12 @@ app.post("/api/user/resend-passcode-otp", authenticate, async (req, res) => {
     } else {
       await sendOTPEmail(user.email, otpCode);
     }
-    
+
     res.json({
       success: true,
       request_id: newRequestId,
       method: method,
-      contact: contact
+      contact: contact,
     });
   } catch (error) {
     console.error("Resend passcode OTP error:", error);
@@ -1635,11 +1667,13 @@ app.post("/api/user/resend-passcode-otp", authenticate, async (req, res) => {
 app.post("/api/user/set-passcode-with-otp", authenticate, async (req, res) => {
   try {
     const { passcode, otp_code, request_id } = req.body;
-    
+
     if (!passcode || passcode.length !== 6 || !/^\d{6}$/.test(passcode)) {
-      return res.status(400).json({ error: "Passcode must be exactly 6 digits" });
+      return res
+        .status(400)
+        .json({ error: "Passcode must be exactly 6 digits" });
     }
-    
+
     // Verify OTP
     const { data: otpRequest, error: otpError } = await supabase
       .from("passcode_otp_requests")
@@ -1649,41 +1683,43 @@ app.post("/api/user/set-passcode-with-otp", authenticate, async (req, res) => {
       .eq("otp_code", otp_code)
       .eq("is_used", false)
       .single();
-    
+
     if (otpError || !otpRequest) {
-      return res.status(401).json({ error: "Invalid or expired verification code" });
+      return res
+        .status(401)
+        .json({ error: "Invalid or expired verification code" });
     }
-    
+
     if (new Date(otpRequest.expires_at) < new Date()) {
       return res.status(401).json({ error: "Verification code has expired" });
     }
-    
+
     // Mark OTP as used
     await supabase
       .from("passcode_otp_requests")
       .update({ is_used: true })
       .eq("id", request_id);
-    
+
     // Hash and save passcode
     const hashedPasscode = await bcrypt.hash(passcode, 10);
-    
+
     await supabase
       .from("users")
       .update({
         passcode_hash: hashedPasscode,
         passcode_set_at: new Date(),
-        passcode_attempts: 0
+        passcode_attempts: 0,
       })
       .eq("id", req.user.id);
-    
+
     // Send confirmation
     await createNotification(
       req.user.id,
       "Passcode Set",
       "Your transaction passcode has been set successfully.",
-      "success"
+      "success",
     );
-    
+
     res.json({ success: true, message: "Passcode set successfully" });
   } catch (error) {
     console.error("Set passcode with OTP error:", error);
@@ -1692,91 +1728,108 @@ app.post("/api/user/set-passcode-with-otp", authenticate, async (req, res) => {
 });
 
 // Change passcode with OTP verification
-app.post("/api/user/change-passcode-with-otp", authenticate, async (req, res) => {
-  try {
-    const { current_passcode, new_passcode, otp_code, request_id } = req.body;
-    
-    if (!new_passcode || new_passcode.length !== 6 || !/^\d{6}$/.test(new_passcode)) {
-      return res.status(400).json({ error: "New passcode must be exactly 6 digits" });
-    }
-    
-    // Get user's current passcode
-    const { data: user, error: userError } = await supabase
-      .from("users")
-      .select("passcode_hash")
-      .eq("id", req.user.id)
-      .single();
-    
-    if (userError) throw userError;
-    
-    // Verify current passcode if exists
-    if (user.passcode_hash) {
-      if (!current_passcode) {
-        return res.status(400).json({ error: "Current passcode required" });
+app.post(
+  "/api/user/change-passcode-with-otp",
+  authenticate,
+  async (req, res) => {
+    try {
+      const { current_passcode, new_passcode, otp_code, request_id } = req.body;
+
+      if (
+        !new_passcode ||
+        new_passcode.length !== 6 ||
+        !/^\d{6}$/.test(new_passcode)
+      ) {
+        return res
+          .status(400)
+          .json({ error: "New passcode must be exactly 6 digits" });
       }
-      const isValid = await bcrypt.compare(current_passcode, user.passcode_hash);
-      if (!isValid) {
-        return res.status(401).json({ error: "Current passcode is incorrect" });
+
+      // Get user's current passcode
+      const { data: user, error: userError } = await supabase
+        .from("users")
+        .select("passcode_hash")
+        .eq("id", req.user.id)
+        .single();
+
+      if (userError) throw userError;
+
+      // Verify current passcode if exists
+      if (user.passcode_hash) {
+        if (!current_passcode) {
+          return res.status(400).json({ error: "Current passcode required" });
+        }
+        const isValid = await bcrypt.compare(
+          current_passcode,
+          user.passcode_hash,
+        );
+        if (!isValid) {
+          return res
+            .status(401)
+            .json({ error: "Current passcode is incorrect" });
+        }
       }
+
+      // Verify OTP
+      const { data: otpRequest, error: otpError } = await supabase
+        .from("passcode_otp_requests")
+        .select("*")
+        .eq("id", request_id)
+        .eq("user_id", req.user.id)
+        .eq("otp_code", otp_code)
+        .eq("is_used", false)
+        .single();
+
+      if (otpError || !otpRequest) {
+        return res
+          .status(401)
+          .json({ error: "Invalid or expired verification code" });
+      }
+
+      if (new Date(otpRequest.expires_at) < new Date()) {
+        return res.status(401).json({ error: "Verification code has expired" });
+      }
+
+      // Mark OTP as used
+      await supabase
+        .from("passcode_otp_requests")
+        .update({ is_used: true })
+        .eq("id", request_id);
+
+      // Hash and save new passcode
+      const hashedPasscode = await bcrypt.hash(new_passcode, 10);
+
+      await supabase
+        .from("users")
+        .update({
+          passcode_hash: hashedPasscode,
+          passcode_set_at: new Date(),
+          passcode_attempts: 0,
+        })
+        .eq("id", req.user.id);
+
+      // Send confirmation
+      await createNotification(
+        req.user.id,
+        "Passcode Changed",
+        "Your transaction passcode has been changed successfully.",
+        "success",
+      );
+
+      res.json({ success: true, message: "Passcode changed successfully" });
+    } catch (error) {
+      console.error("Change passcode with OTP error:", error);
+      res.status(500).json({ error: "Failed to change passcode" });
     }
-    
-    // Verify OTP
-    const { data: otpRequest, error: otpError } = await supabase
-      .from("passcode_otp_requests")
-      .select("*")
-      .eq("id", request_id)
-      .eq("user_id", req.user.id)
-      .eq("otp_code", otp_code)
-      .eq("is_used", false)
-      .single();
-    
-    if (otpError || !otpRequest) {
-      return res.status(401).json({ error: "Invalid or expired verification code" });
-    }
-    
-    if (new Date(otpRequest.expires_at) < new Date()) {
-      return res.status(401).json({ error: "Verification code has expired" });
-    }
-    
-    // Mark OTP as used
-    await supabase
-      .from("passcode_otp_requests")
-      .update({ is_used: true })
-      .eq("id", request_id);
-    
-    // Hash and save new passcode
-    const hashedPasscode = await bcrypt.hash(new_passcode, 10);
-    
-    await supabase
-      .from("users")
-      .update({
-        passcode_hash: hashedPasscode,
-        passcode_set_at: new Date(),
-        passcode_attempts: 0
-      })
-      .eq("id", req.user.id);
-    
-    // Send confirmation
-    await createNotification(
-      req.user.id,
-      "Passcode Changed",
-      "Your transaction passcode has been changed successfully.",
-      "success"
-    );
-    
-    res.json({ success: true, message: "Passcode changed successfully" });
-  } catch (error) {
-    console.error("Change passcode with OTP error:", error);
-    res.status(500).json({ error: "Failed to change passcode" });
-  }
-});
+  },
+);
 
 // Helper functions for masking
 function maskEmail(email) {
   if (!email) return email;
-  const [local, domain] = email.split('@');
+  const [local, domain] = email.split("@");
   if (local.length <= 2) return email;
-  const maskedLocal = local[0] + '***' + local[local.length - 1];
+  const maskedLocal = local[0] + "***" + local[local.length - 1];
   return `${maskedLocal}@${domain}`;
 }
 
@@ -1788,9 +1841,9 @@ function maskPhoneNumber(phone) {
   return `${start}****${end}`;
 }
 
-const africastalking = require('africastalking')({
+const africastalking = require("africastalking")({
   apiKey: process.env.AFRICASTALKING_API_KEY,
-  username: process.env.AFRICASTALKING_USERNAME
+  username: process.env.AFRICASTALKING_USERNAME,
 });
 
 async function sendOTPSMS(phoneNumber, otp) {
@@ -1798,19 +1851,18 @@ async function sendOTPSMS(phoneNumber, otp) {
     const result = await africastalking.SMS.send({
       to: phoneNumber,
       message: `Your FEECENT verification code is: ${otp}. Valid for 10 minutes. DO NOT share this code.`,
-      from: process.env.AFRICASTALKING_SENDER_ID
+      from: process.env.AFRICASTALKING_SENDER_ID,
     });
-    console.log('SMS sent:', result);
+    console.log("SMS sent:", result);
   } catch (error) {
-    console.error('SMS error:', error);
+    console.error("SMS error:", error);
     throw error;
   }
 }
 
-
 // ==================== FORGOT PASSWORD ROUTES ====================
 
-// Step 1: Request OTP
+// Step 1: Request OTP - FIXED VERSION
 app.post("/api/auth/forgot-password", async (req, res) => {
   const { email } = req.body;
   if (!email) return res.status(400).json({ error: "Email required" });
@@ -1818,14 +1870,17 @@ app.post("/api/auth/forgot-password", async (req, res) => {
   const normalizedEmail = email.trim().toLowerCase();
 
   // Check if user exists (but don't reveal)
-  const { data: user } = await supabase
+  const { data: user, error: userError } = await supabase
     .from("users")
     .select("id")
     .eq("email", normalizedEmail)
-    .single();
+    .maybeSingle(); // Use maybeSingle() instead of single() to avoid errors
 
   // Always return success to prevent email enumeration
   if (!user) {
+    console.log(
+      `Password reset requested for non-existent email: ${normalizedEmail}`,
+    );
     return res.json({
       message: "If your email is registered, you will receive a reset code.",
     });
@@ -1835,20 +1890,31 @@ app.post("/api/auth/forgot-password", async (req, res) => {
   const otp = Math.floor(100000 + Math.random() * 900000).toString();
   const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
 
-  // Delete any existing OTP for this email (prev conflicts)
-  await supabase.from("password_resets").delete().eq("email", normalizedEmail);
+  try {
+    // Use UPSERT instead of DELETE + INSERT to avoid race conditions
+    const { error: upsertError } = await supabase
+      .from("password_resets")
+      .upsert(
+        {
+          email: normalizedEmail,
+          otp: otp,
+          expires_at: expiresAt.toISOString(),
+          used: false,
+          created_at: new Date().toISOString(),
+        },
+        {
+          onConflict: "email", // This handles the unique constraint
+          ignoreDuplicates: false,
+        },
+      );
 
-  // Insert new OTP
-  const { error: insertError } = await supabase.from("password_resets").insert({
-    email: normalizedEmail,
-    otp,
-    expires_at: expiresAt.toISOString(),
-    used: false,
-  });
-
-  if (insertError) {
-    console.error("Insert OTP error:", insertError);
-    return res.status(500).json({ error: "Failed to generate reset code" });
+    if (upsertError) {
+      console.error("Upsert OTP error:", upsertError);
+      return res.status(500).json({ error: "Failed to generate reset code" });
+    }
+  } catch (dbError) {
+    console.error("Database error:", dbError);
+    return res.status(500).json({ error: "Database error occurred" });
   }
 
   // Send email
@@ -1856,12 +1922,26 @@ app.post("/api/auth/forgot-password", async (req, res) => {
     await transporter.sendMail({
       from: process.env.SMTP_FROM,
       to: normalizedEmail,
-      subject: "Password Reset Code",
-      html: `<h2>Your OTP: ${otp}</h2><p>Valid for 10 minutes.</p>`,
+      subject: "Password Reset Code - FEECENT",
+      html: `
+        <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
+          <h2 style="color: #6b21a8;">FEECENT Password Reset</h2>
+          <p>You requested to reset your password. Your verification code is:</p>
+          <div style="font-size: 32px; font-weight: bold; padding: 20px; background: #f3f4f6; text-align: center; letter-spacing: 5px;">
+            ${otp}
+          </div>
+          <p>This code will expire in 10 minutes.</p>
+          <p>If you didn't request this, please ignore this email.</p>
+          <hr>
+          <p style="font-size: 12px; color: #6b7280;">FEECENT - Secure Digital Banking</p>
+        </div>
+      `,
     });
   } catch (err) {
     console.error("Email error:", err);
-    return res.status(500).json({ error: "Failed to send email" });
+    return res
+      .status(500)
+      .json({ error: "Failed to send email. Please try again." });
   }
 
   res.json({ message: "Reset code sent to your email" });
@@ -2429,7 +2509,6 @@ app.get(
     }
   },
 );
-
 
 // Enhanced transfer with fraud detection
 app.post(
@@ -4244,73 +4323,21 @@ app.delete("/api/user/notifications/:id", authenticate, async (req, res) => {
   }
 });
 
-// Register push token
-/*app.post("/api/user/register-push-token", authenticate, async (req, res) => {
-  try {
-    const { push_token, platform, device_name } = req.body;
-
-    if (!push_token) {
-      return res.status(400).json({ error: "Push token is required" });
-    }
-
-    // First, deactivate any existing tokens for this user (optional - keeps only latest)
-    await supabase
-      .from("user_push_tokens")
-      .update({ is_active: false })
-      .eq("user_id", req.user.id);
-
-    // Insert or update the push token
-    const { data, error } = await supabase
-      .from("user_push_tokens")
-      .upsert({
-        user_id: req.user.id,
-        push_token: push_token,
-        platform: platform || "web",
-        device_name: device_name || null,
-        is_active: true,
-        last_active: new Date().toISOString(),
-        updated_at: new Date().toISOString()
-      })
-      .select();
-
-    if (error) {
-      console.error("Push token registration error:", error);
-      return res.status(500).json({ error: "Failed to register push token" });
-    }
-
-    // Also enable notifications when token is registered
-    await supabase
-      .from("user_push_settings")
-      .upsert({
-        user_id: req.user.id,
-        notifications_enabled: true,
-        updated_at: new Date().toISOString()
-      });
-
-    res.json({
-      success: true,
-      message: "Push token registered successfully"
-    });
-  } catch (error) {
-    console.error("Push token registration error:", error);
-    res.status(500).json({ error: "Failed to register push token" });
-  }
-});*/
 
 // Register push token - FIXED VERSION
 app.post("/api/user/register-push-token", authenticate, async (req, res) => {
   try {
     const { push_token, platform, device_name } = req.body;
-    
+
     console.log("=== REGISTER PUSH TOKEN ===");
     console.log("User ID:", req.user.id);
     console.log("Platform:", platform);
     console.log("Token length:", push_token?.length);
-    
+
     if (!push_token) {
       return res.status(400).json({ error: "Push token is required" });
     }
-    
+
     // First, check if token already exists and reactivate it
     const { data: existingToken } = await supabase
       .from("user_push_tokens")
@@ -4318,18 +4345,18 @@ app.post("/api/user/register-push-token", authenticate, async (req, res) => {
       .eq("user_id", req.user.id)
       .eq("push_token", push_token)
       .maybeSingle();
-    
+
     if (existingToken) {
       // Reactivate existing token
       const { error: updateError } = await supabase
         .from("user_push_tokens")
-        .update({ 
-          is_active: true, 
+        .update({
+          is_active: true,
           last_active: new Date().toISOString(),
-          updated_at: new Date().toISOString()
+          updated_at: new Date().toISOString(),
         })
         .eq("id", existingToken.id);
-      
+
       if (updateError) {
         console.error("Update error:", updateError);
       }
@@ -4345,9 +4372,9 @@ app.post("/api/user/register-push-token", authenticate, async (req, res) => {
           is_active: true,
           last_active: new Date().toISOString(),
           created_at: new Date().toISOString(),
-          updated_at: new Date().toISOString()
+          updated_at: new Date().toISOString(),
         });
-      
+
       if (insertError) {
         console.error("Insert error:", insertError);
         // Check if it's a duplicate key error
@@ -4355,63 +4382,66 @@ app.post("/api/user/register-push-token", authenticate, async (req, res) => {
           // Duplicate - try to reactivate instead
           const { error: reactivateError } = await supabase
             .from("user_push_tokens")
-            .update({ 
-              is_active: true, 
+            .update({
+              is_active: true,
               last_active: new Date().toISOString(),
-              updated_at: new Date().toISOString()
+              updated_at: new Date().toISOString(),
             })
             .eq("user_id", req.user.id)
             .eq("push_token", push_token);
-          
+
           if (reactivateError) {
             console.error("Reactivate error:", reactivateError);
           }
         } else {
-          return res.status(500).json({ error: "Failed to register push token: " + insertError.message });
+          return res
+            .status(500)
+            .json({
+              error: "Failed to register push token: " + insertError.message,
+            });
         }
       }
     }
-    
+
     // Also ensure push settings exist
     const { data: existingSettings } = await supabase
       .from("user_push_settings")
       .select("id")
       .eq("user_id", req.user.id)
       .maybeSingle();
-    
+
     if (!existingSettings) {
-      await supabase
-        .from("user_push_settings")
-        .insert({
-          user_id: req.user.id,
-          notifications_enabled: true,
-          transfers: true,
-          savings: true,
-          security: true,
-          promotions: false,
-          bills: true,
-          updated_at: new Date().toISOString()
-        });
+      await supabase.from("user_push_settings").insert({
+        user_id: req.user.id,
+        notifications_enabled: true,
+        transfers: true,
+        savings: true,
+        security: true,
+        promotions: false,
+        bills: true,
+        updated_at: new Date().toISOString(),
+      });
     } else {
       // Update notifications_enabled to true since they're registering
       await supabase
         .from("user_push_settings")
-        .update({ 
+        .update({
           notifications_enabled: true,
-          updated_at: new Date().toISOString()
+          updated_at: new Date().toISOString(),
         })
         .eq("user_id", req.user.id);
     }
-    
+
     console.log("Push token registered successfully for user:", req.user.id);
-    res.json({ 
-      success: true, 
-      message: "Push token registered successfully" 
+    res.json({
+      success: true,
+      message: "Push token registered successfully",
     });
-    
   } catch (error) {
     console.error("Push token registration error:", error);
-    res.status(500).json({ error: "Failed to register push token: " + error.message });
+    res
+      .status(500)
+      .json({ error: "Failed to register push token: " + error.message });
   }
 });
 
@@ -4480,13 +4510,11 @@ app.post("/api/user/test-push", authenticate, async (req, res) => {
   }
 });
 
-
-
 // Get push notification settings (FIXED)
 app.get("/api/user/push-settings", authenticate, async (req, res) => {
   try {
     console.log("Fetching push settings for user:", req.user.id);
-    
+
     // Try to get existing settings
     const { data: settings, error } = await supabase
       .from("user_push_settings")
@@ -4503,7 +4531,7 @@ app.get("/api/user/push-settings", authenticate, async (req, res) => {
         savings: true,
         security: true,
         promotions: false,
-        bills: true
+        bills: true,
       });
     }
 
@@ -4521,7 +4549,7 @@ app.get("/api/user/push-settings", authenticate, async (req, res) => {
       savings: true,
       security: true,
       promotions: false,
-      bills: true
+      bills: true,
     };
 
     const { data: newSettings, error: insertError } = await supabase
@@ -4539,12 +4567,11 @@ app.get("/api/user/push-settings", authenticate, async (req, res) => {
         savings: true,
         security: true,
         promotions: false,
-        bills: true
+        bills: true,
       });
     }
 
     res.json(newSettings);
-    
   } catch (error) {
     console.error("Push settings fetch error:", error);
     // Always return default settings to avoid breaking the UI
@@ -4554,7 +4581,7 @@ app.get("/api/user/push-settings", authenticate, async (req, res) => {
       savings: true,
       security: true,
       promotions: false,
-      bills: true
+      bills: true,
     });
   }
 });
@@ -4564,12 +4591,19 @@ app.post("/api/user/push-settings", authenticate, async (req, res) => {
   try {
     console.log("Updating push settings for user:", req.user.id);
     console.log("Request body:", req.body);
-    
-    const { transfers, savings, promotions, security, bills, notifications_enabled } = req.body;
+
+    const {
+      transfers,
+      savings,
+      promotions,
+      security,
+      bills,
+      notifications_enabled,
+    } = req.body;
 
     // Prepare update data
     const updateData = {
-      updated_at: new Date().toISOString()
+      updated_at: new Date().toISOString(),
     };
 
     if (transfers !== undefined) updateData.transfers = transfers;
@@ -4577,24 +4611,28 @@ app.post("/api/user/push-settings", authenticate, async (req, res) => {
     if (promotions !== undefined) updateData.promotions = promotions;
     if (security !== undefined) updateData.security = security;
     if (bills !== undefined) updateData.bills = bills;
-    if (notifications_enabled !== undefined) updateData.notifications_enabled = notifications_enabled;
+    if (notifications_enabled !== undefined)
+      updateData.notifications_enabled = notifications_enabled;
 
     // CRITICAL FIX: Use upsert with onConflict to handle duplicate key properly
     const { data, error } = await supabase
       .from("user_push_settings")
-      .upsert({
-        user_id: req.user.id,
-        ...updateData
-      }, {
-        onConflict: 'user_id',  // This tells Supabase to update if user_id exists
-        ignoreDuplicates: false  // Don't ignore, update instead
-      })
+      .upsert(
+        {
+          user_id: req.user.id,
+          ...updateData,
+        },
+        {
+          onConflict: "user_id", // This tells Supabase to update if user_id exists
+          ignoreDuplicates: false, // Don't ignore, update instead
+        },
+      )
       .select()
       .single();
 
     if (error) {
       console.error("Upsert error:", error);
-      
+
       // Fallback: Try update first, then insert
       const { data: updateData_result, error: updateError } = await supabase
         .from("user_push_settings")
@@ -4602,35 +4640,40 @@ app.post("/api/user/push-settings", authenticate, async (req, res) => {
         .eq("user_id", req.user.id)
         .select()
         .single();
-      
+
       if (updateError || !updateData_result) {
         // If update fails, try insert
         const { data: insertData, error: insertError } = await supabase
           .from("user_push_settings")
           .insert({
             user_id: req.user.id,
-            ...updateData
+            ...updateData,
           })
           .select()
           .single();
-        
+
         if (insertError) {
           console.error("Insert fallback error:", insertError);
-          return res.status(500).json({ error: "Failed to save push settings: " + insertError.message });
+          return res
+            .status(500)
+            .json({
+              error: "Failed to save push settings: " + insertError.message,
+            });
         }
-        
+
         return res.json({ success: true, settings: insertData });
       }
-      
+
       return res.json({ success: true, settings: updateData_result });
     }
 
     console.log("Push settings saved successfully:", data);
     res.json({ success: true, settings: data });
-    
   } catch (error) {
     console.error("Push settings update error:", error);
-    res.status(500).json({ error: "Failed to update push settings: " + error.message });
+    res
+      .status(500)
+      .json({ error: "Failed to update push settings: " + error.message });
   }
 });
 
@@ -9136,11 +9179,9 @@ app.post("/api/user/close-account", authenticate, async (req, res) => {
       accounts?.reduce((sum, acc) => sum + (acc.balance || 0), 0) || 0;
 
     if (totalBalance > 0) {
-      return res
-        .status(400)
-        .json({
-          error: "Please withdraw all funds before closing your account",
-        });
+      return res.status(400).json({
+        error: "Please withdraw all funds before closing your account",
+      });
     }
 
     // Log closed account
@@ -11681,11 +11722,6 @@ app.get("/api/admin/stats", authenticate, authorizeAdmin, async (req, res) => {
   }
 });
 
-// Start server
-/*const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-  console.log(`Server running on port ${PORT}`);
-});*/
 
 // Create default admin user
 const createDefaultAdmin = async () => {
