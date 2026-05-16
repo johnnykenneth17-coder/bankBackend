@@ -1,91 +1,6 @@
-// ==================== EMAIL CONFIGURATION FOR BREVO FREE TIER ====================
+// ==================== FORGOT PASSWORD ROUTES (EMAIL ONLY) ====================
 
-
-
-// Simplified email sending function for Brevo
-async function sendOTPEmail(email, otp) {
-  console.log(`Attempting to send OTP ${otp} to ${email}`);
-  
-  // Check if we have required config
-  if (!process.env.SMTP_USER || !process.env.SMTP_PASS) {
-    console.error("❌ SMTP credentials missing. Set SMTP_USER and SMTP_PASS");
-    // Don't throw - just log and return
-    return;
-  }
-  
-  try {
-    // Simplified HTML for better compatibility
-    const htmlContent = `
-      <!DOCTYPE html>
-      <html>
-      <head>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-      </head>
-      <body style="font-family: Arial, sans-serif; margin: 0; padding: 20px; background-color: #f5f5f5;">
-        <div style="max-width: 500px; margin: 0 auto; background: white; border-radius: 12px; overflow: hidden; box-shadow: 0 2px 10px rgba(0,0,0,0.1);">
-          <div style="background: #6b21a8; padding: 20px; text-align: center;">
-            <h1 style="color: white; margin: 0; font-size: 24px;">FEECENT</h1>
-            <p style="color: #d8b4fe; margin: 5px 0 0;">Secure Digital Banking</p>
-          </div>
-          
-          <div style="padding: 30px 20px;">
-            <h2 style="color: #333; margin-top: 0;">Password Reset Request</h2>
-            <p style="color: #666; line-height: 1.6;">We received a request to reset your password. Use the code below to continue:</p>
-            
-            <div style="background: #f8fafc; padding: 20px; text-align: center; margin: 25px 0; border-radius: 8px;">
-              <div style="font-size: 42px; font-weight: bold; letter-spacing: 8px; color: #6b21a8; font-family: monospace;">
-                ${otp}
-              </div>
-            </div>
-            
-            <p style="color: #666; font-size: 14px;">This code will expire in <strong>10 minutes</strong>.</p>
-            <p style="color: #999; font-size: 12px; margin-top: 25px; padding-top: 15px; border-top: 1px solid #eee;">
-              If you didn't request this, please ignore this email.
-            </p>
-          </div>
-        </div>
-      </body>
-      </html>
-    `;
-    
-    const mailOptions = {
-      from: `"FEECENT" <${process.env.SMTP_FROM || process.env.SMTP_USER}>`,
-      to: email,
-      subject: "🔐 FEECENT Password Reset Code",
-      html: htmlContent,
-      text: `Your FEECENT password reset code is: ${otp}. Valid for 10 minutes.`,
-    };
-    
-    const info = await transporter.sendMail(mailOptions);
-    console.log(`✅ Email sent to ${email}, Message ID: ${info.messageId}`);
-    return true;
-    
-  } catch (error) {
-    console.error("❌ Email error details:", {
-      message: error.message,
-      code: error.code,
-      command: error.command,
-      response: error.response,
-    });
-    
-    // Don't throw - just return false
-    return false;
-  }
-}
-
-// SMS function (optional - can be simplified)
-async function sendOTPSMS(phoneNumber, otp) {
-  console.log(`📱 SMS would be sent to ${phoneNumber} with OTP ${otp}`);
-  console.log("SMS service not configured - using email only");
-  // For now, just log - SMS can be added later
-  return;
-}
-
-
-
-
-// Step 1: Request OTP - SIMPLIFIED FOR BREVO
+// Step 1: Request OTP via Email Only
 app.post("/api/auth/forgot-password", async (req, res) => {
   const { email } = req.body;
   
@@ -119,7 +34,7 @@ app.post("/api/auth/forgot-password", async (req, res) => {
     
     console.log(`Generated OTP ${otp} for user ${user.id}`);
 
-    // First, mark old OTPs as used
+    // First, mark any existing OTPs as used (soft delete)
     await supabase
       .from("password_resets")
       .update({ used: true })
@@ -142,14 +57,20 @@ app.post("/api/auth/forgot-password", async (req, res) => {
       return res.status(500).json({ error: "Failed to generate reset code" });
     }
 
-    // Send email - don't wait for it to complete (fire and forget for better performance)
-    sendOTPEmail(normalizedEmail, otp).catch(err => {
-      console.error("Background email send failed:", err);
-    });
+    // Send email with OTP
+    const emailSent = await sendOTPEmail(normalizedEmail, otp);
+    
+    if (!emailSent) {
+      console.error(`Failed to send email to ${normalizedEmail}`);
+      // Still return success to user (don't reveal email failure)
+      return res.json({ 
+        message: "If your email is registered, you will receive a reset code. Please check your spam folder."
+      });
+    }
 
-    // Return immediately without waiting for email
+    console.log(`✅ Reset email sent to ${normalizedEmail}`);
     res.json({ 
-      message: "Reset code sent to your email. Check your inbox (and spam folder)." 
+      message: "Reset code sent to your email. Please check your inbox and spam folder."
     });
     
   } catch (error) {
@@ -157,3 +78,175 @@ app.post("/api/auth/forgot-password", async (req, res) => {
     res.status(500).json({ error: "Something went wrong. Please try again." });
   }
 });
+
+// Step 2: Verify OTP
+app.post("/api/auth/verify-reset-otp", async (req, res) => {
+  const { email, otp } = req.body;
+  
+  if (!email || !otp) {
+    return res.status(400).json({ error: "Email and code required" });
+  }
+
+  const normalizedEmail = email.trim().toLowerCase();
+  const normalizedOtp = otp.trim();
+
+  console.log(`Verifying OTP for ${normalizedEmail}`);
+
+  try {
+    const { data: record, error } = await supabase
+      .from("password_resets")
+      .select("*")
+      .eq("email", normalizedEmail)
+      .eq("otp", normalizedOtp)
+      .eq("used", false)
+      .single();
+
+    if (error || !record) {
+      console.log("Invalid OTP:", error);
+      return res.status(400).json({ error: "Invalid or expired code" });
+    }
+
+    if (new Date(record.expires_at) < new Date()) {
+      console.log("Expired OTP for:", normalizedEmail);
+      return res.status(400).json({ error: "Code has expired. Please request a new one." });
+    }
+
+    // Mark as used
+    await supabase
+      .from("password_resets")
+      .update({ used: true })
+      .eq("id", record.id);
+
+    console.log(`✅ OTP verified successfully for ${normalizedEmail}`);
+    res.json({ valid: true });
+    
+  } catch (error) {
+    console.error("Verify OTP error:", error);
+    res.status(500).json({ error: "Verification failed" });
+  }
+});
+
+// Step 3: Reset Password
+app.post("/api/auth/reset-password", async (req, res) => {
+  const { email, otp, new_password } = req.body;
+  
+  if (!email || !otp || !new_password) {
+    return res.status(400).json({ error: "All fields required" });
+  }
+
+  const normalizedEmail = email.trim().toLowerCase();
+  const normalizedOtp = otp.trim();
+
+  console.log(`Resetting password for ${normalizedEmail}`);
+
+  try {
+    // Verify OTP again (must be used = true from previous step)
+    const { data: record, error } = await supabase
+      .from("password_resets")
+      .select("*")
+      .eq("email", normalizedEmail)
+      .eq("otp", normalizedOtp)
+      .eq("used", true)
+      .single();
+
+    if (error || !record) {
+      console.log("Invalid reset session:", error);
+      return res.status(400).json({ error: "Invalid or expired reset session" });
+    }
+
+    if (new Date(record.expires_at) < new Date()) {
+      return res.status(400).json({ error: "Reset session has expired. Please request a new code." });
+    }
+
+    // Hash new password
+    const hashedPassword = await bcrypt.hash(new_password, 10);
+    
+    // Update user password
+    const { error: updateError } = await supabase
+      .from("users")
+      .update({ 
+        password_hash: hashedPassword,
+        updated_at: new Date().toISOString()
+      })
+      .eq("email", normalizedEmail);
+
+    if (updateError) {
+      console.error("Password update error:", updateError);
+      return res.status(500).json({ error: "Failed to update password" });
+    }
+
+    // Delete the used OTP record (cleanup)
+    await supabase
+      .from("password_resets")
+      .delete()
+      .eq("id", record.id);
+
+    console.log(`✅ Password reset successfully for ${normalizedEmail}`);
+    res.json({ message: "Password reset successful. You can now login with your new password." });
+    
+  } catch (error) {
+    console.error("Reset password error:", error);
+    res.status(500).json({ error: "Failed to reset password" });
+  }
+});
+
+// ==================== SIMPLIFIED EMAIL FUNCTION ====================
+
+async function sendOTPEmail(email, otp) {
+  console.log(`📧 Attempting to send OTP ${otp} to ${email}`);
+  
+  // Check SMTP configuration
+  if (!process.env.SMTP_HOST || !process.env.SMTP_USER || !process.env.SMTP_PASS) {
+    console.error("❌ SMTP credentials missing. Email not sent.");
+    return false;
+  }
+  
+  try {
+    // Simple HTML email (works with all providers)
+    const htmlContent = `
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <meta charset="UTF-8">
+        <title>FEECENT Password Reset</title>
+      </head>
+      <body style="font-family: Arial, sans-serif; margin: 0; padding: 20px; background: #f5f5f5;">
+        <div style="max-width: 500px; margin: 0 auto; background: white; border-radius: 12px; overflow: hidden;">
+          <div style="background: #6b21a8; padding: 20px; text-align: center;">
+            <h1 style="color: white; margin: 0;">FEECENT</h1>
+            <p style="color: #d8b4fe; margin: 5px 0 0;">Secure Digital Banking</p>
+          </div>
+          
+          <div style="padding: 30px 20px;">
+            <h2 style="color: #333; margin-top: 0;">Password Reset</h2>
+            <p style="color: #666;">Your verification code is:</p>
+            
+            <div style="background: #f8fafc; padding: 20px; text-align: center; margin: 20px 0; border-radius: 8px;">
+              <span style="font-size: 42px; font-weight: bold; letter-spacing: 8px; color: #6b21a8; font-family: monospace;">${otp}</span>
+            </div>
+            
+            <p style="color: #666; font-size: 14px;">This code expires in <strong>10 minutes</strong>.</p>
+            <p style="color: #999; font-size: 12px; margin-top: 20px;">If you didn't request this, please ignore this email.</p>
+          </div>
+        </div>
+      </body>
+      </html>
+    `;
+    
+    const mailOptions = {
+      from: `"FEECENT" <${process.env.SMTP_FROM || process.env.SMTP_USER}>`,
+      to: email,
+      subject: "FEECENT Password Reset Code",
+      html: htmlContent,
+      text: `Your FEECENT password reset code is: ${otp}. Valid for 10 minutes.`,
+    };
+    
+    const info = await transporter.sendMail(mailOptions);
+    console.log(`✅ Email sent to ${email}, Message ID: ${info.messageId}`);
+    return true;
+    
+  } catch (error) {
+    console.error("❌ Email error:", error.message);
+    return false;
+  }
+}
