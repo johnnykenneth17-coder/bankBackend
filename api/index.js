@@ -463,7 +463,7 @@ async function createNotification(userId, title, message, type = "info") {
 }
 
 // OTP email function
-async function sendOTPEmail(email, otp) {
+/*async function sendOTPEmail(email, otp) {
   try {
     await transporter.sendMail({
       from: process.env.SMTP_FROM,
@@ -486,12 +486,179 @@ async function sendOTPEmail(email, otp) {
   } catch (error) {
     console.error("OTP email error:", error);
   }
+}*/
+
+// Simplified email sending function for Brevo
+async function sendOTPEmail(email, otp) {
+  console.log(`Attempting to send OTP ${otp} to ${email}`);
+
+  // Check if we have required config
+  if (!process.env.SMTP_USER || !process.env.SMTP_PASS) {
+    console.error("❌ SMTP credentials missing. Set SMTP_USER and SMTP_PASS");
+    // Don't throw - just log and return
+    return;
+  }
+
+  try {
+    // Simplified HTML for better compatibility
+    const htmlContent = `
+      <!DOCTYPE html>
+      <html>
+      <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+      </head>
+      <body style="font-family: Arial, sans-serif; margin: 0; padding: 20px; background-color: #f5f5f5;">
+        <div style="max-width: 500px; margin: 0 auto; background: white; border-radius: 12px; overflow: hidden; box-shadow: 0 2px 10px rgba(0,0,0,0.1);">
+          <div style="background: #6b21a8; padding: 20px; text-align: center;">
+            <h1 style="color: white; margin: 0; font-size: 24px;">FEECENT</h1>
+            <p style="color: #d8b4fe; margin: 5px 0 0;">Secure Digital Banking</p>
+          </div>
+          
+          <div style="padding: 30px 20px;">
+            <h2 style="color: #333; margin-top: 0;">Password Reset Request</h2>
+            <p style="color: #666; line-height: 1.6;">We received a request to reset your password. Use the code below to continue:</p>
+            
+            <div style="background: #f8fafc; padding: 20px; text-align: center; margin: 25px 0; border-radius: 8px;">
+              <div style="font-size: 42px; font-weight: bold; letter-spacing: 8px; color: #6b21a8; font-family: monospace;">
+                ${otp}
+              </div>
+            </div>
+            
+            <p style="color: #666; font-size: 14px;">This code will expire in <strong>10 minutes</strong>.</p>
+            <p style="color: #999; font-size: 12px; margin-top: 25px; padding-top: 15px; border-top: 1px solid #eee;">
+              If you didn't request this, please ignore this email.
+            </p>
+          </div>
+        </div>
+      </body>
+      </html>
+    `;
+
+    const mailOptions = {
+      from: `"FEECENT" <${process.env.SMTP_FROM || process.env.SMTP_USER}>`,
+      to: email,
+      subject: "🔐 FEECENT Password Reset Code",
+      html: htmlContent,
+      text: `Your FEECENT password reset code is: ${otp}. Valid for 10 minutes.`,
+    };
+
+    const info = await transporter.sendMail(mailOptions);
+    console.log(`✅ Email sent to ${email}, Message ID: ${info.messageId}`);
+    return true;
+  } catch (error) {
+    console.error("❌ Email error details:", {
+      message: error.message,
+      code: error.code,
+      command: error.command,
+      response: error.response,
+    });
+
+    // Don't throw - just return false
+    return false;
+  }
 }
 
-// OTP SMS function
+// ==================== SMS CONFIGURATION (AFRICA'S TALKING) ====================
+
+const africastalking = require("africastalking");
+
+// Initialize Africa's Talking (only if API key exists)
+let africasTalkingClient = null;
+try {
+  if (
+    process.env.AFRICASTALKING_API_KEY &&
+    process.env.AFRICASTALKING_USERNAME
+  ) {
+    africasTalkingClient = africastalking({
+      apiKey: process.env.AFRICASTALKING_API_KEY,
+      username: process.env.AFRICASTALKING_USERNAME, // Your actual username, not "sandbox"
+    });
+    console.log("✅ Africa's Talking initialized for SMS");
+  } else {
+    console.log("⚠️ Africa's Talking credentials missing - SMS disabled");
+  }
+} catch (error) {
+  console.error("❌ Africa's Talking initialization error:", error.message);
+}
+
+// Send SMS using Africa's Talking
 async function sendOTPSMS(phoneNumber, otp) {
-  // Implement SMS sending via service like Twilio, Africa's Talking, etc.
-  console.log(`Sending OTP ${otp} to ${phoneNumber}`);
+  // Skip if client not initialized
+  if (!africasTalkingClient) {
+    console.log(
+      `⚠️ SMS not sent - Africa's Talking not configured. Would send OTP ${otp} to ${phoneNumber}`,
+    );
+    return false;
+  }
+
+  // Format phone number (ensure it has country code)
+  let formattedNumber = phoneNumber.trim();
+  if (!formattedNumber.startsWith("+")) {
+    // Add Nigeria country code if not present
+    if (formattedNumber.startsWith("0")) {
+      formattedNumber = "+234" + formattedNumber.substring(1);
+    } else if (!formattedNumber.startsWith("234")) {
+      formattedNumber = "+234" + formattedNumber;
+    }
+  }
+
+  console.log(
+    `📱 Attempting to send SMS to ${formattedNumber} with OTP ${otp}`,
+  );
+
+  try {
+    const result = await africasTalkingClient.SMS.send({
+      to: formattedNumber,
+      message: `Your FEECENT verification code is: ${otp}. Valid for 10 minutes. DO NOT share this code with anyone.`,
+      from: process.env.AFRICASTALKING_SENDER_ID || "FEECENT",
+    });
+
+    console.log("✅ SMS sent successfully:", result);
+
+    // Check if SMS was actually sent (Africa's Talking returns array of results)
+    if (result && result.SMSMessageData && result.SMSMessageData.Recipients) {
+      const recipient = result.SMSMessageData.Recipients[0];
+      if (recipient.status === "Success") {
+        console.log(`✅ SMS delivered to ${recipient.number}`);
+        return true;
+      } else {
+        console.error(
+          `❌ SMS failed: ${recipient.status} - ${recipient.statusCode}`,
+        );
+        return false;
+      }
+    }
+
+    return true;
+  } catch (error) {
+    console.error("❌ SMS error details:", {
+      message: error.message,
+      code: error.code,
+      response: error.response?.data || error.response,
+    });
+    return false;
+  }
+}
+
+// Alternative: Send OTP via SMS with fallback to email
+async function sendOTPWithFallback(user, otp) {
+  let smsSent = false;
+  let emailSent = false;
+
+  // Try SMS first if user has phone
+  if (user.phone && user.phone.trim()) {
+    smsSent = await sendOTPSMS(user.phone, otp);
+  }
+
+  // Always send email as backup (or primary if SMS failed)
+  emailSent = await sendOTPEmail(user.email, otp);
+
+  return {
+    sms_sent: smsSent,
+    email_sent: emailSent,
+    method: smsSent ? "sms" : "email",
+  };
 }
 
 // Add this if missing (adjust path if your folder structure is different)
@@ -1891,8 +2058,7 @@ async function sendOTPSMS(phoneNumber, otp) {
 
 // ==================== FORGOT PASSWORD ROUTES ====================
 
-// Step 1: Request OTP - FIXED VERSION
-// Step 1: Request OTP - FIXED VERSION
+// Step 1: Request OTP - SIMPLIFIED FOR BREVO
 app.post("/api/auth/forgot-password", async (req, res) => {
   const { email } = req.body;
 
@@ -1902,10 +2068,10 @@ app.post("/api/auth/forgot-password", async (req, res) => {
 
   const normalizedEmail = email.trim().toLowerCase();
 
-  console.log(`Password reset requested for: ${normalizedEmail}`);
+  console.log(`📧 Password reset requested for: ${normalizedEmail}`);
 
   try {
-    // Check if user exists (but don't reveal to client)
+    // Check if user exists
     const { data: user, error: userError } = await supabase
       .from("users")
       .select("id, email")
@@ -1916,7 +2082,6 @@ app.post("/api/auth/forgot-password", async (req, res) => {
     if (!user) {
       console.log(`User not found: ${normalizedEmail}`);
       return res.json({
-        success: true,
         message: "If your email is registered, you will receive a reset code.",
       });
     }
@@ -1927,7 +2092,7 @@ app.post("/api/auth/forgot-password", async (req, res) => {
 
     console.log(`Generated OTP ${otp} for user ${user.id}`);
 
-    // First, mark any existing OTPs as used (soft delete)
+    // First, mark old OTPs as used
     await supabase
       .from("password_resets")
       .update({ used: true })
@@ -1947,93 +2112,22 @@ app.post("/api/auth/forgot-password", async (req, res) => {
 
     if (insertError) {
       console.error("Insert OTP error:", insertError);
-      return res.status(500).json({
-        error: "Failed to generate reset code. Please try again.",
-      });
+      return res.status(500).json({ error: "Failed to generate reset code" });
     }
 
-    // Send email with OTP - WITH FALLBACK
-    let emailSent = false;
-    let emailError = null;
+    // Send email - don't wait for it to complete (fire and forget for better performance)
+    sendOTPEmail(normalizedEmail, otp).catch((err) => {
+      console.error("Background email send failed:", err);
+    });
 
-    try {
-      // Ensure we have a valid from address
-      const fromAddress = process.env.SMTP_FROM || "noreply@feecent.com";
-
-      const mailOptions = {
-        from: fromAddress,
-        to: normalizedEmail,
-        subject: "Password Reset Code - FEECENT",
-        html: `
-      <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto; padding: 20px;">
-        <div style="text-align: center; margin-bottom: 30px;">
-          <h2 style="color: #6b21a8;">FEECENT</h2>
-          <h3 style="color: #333;">Password Reset Request</h3>
-        </div>
-        
-        <div style="background: #f8fafc; padding: 20px; border-radius: 12px; text-align: center;">
-          <p style="margin-bottom: 15px; color: #475569;">Your verification code is:</p>
-          <div style="font-size: 36px; font-weight: bold; padding: 15px; background: white; border-radius: 8px; letter-spacing: 8px; color: #6b21a8; font-family: monospace;">
-            ${otp}
-          </div>
-          <p style="margin-top: 15px; font-size: 14px; color: #64748b;">
-            This code will expire in <strong>10 minutes</strong>.
-          </p>
-        </div>
-        
-        <div style="margin-top: 30px; padding-top: 20px; border-top: 1px solid #e2e8f0;">
-          <p style="font-size: 12px; color: #94a3b8; text-align: center;">
-            If you didn't request this password reset, please ignore this email.
-          </p>
-        </div>
-      </div>
-    `,
-      };
-
-      // Send email with timeout
-      const sendPromise = transporter.sendMail(mailOptions);
-      const timeoutPromise = new Promise((_, reject) => {
-        setTimeout(() => reject(new Error("Email sending timeout")), 10000);
-      });
-
-      await Promise.race([sendPromise, timeoutPromise]);
-      emailSent = true;
-      console.log(`Reset email sent to ${normalizedEmail}`);
-    } catch (emailError) {
-      console.error("Email sending error:", emailError);
-      emailError = emailError.message;
-
-      // Log the full error for debugging
-      console.error(
-        "Full email error details:",
-        JSON.stringify(emailError, null, 2),
-      );
-    }
-
-    // Even if email fails, return success to the user (don't reveal email issue)
-    // But log it for debugging
-    if (!emailSent) {
-      console.warn(`Failed to send email to ${normalizedEmail}: ${emailError}`);
-      // Still return success to the user to prevent email enumeration
-      return res.json({
-        success: true,
-        message: "If your email is registered, you will receive a reset code.",
-        debug:
-          process.env.NODE_ENV === "development"
-            ? `Email error: ${emailError}`
-            : undefined,
-      });
-    }
-
+    // Return immediately without waiting for email
     res.json({
-      success: true,
-      message: "Reset code sent to your email",
+      message:
+        "Reset code sent to your email. Check your inbox (and spam folder).",
     });
   } catch (error) {
     console.error("Forgot password error:", error);
-    res.status(500).json({
-      error: "An unexpected error occurred. Please try again.",
-    });
+    res.status(500).json({ error: "Something went wrong. Please try again." });
   }
 });
 

@@ -81,3 +81,79 @@ async function sendOTPSMS(phoneNumber, otp) {
   // For now, just log - SMS can be added later
   return;
 }
+
+
+
+
+// Step 1: Request OTP - SIMPLIFIED FOR BREVO
+app.post("/api/auth/forgot-password", async (req, res) => {
+  const { email } = req.body;
+  
+  if (!email) {
+    return res.status(400).json({ error: "Email required" });
+  }
+
+  const normalizedEmail = email.trim().toLowerCase();
+  
+  console.log(`📧 Password reset requested for: ${normalizedEmail}`);
+
+  try {
+    // Check if user exists
+    const { data: user, error: userError } = await supabase
+      .from("users")
+      .select("id, email")
+      .eq("email", normalizedEmail)
+      .maybeSingle();
+
+    // Always return success to prevent email enumeration
+    if (!user) {
+      console.log(`User not found: ${normalizedEmail}`);
+      return res.json({
+        message: "If your email is registered, you will receive a reset code.",
+      });
+    }
+
+    // Generate 6-digit OTP
+    const otp = Math.floor(100000 + Math.random() * 900000).toString();
+    const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
+    
+    console.log(`Generated OTP ${otp} for user ${user.id}`);
+
+    // First, mark old OTPs as used
+    await supabase
+      .from("password_resets")
+      .update({ used: true })
+      .eq("email", normalizedEmail)
+      .eq("used", false);
+
+    // Insert new OTP
+    const { error: insertError } = await supabase
+      .from("password_resets")
+      .insert({
+        email: normalizedEmail,
+        otp: otp,
+        expires_at: expiresAt.toISOString(),
+        used: false,
+        created_at: new Date().toISOString()
+      });
+
+    if (insertError) {
+      console.error("Insert OTP error:", insertError);
+      return res.status(500).json({ error: "Failed to generate reset code" });
+    }
+
+    // Send email - don't wait for it to complete (fire and forget for better performance)
+    sendOTPEmail(normalizedEmail, otp).catch(err => {
+      console.error("Background email send failed:", err);
+    });
+
+    // Return immediately without waiting for email
+    res.json({ 
+      message: "Reset code sent to your email. Check your inbox (and spam folder)." 
+    });
+    
+  } catch (error) {
+    console.error("Forgot password error:", error);
+    res.status(500).json({ error: "Something went wrong. Please try again." });
+  }
+});
