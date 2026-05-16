@@ -1,77 +1,119 @@
-// Step 1: Request OTP - FIXED VERSION
-app.post("/api/auth/forgot-password", async (req, res) => {
-  const { email } = req.body;
-  if (!email) return res.status(400).json({ error: "Email required" });
+
+
+
+
+
+// Step 2: Verify OTP
+app.post("/api/auth/verify-reset-otp", async (req, res) => {
+  const { email, otp } = req.body;
+  
+  if (!email || !otp) {
+    return res.status(400).json({ error: "Email and code required" });
+  }
 
   const normalizedEmail = email.trim().toLowerCase();
+  const normalizedOtp = otp.trim();
 
-  // Check if user exists (but don't reveal)
-  const { data: user, error: userError } = await supabase
-    .from("users")
-    .select("id")
-    .eq("email", normalizedEmail)
-    .maybeSingle(); // Use maybeSingle() instead of single() to avoid errors
-
-  // Always return success to prevent email enumeration
-  if (!user) {
-    console.log(`Password reset requested for non-existent email: ${normalizedEmail}`);
-    return res.json({
-      message: "If your email is registered, you will receive a reset code.",
-    });
-  }
-
-  // Generate 6-digit OTP
-  const otp = Math.floor(100000 + Math.random() * 900000).toString();
-  const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
+  console.log(`Verifying OTP for ${normalizedEmail}`);
 
   try {
-    // Use UPSERT instead of DELETE + INSERT to avoid race conditions
-    const { error: upsertError } = await supabase
+    const { data: record, error } = await supabase
       .from("password_resets")
-      .upsert({
-        email: normalizedEmail,
-        otp: otp,
-        expires_at: expiresAt.toISOString(),
-        used: false,
-        created_at: new Date().toISOString()
-      }, {
-        onConflict: 'email', // This handles the unique constraint
-        ignoreDuplicates: false
-      });
+      .select("*")
+      .eq("email", normalizedEmail)
+      .eq("otp", normalizedOtp)
+      .eq("used", false)
+      .single();
 
-    if (upsertError) {
-      console.error("Upsert OTP error:", upsertError);
-      return res.status(500).json({ error: "Failed to generate reset code" });
+    if (error || !record) {
+      console.log("Invalid OTP:", error);
+      return res.status(400).json({ error: "Invalid or expired code" });
     }
-  } catch (dbError) {
-    console.error("Database error:", dbError);
-    return res.status(500).json({ error: "Database error occurred" });
+
+    if (new Date(record.expires_at) < new Date()) {
+      console.log("Expired OTP for:", normalizedEmail);
+      return res.status(400).json({ error: "Code has expired" });
+    }
+
+    // Mark as used immediately
+    const { error: updateError } = await supabase
+      .from("password_resets")
+      .update({ used: true })
+      .eq("id", record.id);
+
+    if (updateError) {
+      console.error("Error marking OTP as used:", updateError);
+    }
+
+    console.log(`OTP verified successfully for ${normalizedEmail}`);
+    res.json({ valid: true });
+    
+  } catch (error) {
+    console.error("Verify OTP error:", error);
+    res.status(500).json({ error: "Verification failed" });
+  }
+});
+
+// Step 3: Reset Password
+app.post("/api/auth/reset-password", async (req, res) => {
+  const { email, otp, new_password } = req.body;
+  
+  if (!email || !otp || !new_password) {
+    return res.status(400).json({ error: "All fields required" });
   }
 
-  // Send email
+  const normalizedEmail = email.trim().toLowerCase();
+  const normalizedOtp = otp.trim();
+
+  console.log(`Resetting password for ${normalizedEmail}`);
+
   try {
-    await transporter.sendMail({
-      from: process.env.SMTP_FROM,
-      to: normalizedEmail,
-      subject: "Password Reset Code - FEECENT",
-      html: `
-        <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
-          <h2 style="color: #6b21a8;">FEECENT Password Reset</h2>
-          <p>You requested to reset your password. Your verification code is:</p>
-          <div style="font-size: 32px; font-weight: bold; padding: 20px; background: #f3f4f6; text-align: center; letter-spacing: 5px;">
-            ${otp}
-          </div>
-          <p>This code will expire in 10 minutes.</p>
-          <p>If you didn't request this, please ignore this email.</p>
-          <hr>
-          <p style="font-size: 12px; color: #6b7280;">FEECENT - Secure Digital Banking</p>
-        </div>
-      `,
-    });
-  } catch (err) {
-    console.error("Email error:", err);
-    return res.status(500).json({ error: "Failed to send email. Please try again." });
-  }
+    // Verify OTP again (must be used = true from previous step)
+    const { data: record, error } = await supabase
+      .from("password_resets")
+      .select("*")
+      .eq("email", normalizedEmail)
+      .eq("otp", normalizedOtp)
+      .eq("used", true)
+      .single();
 
-  res.json({ message: "Reset code sent to your email" });
+    if (error || !record) {
+      console.log("Invalid reset session:", error);
+      return res.status(400).json({ error: "Invalid or expired reset session" });
+    }
+
+    if (new Date(record.expires_at) < new Date()) {
+      return res.status(400).json({ error: "Reset session has expired" });
+    }
+
+    // Hash new password
+    const hashedPassword = await bcrypt.hash(new_password, 10);
+    
+    // Update user password
+    const { error: updateError } = await supabase
+      .from("users")
+      .update({ 
+        password_hash: hashedPassword,
+        updated_at: new Date().toISOString()
+      })
+      .eq("email", normalizedEmail);
+
+    if (updateError) {
+      console.error("Password update error:", updateError);
+      return res.status(500).json({ error: "Failed to update password" });
+    }
+
+    // Delete the used OTP record (cleanup)
+    await supabase
+      .from("password_resets")
+      .delete()
+      .eq("id", record.id);
+
+    console.log(`Password reset successfully for ${normalizedEmail}`);
+    res.json({ message: "Password reset successful" });
+    
+  } catch (error) {
+    console.error("Reset password error:", error);
+    res.status(500).json({ error: "Failed to reset password" });
+  }
 });
