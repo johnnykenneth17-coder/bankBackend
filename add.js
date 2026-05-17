@@ -1,21 +1,7 @@
-// Get all users (admin) - Updated
-app.get("/api/admin/users", authenticate, authorizeAdmin, async (req, res) => {
+// Get user profile - Updated with all fields
+app.get("/api/user/profile", authenticate, async (req, res) => {
   try {
-    const {
-      page = 1,
-      limit = 20,
-      search,
-      status,
-      sort_by = "created_at",
-      sort_order = "desc",
-    } = req.query;
-
-    const offset = (parseInt(page) - 1) * parseInt(limit);
-
-    let countQuery = supabase
-      .from("users")
-      .select("*", { count: "exact", head: true });
-    let dataQuery = supabase
+    const { data: user, error } = await supabase
       .from("users")
       .select(`
         id,
@@ -24,93 +10,67 @@ app.get("/api/admin/users", authenticate, authorizeAdmin, async (req, res) => {
         last_name,
         middle_name,
         phone,
-        role,
+        date_of_birth,
+        age,
+        gender,
+        marital_status,
+        occupation,
+        referral_code,
+        address,
+        city,
+        state,
+        country,
+        postal_code,
+        identification_type,
+        identification_number,
         kyc_status,
-        is_active,
+        two_factor_enabled,
         is_frozen,
+        freeze_reason,
         face_verified,
-        passcode_hash,
-        created_at
-      `);
+        face_verification_date,
+        created_at,
+        updated_at
+      `)
+      .eq("id", req.user.id)
+      .single();
 
-    // Apply filters
-    if (search) {
-      const searchFilter = `email.ilike.%${search}%,first_name.ilike.%${search}%,last_name.ilike.%${search}%`;
-      countQuery = countQuery.or(searchFilter);
-      dataQuery = dataQuery.or(searchFilter);
+    if (error) {
+      console.error("Profile fetch error:", error);
+      return res.status(500).json({ error: "Failed to fetch profile" });
     }
 
-    if (status === "frozen") {
-      countQuery = countQuery.eq("is_frozen", true);
-      dataQuery = dataQuery.eq("is_frozen", true);
-    } else if (status === "active") {
-      countQuery = countQuery.eq("is_active", true).eq("is_frozen", false);
-      dataQuery = dataQuery.eq("is_active", true).eq("is_frozen", false);
-    } else if (status === "inactive") {
-      countQuery = countQuery.eq("is_active", false);
-      dataQuery = dataQuery.eq("is_active", false);
+    // Get face descriptor count (for UI display)
+    const { count: faceCount, error: faceCountError } = await supabase
+      .from("face_descriptors")
+      .select("*", { count: "exact", head: true })
+      .eq("user_id", req.user.id)
+      .eq("is_active", true);
+
+    if (faceCountError) {
+      console.error("Face count error:", faceCountError);
     }
 
-    // Execute queries
-    const [countResult, dataResult] = await Promise.all([
-      countQuery,
-      dataQuery
-        .order(sort_by, { ascending: sort_order === "asc" })
-        .range(offset, offset + parseInt(limit) - 1),
-    ]);
+    // Check if user has passcode set
+    const { data: passcodeCheck, error: passcodeError } = await supabase
+      .from("users")
+      .select("passcode_hash")
+      .eq("id", req.user.id)
+      .single();
 
-    if (dataResult.error) throw dataResult.error;
+    const hasPasscode = passcodeCheck && passcodeCheck.passcode_hash !== null;
 
-    // Get user IDs
-    const userIds = (dataResult.data || []).map((u) => u.id);
-    let balances = {};
-    let faceDescriptorCounts = {};
-
-    if (userIds.length > 0) {
-      // Get balances
-      const { data: accountsData } = await supabase
-        .from("accounts")
-        .select("user_id, balance")
-        .in("user_id", userIds);
-
-      balances = (accountsData || []).reduce((acc, accRow) => {
-        acc[accRow.user_id] = (acc[accRow.user_id] || 0) + (accRow.balance || 0);
-        return acc;
-      }, {});
-
-      // Get face descriptor counts
-      const { data: faceData } = await supabase
-        .from("face_descriptors")
-        .select("user_id")
-        .in("user_id", userIds)
-        .eq("is_active", true);
-
-      faceDescriptorCounts = (faceData || []).reduce((acc, fd) => {
-        acc[fd.user_id] = (acc[fd.user_id] || 0) + 1;
-        return acc;
-      }, {});
-    }
-
-    // Merge data
-    const usersWithDetails = (dataResult.data || []).map((user) => ({
-      ...user,
-      total_balance: balances[user.id] || 0,
-      has_passcode: !!user.passcode_hash,
-      face_descriptor_count: faceDescriptorCounts[user.id] || 0,
-      passcode_hash: undefined, // Remove sensitive data
-    }));
+    console.log("Profile fetched for user:", user.id);
+    console.log("Face verified:", user.face_verified);
+    console.log("Has passcode:", hasPasscode);
 
     res.json({
-      users: usersWithDetails,
-      pagination: {
-        page: parseInt(page),
-        limit: parseInt(limit),
-        total: countResult.count || 0,
-        pages: Math.ceil((countResult.count || 0) / parseInt(limit)),
-      },
+      ...user,
+      has_passcode: hasPasscode,
+      face_descriptor_count: faceCount || 0,
     });
   } catch (error) {
-    console.error("Admin users fetch error:", error);
-    res.status(500).json({ error: "Failed to fetch users" });
+    console.error("Profile fetch error:", error);
+    res.status(500).json({ error: "Failed to fetch profile" });
   }
 });

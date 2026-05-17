@@ -883,174 +883,6 @@ app.post("/api/test-connection", (req, res) => {
 
 // ==================== AUTHENTICATION ROUTES ====================
 
-// Register - Updated with age and identification fields
-/*app.post("/api/auth/register", async (req, res) => {
-  try {
-    const {
-      email,
-      password,
-      first_name,
-      last_name,
-      phone,
-      country,
-      city,
-      address,
-      age,
-      identification_type,
-      identification_number,
-      security_question_1,
-      security_answer_1,
-      security_question_2,
-      security_answer_2,
-      face_image,
-    } = req.body;
-
-    console.log("Registration attempt for:", email);
-    console.log("Age:", age);
-    console.log("ID Type:", identification_type);
-    console.log(
-      "Face image received:",
-      face_image
-        ? `Yes, size: ${Math.round(face_image.length / 1024)}KB`
-        : "No",
-    );
-
-    // Validation
-    if (age && (age < 18 || age > 120)) {
-      return res.status(400).json({ error: "Age must be between 18 and 120" });
-    }
-
-    // Check if user exists
-    const { data: existingUser } = await supabase
-      .from("users")
-      .select("email")
-      .eq("email", email)
-      .single();
-
-    if (existingUser) {
-      return res.status(400).json({ error: "Email already registered" });
-    }
-
-    // Check if identification number already used (optional - for security)
-    if (identification_number) {
-      const { data: existingId } = await supabase
-        .from("users")
-        .select("id")
-        .eq("identification_number", identification_number)
-        .single();
-
-      if (existingId) {
-        return res
-          .status(400)
-          .json({ error: "Identification number already registered" });
-      }
-    }
-
-    // Validate face image
-    if (!face_image || face_image.length < 100) {
-      return res.status(400).json({ error: "Face verification required" });
-    }
-
-    // Hash password
-    const hashedPassword = await bcrypt.hash(password, 10);
-
-    // Hash security answers
-    const hashedAnswer1 = await bcrypt.hash(
-      security_answer_1.toLowerCase().trim(),
-      10,
-    );
-    const hashedAnswer2 = await bcrypt.hash(
-      security_answer_2.toLowerCase().trim(),
-      10,
-    );
-
-    // Create user with all fields
-    const { data: user, error } = await supabase
-      .from("users")
-      .insert({
-        email,
-        password_hash: hashedPassword,
-        first_name,
-        last_name,
-        phone,
-        country: country || null,
-        city: city || null,
-        address: address || null,
-        age: age || null,
-        identification_type: identification_type || null,
-        identification_number: identification_number || null,
-        security_question_1,
-        security_answer_1: hashedAnswer1,
-        security_question_2,
-        security_answer_2: hashedAnswer2,
-        face_image: face_image,
-        face_verified: true,
-        face_verification_date: new Date().toISOString(),
-        role: "user",
-        kyc_status: "pending",
-        is_active: true,
-        is_frozen: false,
-        created_at: new Date().toISOString(),
-        updated_at: new Date().toISOString(),
-      })
-      .select()
-      .single();
-
-    if (error) {
-      console.error("Supabase insert error:", error);
-      throw error;
-    }
-
-    console.log("User created with ID:", user.id);
-
-    // Create checking account for user
-    const { error: accountError } = await supabase.from("accounts").insert({
-      user_id: user.id,
-      account_type: "checking",
-      currency: "NGN",
-      balance: 0.0,
-      available_balance: 0.0,
-      status: "active",
-      created_at: new Date().toISOString(),
-      updated_at: new Date().toISOString(),
-    });
-
-    if (accountError) {
-      console.error("Account creation error:", accountError);
-    }
-
-    // Generate token
-    const token = jwt.sign(
-      { userId: user.id, email: user.email, role: user.role },
-      process.env.JWT_SECRET,
-      { expiresIn: process.env.JWT_EXPIRE },
-    );
-
-    // Return user data (exclude sensitive info)
-    res.status(201).json({
-      message: "User created successfully",
-      token,
-      user: {
-        id: user.id,
-        email: user.email,
-        first_name: user.first_name,
-        last_name: user.last_name,
-        role: user.role,
-        phone: user.phone,
-        country: user.country,
-        city: user.city,
-        age: user.age,
-        identification_type: user.identification_type,
-        identification_number: user.identification_number,
-        face_image: user.face_image,
-      },
-    });
-  } catch (error) {
-    console.error("Registration error:", error);
-    res.status(500).json({ error: "Registration failed: " + error.message });
-  }
-});*/
-
 // Register - Updated with all fields including passcode and face verification
 app.post("/api/auth/register", async (req, res) => {
   try {
@@ -1079,9 +911,7 @@ app.post("/api/auth/register", async (req, res) => {
       security_question_2,
       security_answer_2,
       passcode,  // 6-digit login passcode
-      face_images,  // array of face images from different angles
-      face_embedding,  // AI-generated face embedding
-      face_quality_score,
+      face_images,  // array of face images from different angles (already compressed)
     } = req.body;
 
     console.log("Registration attempt for:", email);
@@ -1171,10 +1001,8 @@ app.post("/api/auth/register", async (req, res) => {
         security_answer_2: hashedAnswer2,
         passcode_hash: hashedPasscode,
         passcode_set_at: hashedPasscode ? new Date().toISOString() : null,
-        face_embedding: face_embedding || null,
-        face_quality_score: face_quality_score || null,
-        face_verified: !!face_embedding,
-        face_verification_date: face_embedding ? new Date().toISOString() : null,
+        face_verified: !!face_images && face_images.length > 0,
+        face_verification_date: face_images && face_images.length > 0 ? new Date().toISOString() : null,
         role: "user",
         kyc_status: "pending",
         is_active: true,
@@ -1192,12 +1020,14 @@ app.post("/api/auth/register", async (req, res) => {
 
     console.log("User created with ID:", user.id);
 
-    // Store face descriptors if provided
+    // Store face images if provided
     if (face_images && face_images.length > 0) {
-      for (const faceImage of face_images) {
+      for (let i = 0; i < face_images.length; i++) {
+        const faceImage = face_images[i];
+        // Store each face image as a descriptor (you can adjust based on your needs)
         await supabase.from("face_descriptors").insert({
           user_id: user.id,
-          descriptor: faceImage,
+          descriptor: { image: faceImage, angle: i, timestamp: new Date().toISOString() },
           is_active: true,
           created_at: new Date().toISOString(),
         });
@@ -1258,6 +1088,7 @@ app.post("/api/auth/register", async (req, res) => {
     res.status(500).json({ error: "Registration failed: " + error.message });
   }
 });
+
 
 // Login
 // Enhanced login with rate limiting and device fingerprint
@@ -3022,28 +2853,6 @@ app.get("/api/test", (req, res) => {
 });
 
 // ==================== USER DASHBOARD ROUTES ====================
-// Get user profile - Updated with age and identification
-/*app.get("/api/user/profile", authenticate, async (req, res) => {
-  try {
-    const { data: user, error } = await supabase
-      .from("users")
-      .select(
-        "id, email, first_name, last_name, phone, date_of_birth, age, address, city, country, postal_code, identification_type, identification_number, kyc_status, two_factor_enabled, is_frozen, freeze_reason, face_image, created_at",
-      )
-      .eq("id", req.user.id)
-      .single();
-
-    if (error) throw error;
-
-    console.log("Profile fetched for user:", user.id);
-    console.log("Face image in profile:", user.face_image ? "Yes" : "No");
-
-    res.json(user);
-  } catch (error) {
-    console.error("Profile fetch error:", error);
-    res.status(500).json({ error: "Failed to fetch profile" });
-  }
-});*/
 
 // Get user profile - Updated with all fields
 app.get("/api/user/profile", authenticate, async (req, res) => {
@@ -3062,6 +2871,7 @@ app.get("/api/user/profile", authenticate, async (req, res) => {
         gender,
         marital_status,
         occupation,
+        referral_code,
         address,
         city,
         state,
@@ -3074,29 +2884,45 @@ app.get("/api/user/profile", authenticate, async (req, res) => {
         is_frozen,
         freeze_reason,
         face_verified,
-        face_quality_score,
+        face_verification_date,
         created_at,
-        has_passcode:passcode_hash
+        updated_at
       `)
       .eq("id", req.user.id)
       .single();
 
-    if (error) throw error;
+    if (error) {
+      console.error("Profile fetch error:", error);
+      return res.status(500).json({ error: "Failed to fetch profile" });
+    }
 
-    // Get face descriptor count
-    const { count: faceCount } = await supabase
+    // Get face descriptor count (for UI display)
+    const { count: faceCount, error: faceCountError } = await supabase
       .from("face_descriptors")
       .select("*", { count: "exact", head: true })
       .eq("user_id", req.user.id)
       .eq("is_active", true);
 
+    if (faceCountError) {
+      console.error("Face count error:", faceCountError);
+    }
+
+    // Check if user has passcode set
+    const { data: passcodeCheck, error: passcodeError } = await supabase
+      .from("users")
+      .select("passcode_hash")
+      .eq("id", req.user.id)
+      .single();
+
+    const hasPasscode = passcodeCheck && passcodeCheck.passcode_hash !== null;
+
     console.log("Profile fetched for user:", user.id);
     console.log("Face verified:", user.face_verified);
-    console.log("Has passcode:", !!user.has_passcode);
+    console.log("Has passcode:", hasPasscode);
 
     res.json({
       ...user,
-      has_passcode: !!user.has_passcode,
+      has_passcode: hasPasscode,
       face_descriptor_count: faceCount || 0,
     });
   } catch (error) {
