@@ -1021,7 +1021,7 @@ app.post("/api/auth/register", async (req, res) => {
     console.log("User created with ID:", user.id);
 
     // Store face images if provided
-    if (face_images && face_images.length > 0) {
+    /*if (face_images && face_images.length > 0) {
       for (let i = 0; i < face_images.length; i++) {
         const faceImage = face_images[i];
         // Store each face image as a descriptor (you can adjust based on your needs)
@@ -1033,7 +1033,25 @@ app.post("/api/auth/register", async (req, res) => {
         });
       }
       console.log(`Stored ${face_images.length} face descriptors`);
-    }
+    }*/
+
+      // Store face images if provided
+if (face_images && face_images.length > 0) {
+  for (let i = 0; i < face_images.length; i++) {
+    const faceImage = face_images[i];
+    await supabase.from("face_descriptors").insert({
+      user_id: user.id,
+      descriptor: { 
+        image: faceImage,  // ← Make sure the image is stored here
+        angle: i, 
+        timestamp: new Date().toISOString() 
+      },
+      is_active: true,
+      created_at: new Date().toISOString(),
+    });
+  }
+  console.log(`Stored ${face_images.length} face descriptors`);
+}
 
     // Create checking account for user
     const { error: accountError } = await supabase.from("accounts").insert({
@@ -11876,12 +11894,25 @@ app.get(
         .limit(50);
 
       // Get face descriptors
-      const { data: faceDescriptors } = await supabase
+      /*const { data: faceDescriptors } = await supabase
         .from("face_descriptors")
         .select("id, created_at")
         .eq("user_id", userId)
         .eq("is_active", true)
-        .limit(1);
+        .limit(1);*/
+
+        // Get face descriptors with images
+const { data: faceDescriptors } = await supabase
+  .from("face_descriptors")
+  .select("descriptor, created_at")
+  .eq("user_id", userId)
+  .eq("is_active", true)
+  .order("created_at", { ascending: true })
+  .limit(5);  // Get up to 5 face images
+
+// Include in the response
+completeUser.face_descriptors = faceDescriptors || [];
+completeUser.face_image = faceDescriptors?.[0]?.descriptor?.image || null;
 
       // Combine all data
       const completeUser = {
