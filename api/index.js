@@ -884,7 +884,7 @@ app.post("/api/test-connection", (req, res) => {
 // ==================== AUTHENTICATION ROUTES ====================
 
 // Register - Updated with all fields including passcode and face verification
-app.post("/api/auth/register", async (req, res) => {
+/*app.post("/api/auth/register", async (req, res) => {
   try {
     const {
       email,
@@ -1033,7 +1033,7 @@ app.post("/api/auth/register", async (req, res) => {
         });
       }
       console.log(`Stored ${face_images.length} face descriptors`);
-    }*/
+    }*
 
       // Store face images if provided
 if (face_images && face_images.length > 0) {
@@ -1099,6 +1099,242 @@ if (face_images && face_images.length > 0) {
         identification_number: user.identification_number,
         has_passcode: !!user.passcode_hash,
         face_verified: user.face_verified,
+      },
+    });
+  } catch (error) {
+    console.error("Registration error:", error);
+    res.status(500).json({ error: "Registration failed: " + error.message });
+  }
+});*/
+
+// Register - Fixed with proper face image storage
+app.post("/api/auth/register", async (req, res) => {
+  try {
+    const {
+      email,
+      password,
+      first_name,
+      last_name,
+      middle_name,
+      phone,
+      country,
+      state,
+      city,
+      address,
+      postal_code,
+      date_of_birth,
+      gender,
+      marital_status,
+      occupation,
+      referral_code,
+      age,
+      identification_type,
+      identification_number,
+      security_question_1,
+      security_answer_1,
+      security_question_2,
+      security_answer_2,
+      passcode,
+      face_images,
+    } = req.body;
+
+    console.log("Registration attempt for:", email);
+    console.log("Face images received:", face_images ? face_images.length : 0);
+
+    // Validation
+    if (age && (age < 18 || age > 120)) {
+      return res.status(400).json({ error: "Age must be between 18 and 120" });
+    }
+
+    // Validate passcode (6 digits)
+    if (passcode && (!/^\d{6}$/.test(passcode))) {
+      return res.status(400).json({ error: "Passcode must be exactly 6 digits" });
+    }
+
+    // Check if user exists
+    const { data: existingUser } = await supabase
+      .from("users")
+      .select("email")
+      .eq("email", email)
+      .single();
+
+    if (existingUser) {
+      return res.status(400).json({ error: "Email already registered" });
+    }
+
+    // Hash password
+    const hashedPassword = await bcrypt.hash(password, 10);
+
+    // Hash passcode if provided
+    let hashedPasscode = null;
+    if (passcode) {
+      hashedPasscode = await bcrypt.hash(passcode, 10);
+    }
+
+    // Hash security answers
+    const hashedAnswer1 = await bcrypt.hash(
+      security_answer_1?.toLowerCase().trim() || "",
+      10,
+    );
+    const hashedAnswer2 = await bcrypt.hash(
+      security_answer_2?.toLowerCase().trim() || "",
+      10,
+    );
+
+    // Calculate age from date_of_birth if not provided
+    let calculatedAge = age;
+    if (!calculatedAge && date_of_birth) {
+      const birthDate = new Date(date_of_birth);
+      const today = new Date();
+      calculatedAge = today.getFullYear() - birthDate.getFullYear();
+      const monthDiff = today.getMonth() - birthDate.getMonth();
+      if (monthDiff < 0 || (monthDiff === 0 && today.getDate() < birthDate.getDate())) {
+        calculatedAge--;
+      }
+    }
+
+    // Create user with all fields
+    const { data: user, error } = await supabase
+      .from("users")
+      .insert({
+        email,
+        password_hash: hashedPassword,
+        first_name,
+        last_name,
+        middle_name: middle_name || null,
+        phone,
+        country: country || null,
+        state: state || null,
+        city: city || null,
+        address: address || null,
+        postal_code: postal_code || null,
+        date_of_birth: date_of_birth || null,
+        gender: gender || null,
+        marital_status: marital_status || null,
+        occupation: occupation || null,
+        referral_code: referral_code || null,
+        age: calculatedAge || null,
+        identification_type: identification_type || null,
+        identification_number: identification_number || null,
+        security_question_1,
+        security_answer_1: hashedAnswer1,
+        security_question_2,
+        security_answer_2: hashedAnswer2,
+        passcode_hash: hashedPasscode,
+        passcode_set_at: hashedPasscode ? new Date().toISOString() : null,
+        face_verified: !!face_images && face_images.length > 0,
+        face_verification_date: face_images && face_images.length > 0 ? new Date().toISOString() : null,
+        role: "user",
+        kyc_status: "pending",
+        is_active: true,
+        is_frozen: false,
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      })
+      .select()
+      .single();
+
+    if (error) {
+      console.error("Supabase insert error:", error);
+      throw error;
+    }
+
+    console.log("User created with ID:", user.id);
+
+    // ========== FIXED: Store face images properly ==========
+    if (face_images && face_images.length > 0) {
+      console.log(`Storing ${face_images.length} face images for user ${user.id}`);
+      
+      for (let i = 0; i < face_images.length; i++) {
+        const faceImage = face_images[i];
+        
+        // Store each face image with full descriptor object
+        const { error: descriptorError } = await supabase
+          .from("face_descriptors")
+          .insert({
+            user_id: user.id,
+            descriptor: {
+              image: faceImage,  // Store the actual base64 image
+              angle: i,
+              timestamp: new Date().toISOString(),
+              compressed: true,
+              format: "jpeg"
+            },
+            is_active: true,
+            created_at: new Date().toISOString(),
+          });
+
+        if (descriptorError) {
+          console.error(`Error storing face image ${i}:`, descriptorError);
+        } else {
+          console.log(`Successfully stored face image ${i + 1}/${face_images.length}`);
+        }
+      }
+      
+      // Also store the first face image in the users table for quick access
+      const { error: updateError } = await supabase
+        .from("users")
+        .update({
+          face_embedding: {
+            image: face_images[0],  // Store first image as preview
+            count: face_images.length,
+            stored_at: new Date().toISOString()
+          }
+        })
+        .eq("id", user.id);
+        
+      if (updateError) {
+        console.error("Error updating user with face preview:", updateError);
+      }
+    }
+
+    // Create checking account for user
+    const { error: accountError } = await supabase.from("accounts").insert({
+      user_id: user.id,
+      account_type: "checking",
+      currency: "NGN",
+      balance: 0.0,
+      available_balance: 0.0,
+      status: "active",
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    });
+
+    if (accountError) {
+      console.error("Account creation error:", accountError);
+    }
+
+    // Generate token
+    const token = jwt.sign(
+      { userId: user.id, email: user.email, role: user.role },
+      process.env.JWT_SECRET,
+      { expiresIn: process.env.JWT_EXPIRE },
+    );
+
+    // Return user data with face info
+    res.status(201).json({
+      message: "User created successfully",
+      token,
+      user: {
+        id: user.id,
+        email: user.email,
+        first_name: user.first_name,
+        last_name: user.last_name,
+        middle_name: user.middle_name,
+        role: user.role,
+        phone: user.phone,
+        country: user.country,
+        state: user.state,
+        city: user.city,
+        age: user.age,
+        gender: user.gender,
+        marital_status: user.marital_status,
+        occupation: user.occupation,
+        identification_type: user.identification_type,
+        identification_number: user.identification_number,
+        has_passcode: !!user.passcode_hash,
+        face_verified: user.face_verified,
+        face_images_count: face_images ? face_images.length : 0,
       },
     });
   } catch (error) {
@@ -11774,40 +12010,9 @@ app.get(
     }
   },
 );
-// Get single user details using raw SQL
-/*app.get(
-  "/api/admin/users/:userId",
-  authenticate,
-  authorizeAdmin,
-  async (req, res) => {
-    try {
-      const { userId } = req.params;
-
-      // Use raw SQL query to avoid Supabase's ambiguous relationship handling
-      const { data, error } = await supabase.rpc("get_user_complete_data", {
-        user_id_param: userId,
-      });
-
-      if (error) {
-        console.error("RPC error:", error);
-
-        // Fallback to manual query if RPC fails
-        return await getUserDataManually(userId, res);
-      }
-
-      res.json(data);
-    } catch (error) {
-      console.error("Admin user fetch error:", error);
-      res.status(500).json({
-        error: "Failed to fetch user",
-        details: error.message,
-      });
-    }
-  },
-);*/
 
 // Get single user details (admin) - UPDATED with all fields
-app.get(
+/*app.get(
   "/api/admin/users/:userId",
   authenticate,
   authorizeAdmin,
@@ -11899,7 +12104,7 @@ app.get(
         .select("id, created_at")
         .eq("user_id", userId)
         .eq("is_active", true)
-        .limit(1);*/
+        .limit(1);*
 
         // Get face descriptors with images
 const { data: faceDescriptors } = await supabase
@@ -11933,206 +12138,166 @@ completeUser.face_image = faceDescriptors?.[0]?.descriptor?.image || null;
       });
     }
   },
-);
+);*/
 
-// Fallback manual function
-/*async function getUserDataManually(userId, res) {
-  try {
-    // Get user
-    const { data: user, error: userError } = await supabase
-      .from("users")
-      .select("*")
-      .eq("id", userId)
-      .single();
-
-    if (userError) throw userError;
-
-    // Get accounts
-    const { data: accounts } = await supabase
-      .from("accounts")
-      .select("*")
-      .eq("user_id", userId);
-
-    // Get cards
-    const { data: cards } = await supabase
-      .from("cards")
-      .select("*")
-      .eq("user_id", userId);
-
-    // Get all transactions (using union approach)
-    const { data: transactions, error: transError } = await supabase
-      .from("transactions")
-      .select(
-        `
-                id,
-                transaction_id,
-                amount,
-                currency,
-                description,
-                transaction_type,
-                status,
-                created_at,
-                completed_at,
-                from_account_id,
-                to_account_id,
-                from_user_id,
-                to_user_id
-            `,
-      )
-      .or(`from_user_id.eq.${userId},to_user_id.eq.${userId}`)
-      .order("created_at", { ascending: false })
-      .limit(50);
-
-    if (transError) {
-      console.error("Transaction error:", transError);
-    }
-
-    // Get account details for each transaction
-    const transactionsWithAccounts = await Promise.all(
-      (transactions || []).map(async (t) => {
-        let fromAccount = null;
-        let toAccount = null;
-
-        if (t.from_account_id) {
-          const { data: acc } = await supabase
-            .from("accounts")
-            .select("id, account_number, account_type")
-            .eq("id", t.from_account_id)
-            .single();
-          fromAccount = acc;
-        }
-
-        if (t.to_account_id) {
-          const { data: acc } = await supabase
-            .from("accounts")
-            .select("id, account_number, account_type")
-            .eq("id", t.to_account_id)
-            .single();
-          toAccount = acc;
-        }
-
-        return {
-          ...t,
-          from_account: fromAccount,
-          to_account: toAccount,
-        };
-      }),
-    );
-
-    const completeUser = {
-      ...user,
-      accounts: accounts || [],
-      cards: cards || [],
-      transactions: transactionsWithAccounts || [],
-    };
-
-    res.json(completeUser);
-  } catch (error) {
-    console.error("Manual fetch error:", error);
-    res.status(500).json({ error: "Failed to fetch user data" });
-  }
-}*/
-
-// Update user (admin) - FIXED VERSION
-/*app.put(
+// Get single user details (admin) - FIXED with face images
+app.get(
   "/api/admin/users/:userId",
   authenticate,
   authorizeAdmin,
   async (req, res) => {
     try {
       const { userId } = req.params;
-      const updates = req.body;
 
-      // Remove any fields that shouldn't be updated
-      const safeUpdates = {};
-      const allowedFields = [
-        "first_name",
-        "last_name",
-        "email",
-        "phone",
-        "date_of_birth",
-        "address",
-        "city",
-        "country",
-        "postal_code",
-        "role",
-        "kyc_status",
-        "id_type",
-        "id_number",
-        "is_active",
-        "is_frozen",
-        "freeze_reason",
-        "two_factor_enabled",
-      ];
-
-      allowedFields.forEach((field) => {
-        if (updates[field] !== undefined && updates[field] !== null) {
-          safeUpdates[field] = updates[field];
-        }
-      });
-
-      // Add timestamp
-      safeUpdates.updated_at = new Date();
-
-      // Check email uniqueness if changed
-      if (safeUpdates.email) {
-        const { data: existingUser } = await supabase
-          .from("users")
-          .select("id")
-          .eq("email", safeUpdates.email)
-          .neq("id", userId)
-          .maybeSingle();
-
-        if (existingUser) {
-          return res.status(400).json({ error: "Email already in use" });
-        }
-      }
-
-      // Update user
-      const { data: user, error: updateError } = await supabase
+      // Get user with all fields
+      const { data: user, error: userError } = await supabase
         .from("users")
-        .update(safeUpdates)
+        .select(`
+          id,
+          email,
+          first_name,
+          last_name,
+          middle_name,
+          phone,
+          date_of_birth,
+          age,
+          gender,
+          marital_status,
+          occupation,
+          referral_code,
+          address,
+          city,
+          state,
+          country,
+          postal_code,
+          identification_type,
+          identification_number,
+          security_question_1,
+          security_question_2,
+          role,
+          kyc_status,
+          is_active,
+          is_frozen,
+          freeze_reason,
+          two_factor_enabled,
+          face_verified,
+          face_quality_score,
+          face_embedding,
+          created_at,
+          updated_at,
+          last_login
+        `)
         .eq("id", userId)
-        .select(
-          "id, email, first_name, last_name, role, kyc_status, is_active, is_frozen",
-        )
         .single();
 
-      if (updateError) {
-        console.error("Update error:", updateError);
-        return res.status(500).json({ error: "Failed to update user" });
+      if (userError || !user) {
+        return res.status(404).json({ error: "User not found" });
       }
 
-      // Log admin action
-      await supabase.from("admin_actions").insert({
-        admin_id: req.user.id,
-        action_type: "update_user",
-        target_user_id: userId,
-        details: safeUpdates,
-      });
+      // Get accounts
+      const { data: accounts } = await supabase
+        .from("accounts")
+        .select("*")
+        .eq("user_id", userId);
 
-      // Create notifications for important changes
-      if (updates.is_frozen !== undefined) {
-        await supabase.from("notifications").insert({
-          user_id: userId,
-          title: updates.is_frozen ? "Account Frozen" : "Account Unfrozen",
-          message: updates.is_frozen
-            ? `Your account has been frozen. Reason: ${updates.freeze_reason || "Not specified"}`
-            : "Your account has been unfrozen.",
-          type: updates.is_frozen ? "warning" : "success",
-        });
+      // Get cards
+      const { data: cards } = await supabase
+        .from("cards")
+        .select("*")
+        .eq("user_id", userId);
+
+      // Get recent transactions (last 50)
+      const { data: transactions } = await supabase
+        .from("transactions")
+        .select(`
+          id,
+          transaction_id,
+          amount,
+          description,
+          transaction_type,
+          status,
+          created_at,
+          completed_at,
+          from_account_id,
+          to_account_id,
+          from_user_id,
+          to_user_id
+        `)
+        .or(`from_user_id.eq.${userId},to_user_id.eq.${userId}`)
+        .order("created_at", { ascending: false })
+        .limit(50);
+
+      // ========== FIXED: Get face descriptors with images ==========
+      const { data: faceDescriptors } = await supabase
+        .from("face_descriptors")
+        .select("id, descriptor, created_at, is_active")
+        .eq("user_id", userId)
+        .eq("is_active", true)
+        .order("created_at", { ascending: true })
+        .limit(10);  // Get up to 10 face images
+
+      // Process face descriptors to extract images
+      let processedFaceDescriptors = [];
+      let firstFaceImage = null;
+      
+      if (faceDescriptors && faceDescriptors.length > 0) {
+        processedFaceDescriptors = faceDescriptors.map(fd => {
+          // Check if descriptor contains an image
+          let imageData = null;
+          if (fd.descriptor) {
+            if (typeof fd.descriptor === 'object' && fd.descriptor.image) {
+              imageData = fd.descriptor.image;
+              if (!firstFaceImage) firstFaceImage = imageData;
+            } else if (typeof fd.descriptor === 'string' && fd.descriptor.startsWith('data:image')) {
+              imageData = fd.descriptor;
+              if (!firstFaceImage) firstFaceImage = imageData;
+            }
+          }
+          return {
+            id: fd.id,
+            image: imageData,
+            created_at: fd.created_at,
+            is_active: fd.is_active
+          };
+        }).filter(fd => fd.image); // Only keep those with images
       }
+      
+      // Also check if user table has face_embedding with image
+      let userFaceImage = null;
+      if (user.face_embedding) {
+        if (typeof user.face_embedding === 'object' && user.face_embedding.image) {
+          userFaceImage = user.face_embedding.image;
+        } else if (typeof user.face_embedding === 'string' && user.face_embedding.startsWith('data:image')) {
+          userFaceImage = user.face_embedding;
+        }
+      }
+      
+      // Use the first available face image
+      const finalFaceImage = firstFaceImage || userFaceImage;
 
-      res.json({
-        message: "User updated successfully",
-        user,
-      });
+      // Combine all data
+      const completeUser = {
+        ...user,
+        accounts: accounts || [],
+        cards: cards || [],
+        transactions: transactions || [],
+        face_descriptors: processedFaceDescriptors,
+        face_descriptor_count: processedFaceDescriptors.length,
+        face_image: finalFaceImage,  // Add this field for easy access
+        has_face_descriptor: processedFaceDescriptors.length > 0,
+        has_passcode: !!user.passcode_hash,
+      };
+
+      res.json(completeUser);
     } catch (error) {
-      console.error("Admin update user error:", error);
-      res.status(500).json({ error: "Failed to update user" });
+      console.error("Admin user fetch error:", error);
+      res.status(500).json({
+        error: "Failed to fetch user",
+        details: error.message,
+      });
     }
   },
-);*/
+);
 
 // Update user (admin) - UPDATED with all fields
 app.put(
