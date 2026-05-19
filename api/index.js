@@ -3691,7 +3691,7 @@ app.get(
 );
 
 // Get single transaction details for receipt viewing
-/*app.get(
+app.get(
   "/api/user/transactions/:transactionId",
   authenticate,
   async (req, res) => {
@@ -3728,10 +3728,10 @@ app.get(
       res.status(500).json({ error: "Failed to fetch transaction" });
     }
   },
-);*/
+);
 
 // Get single transaction details for receipt viewing - UPDATED to handle failed transactions
-app.get(
+/*app.get(
   "/api/user/transactions/:transactionId",
   authenticate,
   async (req, res) => {
@@ -3787,7 +3787,7 @@ app.get(
       res.status(500).json({ error: "Failed to fetch transaction" });
     }
   }
-);
+);*/
 
 
 // Download statement
