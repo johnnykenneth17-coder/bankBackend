@@ -1,6 +1,7 @@
-// ==================== HARVEST PLAN ADD UP SAVINGS ====================
 
-// Add up savings to harvest plan
+
+
+// Execute add-up savings (with PIN verification)
 app.post(
   "/api/user/savings/harvest/:id/add-up",
   authenticate,
@@ -8,11 +9,72 @@ app.post(
   async (req, res) => {
     try {
       const { id } = req.params;
-      const { amount } = req.body;
+      const { amount, pin } = req.body;
 
       if (!amount || amount <= 0) {
         return res.status(400).json({ error: "Invalid amount" });
       }
+
+      // Verify PIN first
+      const { data: user, error: userError } = await supabase
+        .from("users")
+        .select("transfer_pin, pin_attempts, last_pin_attempt")
+        .eq("id", req.user.id)
+        .single();
+
+      if (userError) {
+        return res.status(500).json({ error: "Failed to verify PIN" });
+      }
+
+      if (!user.transfer_pin) {
+        return res.status(400).json({ error: "PIN_NOT_SET", message: "Please set a transfer PIN first" });
+      }
+
+      // Check PIN attempts
+      const maxAttempts = 4;
+      const attemptWindow = 15 * 60 * 1000;
+
+      if (user.pin_attempts >= maxAttempts) {
+        const lastAttempt = new Date(user.last_pin_attempt);
+        if (Date.now() - lastAttempt < attemptWindow) {
+          return res.status(429).json({ 
+            error: "Too many incorrect PIN attempts. Please try again later.",
+            frozen: true
+          });
+        } else {
+          await supabase
+            .from("users")
+            .update({ pin_attempts: 0 })
+            .eq("id", req.user.id);
+        }
+      }
+
+      const isValidPin = await bcrypt.compare(pin, user.transfer_pin);
+
+      if (!isValidPin) {
+        const newAttempts = (user.pin_attempts || 0) + 1;
+        const updates = { pin_attempts: newAttempts, last_pin_attempt: new Date() };
+        
+        if (newAttempts >= maxAttempts) {
+          updates.is_frozen = true;
+          updates.freeze_reason = "Too many incorrect PIN attempts - Contact support to unfreeze";
+          updates.unfreeze_method = "support";
+        }
+        
+        await supabase.from("users").update(updates).eq("id", req.user.id);
+        
+        return res.status(401).json({ 
+          error: "Incorrect PIN",
+          attempts_remaining: maxAttempts - newAttempts,
+          frozen: newAttempts >= maxAttempts
+        });
+      }
+
+      // Reset PIN attempts on success
+      await supabase
+        .from("users")
+        .update({ pin_attempts: 0, last_pin_attempt: null })
+        .eq("id", req.user.id);
 
       // Get harvest enrollment
       const { data: enrollment, error: hError } = await supabase
@@ -21,10 +83,10 @@ app.post(
           *,
           users!inner(id, email, first_name, last_name, is_frozen),
           harvest_plans!inner(
-            id, 
-            name, 
-            daily_amount, 
-            duration_days, 
+            id,
+            name,
+            daily_amount,
+            duration_days,
             total_amount,
             reward_items
           )
@@ -57,37 +119,39 @@ app.post(
         return res.status(404).json({ error: "Account not found" });
       }
 
-      // Check if sufficient balance
-      if (account.available_balance < amount) {
-        return res.status(400).json({ error: "Insufficient funds" });
-      }
-
       // Calculate how many days this amount represents
       const dailyAmount = enrollment.daily_amount;
       const additionalDays = Math.floor(amount / dailyAmount);
       const remainingAmount = amount % dailyAmount;
       
       // Calculate new totals
-      const planTotalDays = enrollment.harvest_plans.duration_days;
-      const currentDaysCompleted = enrollment.days_completed || 0;
-      const newDaysCompleted = Math.min(
-        currentDaysCompleted + additionalDays,
-        planTotalDays
-      );
-      
-      // Calculate new total saved
-      const newTotalSaved = (enrollment.total_saved || 0) + amount;
-      
-      // Check if user would exceed total savings amount
       const planTotalAmount = enrollment.harvest_plans.total_amount;
+      const currentSaved = enrollment.total_saved || 0;
+      const newTotalSaved = currentSaved + amount;
+      
+      // Check if would exceed total savings amount
       if (newTotalSaved > planTotalAmount) {
-        const maxAllowed = planTotalAmount - (enrollment.total_saved || 0);
+        const maxAllowed = planTotalAmount - currentSaved;
         return res.status(400).json({
           error: "amount_exceeds_limit",
           message: `Adding ₦${amount.toLocaleString()} would exceed your plan's total savings target. Maximum additional amount: ₦${maxAllowed.toLocaleString()}`,
           max_allowed: maxAllowed
         });
       }
+
+      // Check if sufficient balance
+      if (account.available_balance < amount) {
+        return res.status(400).json({ error: "Insufficient funds" });
+      }
+
+      // Calculate new days completed
+      const currentDaysCompleted = Math.floor(currentSaved / dailyAmount);
+      const newDaysCompleted = Math.min(
+        currentDaysCompleted + additionalDays,
+        enrollment.harvest_plans.duration_days
+      );
+      
+      const wasCompleted = newDaysCompleted >= enrollment.harvest_plans.duration_days;
 
       // Deduct amount from user's account
       const newBalance = account.balance - amount;
@@ -103,11 +167,6 @@ app.post(
         .eq("id", account.id);
 
       if (updateBalanceError) throw updateBalanceError;
-
-      // Calculate progress for notifications
-      const wasCompleted = newDaysCompleted >= planTotalDays;
-      const progressBefore = (currentDaysCompleted / planTotalDays) * 100;
-      const progressAfter = (newDaysCompleted / planTotalDays) * 100;
 
       // Update enrollment
       const { error: updateError } = await supabase
@@ -156,13 +215,18 @@ app.post(
       });
 
       // Log security event
-      await logSecurityEvent(req.user.id, "harvest_plan_add_up", {
-        plan_id: id,
-        plan_name: enrollment.harvest_plans.name,
-        amount: amount,
-        additional_days: additionalDays,
-        new_total_saved: newTotalSaved,
-        new_days_completed: newDaysCompleted
+      await supabase.from("security_logs").insert({
+        user_id: req.user.id,
+        event_type: "harvest_plan_add_up",
+        details: {
+          plan_id: id,
+          plan_name: enrollment.harvest_plans.name,
+          amount: amount,
+          additional_days: additionalDays,
+          new_total_saved: newTotalSaved,
+          new_days_completed: newDaysCompleted
+        },
+        ip_address: req.ip
       });
 
       res.json({
@@ -174,82 +238,14 @@ app.post(
           remaining_amount: remainingAmount,
           total_saved: newTotalSaved,
           days_completed: newDaysCompleted,
-          total_days: planTotalDays,
-          progress_percent: (newDaysCompleted / planTotalDays) * 100,
+          total_days: enrollment.harvest_plans.duration_days,
+          progress_percent: (newDaysCompleted / enrollment.harvest_plans.duration_days) * 100,
           was_completed: wasCompleted
         }
       });
     } catch (error) {
       console.error("Add up savings error:", error);
       res.status(500).json({ error: "Failed to add savings: " + error.message });
-    }
-  }
-);
-
-// Get harvest plan add-up summary (for displaying potential additional days)
-app.get(
-  "/api/user/savings/harvest/:id/add-up-summary",
-  authenticate,
-  async (req, res) => {
-    try {
-      const { id } = req.params;
-      const { amount } = req.query;
-
-      if (!amount || amount <= 0) {
-        return res.status(400).json({ error: "Invalid amount" });
-      }
-
-      // Get harvest enrollment
-      const { data: enrollment, error: hError } = await supabase
-        .from("user_harvest_enrollments")
-        .select(`
-          *,
-          harvest_plans!inner(
-            daily_amount,
-            duration_days,
-            total_amount
-          )
-        `)
-        .eq("id", id)
-        .eq("user_id", req.user.id)
-        .single();
-
-      if (hError || !enrollment) {
-        return res.status(404).json({ error: "Harvest plan not found" });
-      }
-
-      const dailyAmount = enrollment.daily_amount;
-      const additionalDays = Math.floor(amount / dailyAmount);
-      const remainingAmount = amount % dailyAmount;
-      const newTotalSaved = (enrollment.total_saved || 0) + amount;
-      const newDaysCompleted = Math.min(
-        (enrollment.days_completed || 0) + additionalDays,
-        enrollment.harvest_plans.duration_days
-      );
-      
-      const planTotalAmount = enrollment.harvest_plans.total_amount;
-      const exceedsLimit = newTotalSaved > planTotalAmount;
-      const maxAllowed = planTotalAmount - (enrollment.total_saved || 0);
-
-      res.json({
-        success: true,
-        summary: {
-          amount: amount,
-          daily_amount: dailyAmount,
-          additional_days: additionalDays,
-          remaining_amount: remainingAmount,
-          current_saved: enrollment.total_saved || 0,
-          new_total_saved: newTotalSaved,
-          current_days: enrollment.days_completed || 0,
-          new_days: newDaysCompleted,
-          total_days: enrollment.harvest_plans.duration_days,
-          exceeds_limit: exceedsLimit,
-          max_allowed: maxAllowed
-        }
-      });
-    } catch (error) {
-      console.error("Add up summary error:", error);
-      res.status(500).json({ error: "Failed to calculate summary" });
     }
   }
 );
