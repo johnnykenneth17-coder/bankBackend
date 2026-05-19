@@ -3740,25 +3740,7 @@ app.post(
       }
 
       // Check balance
-      /* if (fromAccount.available_balance < amount) {
-  if (failedRecordId) {
-    await updateFailedTransactionRecord(
-      failedRecordId, 
-      `Insufficient balance. Available: ₦${fromAccount.available_balance.toLocaleString()}, Required: ₦${amount.toLocaleString()}`, 
-      "balance_error",
-      { available_balance: fromAccount.available_balance, amount: amount }
-    );
-  }
-  return res.status(400).json({ 
-    error: "Insufficient funds",
-    failed_record_id: failedRecordId,
-    available_balance: fromAccount.available_balance,
-    required_amount: amount
-  });
- }*/
-
-      // In index.js - Fix the balance check section
-      if (fromAccount.available_balance < amount) {
+      /*if (fromAccount.available_balance < amount) {
         console.log(
           `❌ Balance check failed: Available: ${fromAccount.available_balance}, Required: ${amount}`,
         );
@@ -3800,6 +3782,99 @@ app.post(
         return res.status(400).json({
           error: "Insufficient funds",
           failed_record_id: failedRecordId,
+          available_balance: fromAccount.available_balance,
+          required_amount: amount,
+        });
+      }*/
+
+      // In index.js - REPLACE your entire balance check section with this
+
+      // ========== BALANCE CHECK WITH DIRECT DATABASE UPDATE ==========
+      if (fromAccount.available_balance < amount) {
+        console.log(
+          `❌ INSUFFICIENT BALANCE: User ${req.user.id}, Available: ${fromAccount.available_balance}, Required: ${amount}`,
+        );
+
+        let finalTransactionUuid = null;
+        const failureReason = `Insufficient balance. Available: ₦${fromAccount.available_balance.toLocaleString()}, Required: ₦${amount.toLocaleString()}`;
+
+        // Check if we have a pending record ID from earlier
+        if (failedRecordId) {
+          console.log(`📝 Updating existing pending record: ${failedRecordId}`);
+
+          // DIRECT UPDATE - NO HELPER FUNCTION
+          const { error: updateError } = await supabase
+            .from("transactions")
+            .update({
+              status: "failed",
+              failed_reason: failureReason,
+              failure_type: "balance_error",
+              description: `Failed transfer - Insufficient funds. Available: ₦${fromAccount.available_balance.toLocaleString()}, Required: ₦${amount.toLocaleString()}`,
+              completed_at: new Date().toISOString(),
+            })
+            .eq("id", failedRecordId);
+
+          if (updateError) {
+            console.error("❌ Update failed:", updateError);
+          } else {
+            console.log(
+              `✅ Successfully updated record ${failedRecordId} with balance error`,
+            );
+            finalTransactionUuid = failedRecordId;
+
+            // VERIFY the update worked
+            const { data: verify } = await supabase
+              .from("transactions")
+              .select("failed_reason, status")
+              .eq("id", failedRecordId)
+              .single();
+
+            console.log(
+              `🔍 Verification - Status: ${verify?.status}, Reason: ${verify?.failed_reason}`,
+            );
+          }
+        } else {
+          // Create a brand new failed record
+          console.log(`📝 Creating new failed record for balance error`);
+
+          const transactionId = `FAIL${Date.now()}${Math.floor(Math.random() * 10000)}`;
+
+          const { data: newRecord, error: insertError } = await supabase
+            .from("transactions")
+            .insert({
+              transaction_id: transactionId,
+              from_account_id: from_account_id,
+              to_account_id: toAccount?.id || null,
+              from_user_id: req.user.id,
+              to_user_id: toAccount?.user_id || null,
+              amount: amount,
+              fee_amount: 0,
+              description: description || `Transfer to ${to_account_number}`,
+              transaction_type: "transfer",
+              status: "failed",
+              failed_reason: failureReason,
+              failure_type: "balance_error",
+              created_at: new Date().toISOString(),
+              completed_at: new Date().toISOString(),
+              ip_address: ip,
+              user_agent: userAgent,
+            })
+            .select()
+            .single();
+
+          if (insertError) {
+            console.error("❌ Failed to create failed record:", insertError);
+          } else {
+            console.log(`✅ Created new failed record: ${newRecord.id}`);
+            finalTransactionUuid = newRecord.id;
+          }
+        }
+
+        // Return the response with the record ID
+        return res.status(400).json({
+          error: "Insufficient funds",
+          failed_record_id: finalTransactionUuid,
+          failed_record_uuid: finalTransactionUuid,
           available_balance: fromAccount.available_balance,
           required_amount: amount,
         });
@@ -4178,142 +4253,6 @@ app.post(
 );
 
 // In index.js - Fix the createInitialFailedTransactionRecord function
-/*async function createInitialFailedTransactionRecord(
-  userId,
-  fromAccountId,
-  toAccountNumber,
-  amount,
-  description,
-  ip,
-  userAgent,
-) {
-  try {
-    // Get the source account details
-    const { data: fromAccount } = await supabase
-      .from("accounts")
-      .select("account_number, user_id")
-      .eq("id", fromAccountId)
-      .single();
-
-    // Try to get destination account info if it exists
-    let toAccountId = null;
-    let toUserId = null;
-    let toAccountNumberStored = toAccountNumber;
-    let toAccountNumberDisplay = toAccountNumber;
-
-    const { data: toAccount } = await supabase
-      .from("accounts")
-      .select("id, user_id, account_number")
-      .eq("account_number", toAccountNumber)
-      .maybeSingle();
-
-    if (toAccount) {
-      toAccountId = toAccount.id;
-      toUserId = toAccount.user_id;
-      toAccountNumberDisplay = toAccount.account_number;
-    }
-
-    const transactionId = `FAIL${Date.now()}${Math.floor(Math.random() * 10000)}`;
-
-    // IMPORTANT: Store the correct amount
-    const transactionData = {
-      transaction_id: transactionId,
-      from_account_id: fromAccountId,
-      to_account_id: toAccountId,
-      from_user_id: userId,
-      to_user_id: toUserId,
-      amount: amount, // Make sure this is the correct amount
-      fee_amount: 0,
-      description: description || `Transfer to ${toAccountNumberDisplay}`,
-      transaction_type: "transfer",
-      status: "failed",
-      failed_reason: "Validating transaction...",
-      failure_type: "pending_validation",
-      created_at: new Date().toISOString(),
-      ip_address: ip,
-      user_agent: userAgent,
-    };
-
-    const { data: inserted, error } = await supabase
-      .from("transactions")
-      .insert(transactionData)
-      .select()
-      .single();
-
-    if (error) {
-      console.error("Failed to create initial failed record:", error);
-      return null;
-    }
-
-    console.log(
-      `📝 Created initial failed transaction record: ${transactionId}, Amount: ${amount}`,
-    );
-    return inserted;
-  } catch (error) {
-    console.error("Error creating initial failed record:", error);
-    return null;
-  }
-}*/
-
-// In index.js - Fix the updateFailedTransactionRecord function
-/*async function updateFailedTransactionRecord(
-  transactionRecordId,
-  reason,
-  failureType,
-  details = {},
-) {
-  try {
-    const updates = {
-      failed_reason: reason,
-      failure_type: failureType,
-      completed_at: new Date().toISOString(),
-      updated_at: new Date().toISOString(),
-    };
-
-    // Build a proper description based on failure type
-    if (failureType === "balance_error") {
-      updates.description = `Failed transfer - Insufficient funds. Available: ₦${details.available_balance?.toLocaleString() || "N/A"}, Required: ₦${details.amount?.toLocaleString() || "N/A"}`;
-      updates.failed_reason = `Insufficient balance. Available: ₦${details.available_balance?.toLocaleString() || "N/A"}, Required: ₦${details.amount?.toLocaleString() || "N/A"}`;
-    } else if (failureType === "validation_error") {
-      updates.failed_reason = reason;
-      updates.description = `Failed transfer - ${reason}`;
-    } else if (failureType === "account_error") {
-      updates.failed_reason = reason;
-      updates.description = `Failed transfer - ${reason}`;
-    } else if (failureType === "security_new_device") {
-      updates.failed_reason = reason;
-      updates.description = `Failed transfer - ${reason}`;
-    } else if (failureType === "account_frozen") {
-      updates.failed_reason = reason;
-      updates.description = `Failed transfer - ${reason}`;
-    } else if (failureType === "pending_confirmation") {
-      updates.failed_reason = reason;
-      updates.status = "pending_confirmation";
-    } else if (failureType === "pin_error") {
-      updates.failed_reason = reason;
-      updates.description = `Failed transfer - ${reason}`;
-    } else {
-      updates.failed_reason = reason;
-    }
-
-    const { error } = await supabase
-      .from("transactions")
-      .update(updates)
-      .eq("id", transactionRecordId);
-
-    if (error) {
-      console.error("Failed to update failed record:", error);
-    } else {
-      console.log(
-        `✅ Updated failed transaction record: ${transactionRecordId} - ${reason}`,
-      );
-    }
-  } catch (error) {
-    console.error("Error updating failed record:", error);
-  }
-}*/
-
-// In index.js - Fix the createInitialFailedTransactionRecord function
 async function createInitialFailedTransactionRecord(
   userId,
   fromAccountId,
@@ -4360,7 +4299,7 @@ async function createInitialFailedTransactionRecord(
       fee_amount: 0,
       description: description || `Transfer to ${toAccountNumberDisplay}`,
       transaction_type: "transfer",
-      status: "pending", // Use pending, not failed - we'll update to failed later
+      status: "failed", // Use pending, not failed - we'll update to failed later
       failed_reason: null, // Start with null
       failure_type: null,
       created_at: new Date().toISOString(),
@@ -4389,20 +4328,28 @@ async function createInitialFailedTransactionRecord(
   }
 }
 
-
 // In index.js - Completely rewrite the updateFailedTransactionRecord function
-async function updateFailedTransactionRecord(transactionRecordId, reason, failureType, details = {}) {
+async function updateFailedTransactionRecord(
+  transactionRecordId,
+  reason,
+  failureType,
+  details = {},
+) {
   if (!transactionRecordId) {
-    console.error("No transactionRecordId provided to updateFailedTransactionRecord");
+    console.error(
+      "No transactionRecordId provided to updateFailedTransactionRecord",
+    );
     return false;
   }
-  
+
   try {
-    console.log(`🔄 Updating failed record ${transactionRecordId}: ${reason} (${failureType})`);
-    
+    console.log(
+      `🔄 Updating failed record ${transactionRecordId}: ${reason} (${failureType})`,
+    );
+
     let finalReason = reason;
     let finalDescription = `Failed transfer - ${reason}`;
-    
+
     // Build proper messages based on failure type
     if (failureType === "balance_error") {
       finalReason = `Insufficient balance. Available: ₦${details.available_balance?.toLocaleString() || "N/A"}, Required: ₦${details.amount?.toLocaleString() || "N/A"}`;
@@ -4423,30 +4370,29 @@ async function updateFailedTransactionRecord(transactionRecordId, reason, failur
       finalReason = reason;
       finalDescription = `Failed transfer - ${reason}`;
     }
-    
+
     const updates = {
       failed_reason: finalReason,
       failure_type: failureType,
       description: finalDescription,
       status: "failed",
       completed_at: new Date().toISOString(),
-      updated_at: new Date().toISOString()
+      updated_at: new Date().toISOString(),
     };
-    
+
     const { error } = await supabase
       .from("transactions")
       .update(updates)
       .eq("id", transactionRecordId);
-    
+
     if (error) {
       console.error("Failed to update failed record:", error);
       return false;
     }
-    
+
     console.log(`✅ Successfully updated failed record ${transactionRecordId}`);
     console.log(`   New failure_reason: ${finalReason}`);
     return true;
-    
   } catch (error) {
     console.error("Error updating failed record:", error);
     return false;
