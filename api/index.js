@@ -4030,7 +4030,7 @@ app.get(
   },
 );*/
 
-// Enhanced transfer with device trust and recipient checking
+// Enhanced transfer with device trust and recipient checking - FULLY FIXED
 app.post(
   "/api/user/transfer",
   authenticate,
@@ -4044,7 +4044,8 @@ app.post(
         amount,
         description,
         device_fingerprint,
-        skip_security_check = false
+        skip_security_check = false,
+        requires_otp = false  // ← ADD THIS LINE - default to false
       } = req.body;
 
       // Validate amount
@@ -4090,7 +4091,7 @@ app.post(
         return res.status(400).json({ error: "Destination account is frozen" });
       }
 
-      // ========== NEW SECURITY CHECKS ==========
+      // ========== SECURITY CHECKS ==========
       
       // 1. Update device trust tracking
       const deviceTrust = await updateDeviceTrust(
@@ -4129,7 +4130,7 @@ app.post(
         });
       }
       
-      // Case 2: New recipient - require confirmation (will be handled by frontend modal)
+      // Case 2: New recipient - require confirmation
       if (!skip_security_check && isNewRecipient) {
         return res.status(403).json({
           error: "new_recipient",
@@ -4191,9 +4192,9 @@ app.post(
         created_at: new Date().toISOString(),
       };
 
-      // Check for OTP requirement (large amounts)
+      // ========== FIXED: OTP CHECK ==========
       const isLargeAmount = amount > 500000;
-      const needsOTP = requires_otp || isLargeAmount;
+      const needsOTP = requires_otp || isLargeAmount;  // requires_otp is now defined
 
       if (needsOTP && process.env.OTP_MODE === "on") {
         transactionData.requires_otp = true;
