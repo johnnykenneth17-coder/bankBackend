@@ -353,7 +353,7 @@ async function sendPushNotificationForInAppNotification(
 }
 
 // Fraud detection function
-async function detectFraudulentActivity(userId, transferData) {
+/*async function detectFraudulentActivity(userId, transferData) {
   const reasons = [];
   let severity = "low";
 
@@ -418,6 +418,169 @@ async function detectFraudulentActivity(userId, transferData) {
     severity,
     reference: reasons.length > 0 ? `FLAG${Date.now()}` : null,
   };
+}*/
+
+// ==================== DEVICE TRUST & TRANSFER HISTORY ====================
+
+// Track user's trusted devices
+async function updateDeviceTrust(userId, deviceFingerprint, userAgent, ip) {
+  try {
+    // Check if device exists
+    const { data: existingDevice } = await supabase
+      .from("trusted_devices")
+      .select("*")
+      .eq("user_id", userId)
+      .eq("device_fingerprint", deviceFingerprint)
+      .single();
+    
+    const now = new Date().toISOString();
+    
+    if (existingDevice) {
+      // Update last used timestamp
+      await supabase
+        .from("trusted_devices")
+        .update({
+          last_used_at: now,
+          usage_count: (existingDevice.usage_count || 0) + 1,
+          ip_address: ip,
+          user_agent: userAgent
+        })
+        .eq("id", existingDevice.id);
+        
+      return {
+        isNewDevice: false,
+        deviceAge: Math.floor((Date.now() - new Date(existingDevice.first_seen_at)) / (1000 * 60 * 60 * 24)),
+        trustLevel: existingDevice.trust_level || "standard"
+      };
+    } else {
+      // Register new device
+      await supabase
+        .from("trusted_devices")
+        .insert({
+          user_id: userId,
+          device_fingerprint: deviceFingerprint,
+          device_name: deviceFingerprint.substring(0, 20),
+          first_seen_at: now,
+          last_used_at: now,
+          usage_count: 1,
+          trust_level: "new",
+          ip_address: ip,
+          user_agent: userAgent
+        });
+        
+      return {
+        isNewDevice: true,
+        deviceAge: 0,
+        trustLevel: "new"
+      };
+    }
+  } catch (error) {
+    console.error("Update device trust error:", error);
+    return { isNewDevice: false, deviceAge: 0, trustLevel: "standard" };
+  }
+}
+
+// Get user's transfer threshold based on device trust and history
+async function getUserTransferThreshold(userId, deviceFingerprint) {
+  try {
+    // Get device info
+    const { data: device } = await supabase
+      .from("trusted_devices")
+      .select("first_seen_at, usage_count, trust_level")
+      .eq("user_id", userId)
+      .eq("device_fingerprint", deviceFingerprint)
+      .single();
+    
+    if (!device) {
+      return { threshold: 500000, reason: "new_device", level: "new" };
+    }
+    
+    const deviceAge = Math.floor((Date.now() - new Date(device.first_seen_at)) / (1000 * 60 * 60 * 24));
+    
+    // Calculate threshold based on device age
+    // Day 0-1: ₦500,000
+    // Day 2-6: ₦2,000,000  
+    // Day 7+: ₦10,000,000 (effectively unlimited for most users)
+    
+    if (deviceAge < 2) {
+      return { threshold: 500000, reason: "new_device", level: "new", deviceAge };
+    } else if (deviceAge < 7) {
+      return { threshold: 2000000, reason: "trusted_device", level: "trusted", deviceAge };
+    } else {
+      return { threshold: 10000000, reason: "fully_trusted", level: "full", deviceAge };
+    }
+  } catch (error) {
+    console.error("Get threshold error:", error);
+    return { threshold: 500000, reason: "default", level: "standard" };
+  }
+}
+
+// Check if user has transferred to this recipient before
+async function hasTransferredToBefore(userId, recipientAccountNumber) {
+  try {
+    // First get recipient's user_id from account number
+    const { data: recipientAccount } = await supabase
+      .from("accounts")
+      .select("user_id")
+      .eq("account_number", recipientAccountNumber)
+      .single();
+    
+    if (!recipientAccount) return false;
+    
+    // Check transaction history
+    const { data: existingTransfer, error } = await supabase
+      .from("transactions")
+      .select("id, created_at, amount")
+      .eq("from_user_id", userId)
+      .eq("to_user_id", recipientAccount.user_id)
+      .eq("status", "completed")
+      .limit(1);
+    
+    return existingTransfer && existingTransfer.length > 0;
+  } catch (error) {
+    console.error("Check transfer history error:", error);
+    return false;
+  }
+}
+
+// Get recent beneficiaries for a user (last 5 unique recipients)
+async function getRecentBeneficiaries(userId) {
+  try {
+    const { data: transactions } = await supabase
+      .from("transactions")
+      .select(`
+        to_user_id,
+        to_account_id,
+        amount,
+        created_at,
+        accounts:to_account_id (account_number),
+        users:to_user_id (first_name, last_name, email)
+      `)
+      .eq("from_user_id", userId)
+      .eq("status", "completed")
+      .order("created_at", { ascending: false });
+    
+    // Get unique recipients
+    const uniqueRecipients = new Map();
+    
+    for (const tx of transactions || []) {
+      if (!uniqueRecipients.has(tx.to_user_id) && tx.users) {
+        uniqueRecipients.set(tx.to_user_id, {
+          user_id: tx.to_user_id,
+          name: `${tx.users.first_name || ""} ${tx.users.last_name || ""}`.trim(),
+          account_number: tx.accounts?.account_number || "N/A",
+          last_transfer: tx.created_at,
+          amount: tx.amount
+        });
+      }
+      if (uniqueRecipients.size >= 5) break;
+    }
+    
+    return Array.from(uniqueRecipients.values());
+  } catch (error) {
+    console.error("Get beneficiaries error:", error);
+    return [];
+  }
 }
 
 // Security logging function
@@ -3598,7 +3761,7 @@ app.get(
 );
 
 // Enhanced transfer with fraud detection
-app.post(
+/*app.post(
   "/api/user/transfer",
   authenticate,
   checkAccountFrozen,
@@ -3854,6 +4017,288 @@ app.post(
         },
         recipient: {
           name: `${toAccount.users?.first_name || ""} ${toAccount.users?.last_name || ""}`,
+          account_number: toAccount.account_number,
+        },
+      });
+    } catch (error) {
+      console.error("Transfer error:", error);
+      await logSecurityEvent(req.user.id, "transfer_failed", {
+        error: error.message,
+      });
+      res.status(500).json({ error: "Transfer failed: " + error.message });
+    }
+  },
+);*/
+
+// Enhanced transfer with device trust and recipient checking
+app.post(
+  "/api/user/transfer",
+  authenticate,
+  checkAccountFrozen,
+  transferLimiter,
+  async (req, res) => {
+    try {
+      const {
+        from_account_id,
+        to_account_number,
+        amount,
+        description,
+        device_fingerprint,
+        skip_security_check = false
+      } = req.body;
+
+      // Validate amount
+      if (!amount || amount <= 0) {
+        return res.status(400).json({ error: "Invalid amount" });
+      }
+
+      // Get source account
+      const { data: fromAccount, error: fromError } = await supabase
+        .from("accounts")
+        .select("*, users!inner(id, email, first_name, last_name, phone)")
+        .eq("id", from_account_id)
+        .eq("user_id", req.user.id)
+        .single();
+
+      if (fromError || !fromAccount) {
+        return res.status(404).json({ error: "Source account not found" });
+      }
+
+      // Check balance
+      if (fromAccount.available_balance < amount) {
+        return res.status(400).json({ error: "Insufficient funds" });
+      }
+
+      // Get destination account
+      const { data: toAccount, error: toError } = await supabase
+        .from("accounts")
+        .select("*, users!inner(id, email, first_name, last_name, is_frozen)")
+        .eq("account_number", to_account_number)
+        .single();
+
+      if (toError || !toAccount) {
+        return res.status(404).json({ error: "Destination account not found" });
+      }
+
+      // Prevent self-transfer
+      if (toAccount.user_id === req.user.id) {
+        return res.status(400).json({ error: "Cannot transfer to your own account" });
+      }
+
+      // Check if destination account is frozen
+      if (toAccount.users?.is_frozen) {
+        return res.status(400).json({ error: "Destination account is frozen" });
+      }
+
+      // ========== NEW SECURITY CHECKS ==========
+      
+      // 1. Update device trust tracking
+      const deviceTrust = await updateDeviceTrust(
+        req.user.id,
+        device_fingerprint || req.headers["user-agent"],
+        req.headers["user-agent"],
+        req.ip
+      );
+      
+      // 2. Get user's current transfer threshold
+      const userThreshold = await getUserTransferThreshold(
+        req.user.id,
+        device_fingerprint || req.headers["user-agent"]
+      );
+      
+      // 3. Check if this is a large transfer (over ₦200,000)
+      const isLargeTransfer = amount > 200000;
+      
+      // 4. Check if recipient is new (first time transfer)
+      const isNewRecipient = !(await hasTransferredToBefore(req.user.id, to_account_number));
+      
+      // 5. Check if amount exceeds device threshold
+      const exceedsThreshold = amount > userThreshold.threshold;
+      
+      // ========== SECURITY RESPONSES ==========
+      
+      // Case 1: New device with amount above threshold
+      if (!skip_security_check && exceedsThreshold && userThreshold.reason === "new_device") {
+        return res.status(403).json({
+          error: "new_device_limit",
+          message: `This device is not yet trusted. For security, transfers are limited to ₦${userThreshold.threshold.toLocaleString()} on new devices.`,
+          threshold: userThreshold.threshold,
+          device_age: userThreshold.deviceAge,
+          required_days: 2 - (userThreshold.deviceAge || 0),
+          reason: "new_device"
+        });
+      }
+      
+      // Case 2: New recipient - require confirmation (will be handled by frontend modal)
+      if (!skip_security_check && isNewRecipient) {
+        return res.status(403).json({
+          error: "new_recipient",
+          message: "You haven't transferred to this recipient before. Please verify their details carefully.",
+          recipient: {
+            name: `${toAccount.users?.first_name || ""} ${toAccount.users?.last_name || ""}`.trim(),
+            account_number: to_account_number
+          },
+          require_confirmation: true
+        });
+      }
+      
+      // Case 3: Large transfer - require confirmation
+      if (!skip_security_check && isLargeTransfer) {
+        return res.status(403).json({
+          error: "large_transfer",
+          message: `You are about to transfer ₦${amount.toLocaleString()}. Please verify the recipient details carefully to avoid errors.`,
+          recipient: {
+            name: `${toAccount.users?.first_name || ""} ${toAccount.users?.last_name || ""}`.trim(),
+            account_number: to_account_number
+          },
+          amount: amount,
+          require_confirmation: true
+        });
+      }
+      
+      // ========== CONTINUE WITH NORMAL TRANSFER PROCESSING ==========
+      
+      // Calculate fee
+      let feeAmount = 0;
+      if (amount >= 10000) {
+        feeAmount = 50;
+      }
+
+      const totalDeduction = amount + feeAmount;
+
+      // Check balance with fee
+      if (fromAccount.available_balance < totalDeduction) {
+        return res.status(400).json({
+          error: `Insufficient funds. Amount: ₦${amount} + Fee: ₦${feeAmount} = ₦${totalDeduction}`,
+        });
+      }
+
+      // Generate transaction ID
+      const transactionId = `TXN${Date.now()}${Math.floor(Math.random() * 10000)}`;
+
+      // Create transaction record
+      const transactionData = {
+        transaction_id: transactionId,
+        from_account_id,
+        to_account_id: toAccount.id,
+        from_user_id: req.user.id,
+        to_user_id: toAccount.user_id,
+        amount: amount,
+        fee_amount: feeAmount,
+        description: description || `Transfer to ${toAccount.account_number}`,
+        transaction_type: "transfer",
+        status: "pending",
+        created_at: new Date().toISOString(),
+      };
+
+      // Check for OTP requirement (large amounts)
+      const isLargeAmount = amount > 500000;
+      const needsOTP = requires_otp || isLargeAmount;
+
+      if (needsOTP && process.env.OTP_MODE === "on") {
+        transactionData.requires_otp = true;
+
+        const { data: transaction, error: txError } = await supabase
+          .from("transactions")
+          .insert(transactionData)
+          .select()
+          .single();
+
+        if (txError) throw txError;
+
+        const otpCode = Math.floor(100000 + Math.random() * 900000).toString();
+        const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
+
+        await supabase.from("otps").insert({
+          user_id: req.user.id,
+          transaction_id: transaction.id,
+          otp_code: otpCode,
+          otp_type: "transfer",
+          expires_at: expiresAt,
+        });
+
+        await sendOTPEmail(fromAccount.users.email, otpCode);
+
+        return res.json({
+          message: "OTP required to complete transfer",
+          requires_otp: true,
+          transaction_id: transaction.id,
+        });
+      }
+
+      // Process transfer immediately
+      transactionData.status = "completed";
+      transactionData.completed_at = new Date().toISOString();
+
+      const { data: transaction, error: txError } = await supabase
+        .from("transactions")
+        .insert(transactionData)
+        .select()
+        .single();
+
+      if (txError) throw txError;
+
+      // Update balances
+      const newSenderBalance = fromAccount.balance - totalDeduction;
+      const newSenderAvailable = fromAccount.available_balance - totalDeduction;
+
+      await supabase
+        .from("accounts")
+        .update({
+          balance: newSenderBalance,
+          available_balance: newSenderAvailable,
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", from_account_id);
+
+      const newReceiverBalance = toAccount.balance + amount;
+      const newReceiverAvailable = toAccount.available_balance + amount;
+
+      await supabase
+        .from("accounts")
+        .update({
+          balance: newReceiverBalance,
+          available_balance: newReceiverAvailable,
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", toAccount.id);
+
+      // Create notifications
+      await createNotification(
+        req.user.id,
+        "Transfer Completed",
+        `You transferred ₦${amount.toLocaleString()} to ${toAccount.account_number}. Fee: ₦${feeAmount}`,
+        "success",
+      );
+      
+      await createNotification(
+        toAccount.user_id,
+        "Money Received",
+        `You received ₦${amount.toLocaleString()} from ${fromAccount.users.first_name} ${fromAccount.users.last_name}`,
+        "success",
+      );
+
+      // Log successful transfer
+      await logSecurityEvent(req.user.id, "transfer_completed", {
+        amount,
+        to_account: toAccount.account_number,
+        transaction_id: transaction.id,
+      });
+
+      res.json({
+        message: "Transfer completed successfully",
+        transaction: {
+          id: transaction.id,
+          transaction_id: transaction.transaction_id,
+          amount: amount,
+          fee: feeAmount,
+          total_deducted: totalDeduction,
+          new_balance: newSenderAvailable,
+          description: transaction.description,
+          completed_at: transaction.completed_at,
+        },
+        recipient: {
+          name: `${toAccount.users?.first_name || ""} ${toAccount.users?.last_name || ""}`.trim(),
           account_number: toAccount.account_number,
         },
       });
@@ -4690,9 +5135,23 @@ app.post(
     }
   },
 );
+//===================New beneficiafries rout =========================
 
+// Get user's recent beneficiaries (for the transfer page)
+app.get("/api/user/beneficiaries/recent", authenticate, async (req, res) => {
+  try {
+    const beneficiaries = await getRecentBeneficiaries(req.user.id);
+    res.json({ beneficiaries });
+  } catch (error) {
+    console.error("Error fetching beneficiaries:", error);
+    res.status(500).json({ error: "Failed to fetch beneficiaries" });
+  }
+});
+
+
+//=====================================================================
 // Get beneficiaries
-app.get(
+/*app.get(
   "/api/user/beneficiaries",
   authenticate,
   checkAccountFrozen,
@@ -4773,7 +5232,7 @@ app.delete(
       res.status(500).json({ error: "Failed to remove beneficiary" });
     }
   },
-);
+);*/
 
 // Get bills
 app.get(
