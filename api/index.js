@@ -2436,9 +2436,11 @@ function calculateEuclideanDistance(desc1, desc2) {
 
 // ==================== PASSCODE OTP ROUTES ====================
 
-// Send OTP for passcode change/set
+// Send OTP for passcode change/set - EMAIL FIRST
 app.post("/api/user/send-passcode-otp", authenticate, async (req, res) => {
   try {
+    const { method = "email" } = req.body; // Default to email, but accept method param
+    
     const { data: user, error } = await supabase
       .from("users")
       .select("id, email, phone")
@@ -2467,108 +2469,61 @@ app.post("/api/user/send-passcode-otp", authenticate, async (req, res) => {
 
     if (insertError) throw insertError;
 
-    // Try to send SMS first if phone exists
-    let method = "email";
+    // Send OTP based on requested method (default to email)
+    let sentMethod = "email";
     let contact = user.email;
+    let sent = false;
 
-    if (user.phone && user.phone.trim()) {
+    if (method === "sms" && user.phone && user.phone.trim()) {
       try {
         await sendOTPSMS(user.phone, otpCode);
-        method = "sms";
+        sent = true;
+        sentMethod = "sms";
         contact = maskPhoneNumber(user.phone);
         console.log(`OTP sent via SMS to ${user.phone}`);
       } catch (smsError) {
         console.error("SMS send failed, falling back to email:", smsError);
         await sendOTPEmail(user.email, otpCode);
-        method = "email";
+        sentMethod = "email";
         contact = maskEmail(user.email);
       }
     } else {
-      await sendOTPEmail(user.email, otpCode);
-      method = "email";
-      contact = maskEmail(user.email);
+      // Default to email
+      const emailSent = await sendOTPEmail(user.email, otpCode);
+      if (emailSent) {
+        sentMethod = "email";
+        contact = maskEmail(user.email);
+        console.log(`OTP sent via email to ${user.email}`);
+      } else {
+        // If email fails, try SMS as fallback
+        if (user.phone && user.phone.trim()) {
+          try {
+            await sendOTPSMS(user.phone, otpCode);
+            sentMethod = "sms";
+            contact = maskPhoneNumber(user.phone);
+            console.log(`OTP sent via SMS fallback to ${user.phone}`);
+          } catch (smsError) {
+            console.error("SMS fallback also failed:", smsError);
+            throw new Error("Failed to send OTP via any method");
+          }
+        } else {
+          throw new Error("Failed to send OTP via email and no phone available");
+        }
+      }
     }
 
     res.json({
       success: true,
       request_id: requestId,
-      method: method,
+      method: sentMethod,
       contact: contact,
-      message: `Verification code sent to your ${method}`,
+      message: `Verification code sent to your ${sentMethod}`,
     });
   } catch (error) {
     console.error("Send passcode OTP error:", error);
-    res.status(500).json({ error: "Failed to send verification code" });
+    res.status(500).json({ error: "Failed to send verification code: " + error.message });
   }
 });
-
-// Resend passcode OTP
-/*app.post("/api/user/resend-passcode-otp", authenticate, async (req, res) => {
-  try {
-    const { request_id } = req.body;
-
-    // Invalidate old request
-    await supabase
-      .from("passcode_otp_requests")
-      .update({ is_used: true })
-      .eq("id", request_id)
-      .eq("user_id", req.user.id);
-
-    // Get user
-    const { data: user, error } = await supabase
-      .from("users")
-      .select("id, email, phone")
-      .eq("id", req.user.id)
-      .single();
-
-    if (error) throw error;
-
-    // Generate new OTP
-    const otpCode = Math.floor(100000 + Math.random() * 900000).toString();
-    const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
-    const newRequestId = uuidv4();
-
-    const { data: otpRequest, error: insertError } = await supabase
-      .from("passcode_otp_requests")
-      .insert({
-        id: newRequestId,
-        user_id: req.user.id,
-        otp_code: otpCode,
-        expires_at: expiresAt,
-        is_used: false,
-      })
-      .select()
-      .single();
-
-    if (insertError) throw insertError;
-
-    // Send OTP
-    let method = "email";
-    let contact = user.email;
-
-    if (user.phone && user.phone.trim()) {
-      try {
-        await sendOTPSMS(user.phone, otpCode);
-        method = "sms";
-        contact = maskPhoneNumber(user.phone);
-      } catch (smsError) {
-        await sendOTPEmail(user.email, otpCode);
-      }
-    } else {
-      await sendOTPEmail(user.email, otpCode);
-    }
-
-    res.json({
-      success: true,
-      request_id: newRequestId,
-      method: method,
-      contact: contact,
-    });
-  } catch (error) {
-    console.error("Resend passcode OTP error:", error);
-    res.status(500).json({ error: "Failed to resend code" });
-  }
-});*/
 
 // Resend passcode OTP - UPDATED to accept method parameter
 app.post("/api/user/resend-passcode-otp", authenticate, async (req, res) => {
