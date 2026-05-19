@@ -3730,66 +3730,6 @@ app.get(
   },
 );
 
-// Get single transaction details for receipt viewing - UPDATED to handle failed transactions
-/*app.get(
-  "/api/user/transactions/:transactionId",
-  authenticate,
-  async (req, res) => {
-    try {
-      const { transactionId } = req.params;
-      
-      // Check if it's a numeric ID (database ID) or string ID
-      let query;
-      if (transactionId.match(/^\d+$/)) {
-        // Numeric ID - query by database id
-        query = supabase
-          .from("transactions")
-          .select(`
-            *,
-            from_account:accounts!transactions_from_account_id_fkey(id, account_number),
-            to_account:accounts!transactions_to_account_id_fkey(id, account_number),
-            from_user:users!transactions_from_user_id_fkey(id, first_name, last_name, email),
-            to_user:users!transactions_to_user_id_fkey(id, first_name, last_name, email)
-          `)
-          .eq("id", parseInt(transactionId));
-      } else {
-        // String ID - query by transaction_id
-        query = supabase
-          .from("transactions")
-          .select(`
-            *,
-            from_account:accounts!transactions_from_account_id_fkey(id, account_number),
-            to_account:accounts!transactions_to_account_id_fkey(id, account_number),
-            from_user:users!transactions_from_user_id_fkey(id, first_name, last_name, email),
-            to_user:users!transactions_to_user_id_fkey(id, first_name, last_name, email)
-          `)
-          .eq("transaction_id", transactionId);
-      }
-      
-      const { data: transaction, error } = await query.single();
-
-      if (error) {
-        console.error("Transaction fetch error:", error);
-        return res.status(404).json({ error: "Transaction not found" });
-      }
-
-      // Verify user owns this transaction
-      if (
-        transaction.from_user_id !== req.user.id &&
-        transaction.to_user_id !== req.user.id
-      ) {
-        return res.status(403).json({ error: "Access denied" });
-      }
-
-      res.json(transaction);
-    } catch (error) {
-      console.error("Transaction fetch error:", error);
-      res.status(500).json({ error: "Failed to fetch transaction" });
-    }
-  }
-);*/
-
-
 // Download statement
 app.get(
   "/api/user/statements",
@@ -3850,291 +3790,8 @@ app.get(
   },
 );
 
-// Enhanced transfer with device trust and recipient checking - FULLY FIXED
-/*app.post(
-  "/api/user/transfer",
-  authenticate,
-  checkAccountFrozen,
-  transferLimiter,
-  async (req, res) => {
-    try {
-      const {
-        from_account_id,
-        to_account_number,
-        amount,
-        description,
-        device_fingerprint,
-        skip_security_check = false,
-        requires_otp = false  // ← ADD THIS LINE - default to false
-      } = req.body;
-
-      // Validate amount
-      if (!amount || amount <= 0) {
-        return res.status(400).json({ error: "Invalid amount" });
-      }
-
-      // Get source account
-      const { data: fromAccount, error: fromError } = await supabase
-        .from("accounts")
-        .select("*, users!inner(id, email, first_name, last_name, phone)")
-        .eq("id", from_account_id)
-        .eq("user_id", req.user.id)
-        .single();
-
-      if (fromError || !fromAccount) {
-        return res.status(404).json({ error: "Source account not found" });
-      }
-
-      // Check balance
-      if (fromAccount.available_balance < amount) {
-        return res.status(400).json({ error: "Insufficient funds" });
-      }
-
-      // Get destination account
-      const { data: toAccount, error: toError } = await supabase
-        .from("accounts")
-        .select("*, users!inner(id, email, first_name, last_name, is_frozen)")
-        .eq("account_number", to_account_number)
-        .single();
-
-      if (toError || !toAccount) {
-        return res.status(404).json({ error: "Destination account not found" });
-      }
-
-      // Prevent self-transfer
-      if (toAccount.user_id === req.user.id) {
-        return res.status(400).json({ error: "Cannot transfer to your own account" });
-      }
-
-      // Check if destination account is frozen
-      if (toAccount.users?.is_frozen) {
-        return res.status(400).json({ error: "Destination account is frozen" });
-      }
-
-      // ========== SECURITY CHECKS ==========
-      
-      // 1. Update device trust tracking
-      const deviceTrust = await updateDeviceTrust(
-        req.user.id,
-        device_fingerprint || req.headers["user-agent"],
-        req.headers["user-agent"],
-        req.ip
-      );
-      
-      // 2. Get user's current transfer threshold
-      const userThreshold = await getUserTransferThreshold(
-        req.user.id,
-        device_fingerprint || req.headers["user-agent"]
-      );
-      
-      // 3. Check if this is a large transfer (over ₦200,000)
-      const isLargeTransfer = amount > 200000;
-      
-      // 4. Check if recipient is new (first time transfer)
-      const isNewRecipient = !(await hasTransferredToBefore(req.user.id, to_account_number));
-      
-      // 5. Check if amount exceeds device threshold
-      const exceedsThreshold = amount > userThreshold.threshold;
-      
-      // ========== SECURITY RESPONSES ==========
-      
-      // Case 1: New device with amount above threshold
-      if (!skip_security_check && exceedsThreshold && userThreshold.reason === "new_device") {
-        return res.status(403).json({
-          error: "new_device_limit",
-          message: `This device is not yet trusted. For security, transfers are limited to ₦${userThreshold.threshold.toLocaleString()} on new devices.`,
-          threshold: userThreshold.threshold,
-          device_age: userThreshold.deviceAge,
-          required_days: 2 - (userThreshold.deviceAge || 0),
-          reason: "new_device"
-        });
-      }
-      
-      // Case 2: New recipient - require confirmation
-      if (!skip_security_check && isNewRecipient) {
-        return res.status(403).json({
-          error: "new_recipient",
-          message: "You haven't transferred to this recipient before. Please verify their details carefully.",
-          recipient: {
-            name: `${toAccount.users?.first_name || ""} ${toAccount.users?.last_name || ""}`.trim(),
-            account_number: to_account_number
-          },
-          require_confirmation: true
-        });
-      }
-      
-      // Case 3: Large transfer - require confirmation
-      if (!skip_security_check && isLargeTransfer) {
-        return res.status(403).json({
-          error: "large_transfer",
-          message: `You are about to transfer ₦${amount.toLocaleString()}. Please verify the recipient details carefully to avoid errors.`,
-          recipient: {
-            name: `${toAccount.users?.first_name || ""} ${toAccount.users?.last_name || ""}`.trim(),
-            account_number: to_account_number
-          },
-          amount: amount,
-          require_confirmation: true
-        });
-      }
-      
-      // ========== CONTINUE WITH NORMAL TRANSFER PROCESSING ==========
-      
-      // Calculate fee
-      let feeAmount = 0;
-      if (amount >= 10000) {
-        feeAmount = 50;
-      }
-
-      const totalDeduction = amount + feeAmount;
-
-      // Check balance with fee
-      if (fromAccount.available_balance < totalDeduction) {
-        return res.status(400).json({
-          error: `Insufficient funds. Amount: ₦${amount} + Fee: ₦${feeAmount} = ₦${totalDeduction}`,
-        });
-      }
-
-      // Generate transaction ID
-      const transactionId = `TXN${Date.now()}${Math.floor(Math.random() * 10000)}`;
-
-      // Create transaction record
-      const transactionData = {
-        transaction_id: transactionId,
-        from_account_id,
-        to_account_id: toAccount.id,
-        from_user_id: req.user.id,
-        to_user_id: toAccount.user_id,
-        amount: amount,
-        fee_amount: feeAmount,
-        description: description || `Transfer to ${toAccount.account_number}`,
-        transaction_type: "transfer",
-        status: "pending",
-        created_at: new Date().toISOString(),
-      };
-
-      // ========== FIXED: OTP CHECK ==========
-      const isLargeAmount = amount > 500000;
-      const needsOTP = requires_otp || isLargeAmount;  // requires_otp is now defined
-
-      if (needsOTP && process.env.OTP_MODE === "on") {
-        transactionData.requires_otp = true;
-
-        const { data: transaction, error: txError } = await supabase
-          .from("transactions")
-          .insert(transactionData)
-          .select()
-          .single();
-
-        if (txError) throw txError;
-
-        const otpCode = Math.floor(100000 + Math.random() * 900000).toString();
-        const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
-
-        await supabase.from("otps").insert({
-          user_id: req.user.id,
-          transaction_id: transaction.id,
-          otp_code: otpCode,
-          otp_type: "transfer",
-          expires_at: expiresAt,
-        });
-
-        await sendOTPEmail(fromAccount.users.email, otpCode);
-
-        return res.json({
-          message: "OTP required to complete transfer",
-          requires_otp: true,
-          transaction_id: transaction.id,
-        });
-      }
-
-      // Process transfer immediately
-      transactionData.status = "completed";
-      transactionData.completed_at = new Date().toISOString();
-
-      const { data: transaction, error: txError } = await supabase
-        .from("transactions")
-        .insert(transactionData)
-        .select()
-        .single();
-
-      if (txError) throw txError;
-
-      // Update balances
-      const newSenderBalance = fromAccount.balance - totalDeduction;
-      const newSenderAvailable = fromAccount.available_balance - totalDeduction;
-
-      await supabase
-        .from("accounts")
-        .update({
-          balance: newSenderBalance,
-          available_balance: newSenderAvailable,
-          updated_at: new Date().toISOString(),
-        })
-        .eq("id", from_account_id);
-
-      const newReceiverBalance = toAccount.balance + amount;
-      const newReceiverAvailable = toAccount.available_balance + amount;
-
-      await supabase
-        .from("accounts")
-        .update({
-          balance: newReceiverBalance,
-          available_balance: newReceiverAvailable,
-          updated_at: new Date().toISOString(),
-        })
-        .eq("id", toAccount.id);
-
-      // Create notifications
-      await createNotification(
-        req.user.id,
-        "Transfer Completed",
-        `You transferred ₦${amount.toLocaleString()} to ${toAccount.account_number}. Fee: ₦${feeAmount}`,
-        "success",
-      );
-      
-      await createNotification(
-        toAccount.user_id,
-        "Money Received",
-        `You received ₦${amount.toLocaleString()} from ${fromAccount.users.first_name} ${fromAccount.users.last_name}`,
-        "success",
-      );
-
-      // Log successful transfer
-      await logSecurityEvent(req.user.id, "transfer_completed", {
-        amount,
-        to_account: toAccount.account_number,
-        transaction_id: transaction.id,
-      });
-
-      res.json({
-        message: "Transfer completed successfully",
-        transaction: {
-          id: transaction.id,
-          transaction_id: transaction.transaction_id,
-          amount: amount,
-          fee: feeAmount,
-          total_deducted: totalDeduction,
-          new_balance: newSenderAvailable,
-          description: transaction.description,
-          completed_at: transaction.completed_at,
-        },
-        recipient: {
-          name: `${toAccount.users?.first_name || ""} ${toAccount.users?.last_name || ""}`.trim(),
-          account_number: toAccount.account_number,
-        },
-      });
-    } catch (error) {
-      console.error("Transfer error:", error);
-      await logSecurityEvent(req.user.id, "transfer_failed", {
-        error: error.message,
-      });
-      res.status(500).json({ error: "Transfer failed: " + error.message });
-    }
-  },
-);*/
-
 // Enhanced transfer with device trust and recipient checking - WITH FAILURE LOGGING
-app.post(
+/*app.post(
   "/api/user/transfer",
   authenticate,
   checkAccountFrozen,
@@ -4470,119 +4127,512 @@ app.post(
       res.status(500).json({ error: "Transfer failed: " + error.message });
     }
   },
+);*/
+
+// Enhanced transfer with device trust and recipient checking - WITH EARLY FAILURE RECORDING
+app.post(
+  "/api/user/transfer",
+  authenticate,
+  checkAccountFrozen,
+  transferLimiter,
+  async (req, res) => {
+    let failedRecordId = null;
+    
+    try {
+      const {
+        from_account_id,
+        to_account_number,
+        amount,
+        description,
+        device_fingerprint,
+        skip_security_check = false,
+        requires_otp = false
+      } = req.body;
+
+      // Get user agent and IP for logging
+      const userAgent = req.headers['user-agent'];
+      const ip = req.ip || req.connection.remoteAddress || req.headers['x-forwarded-for'];
+
+      // ========== STEP 1: CREATE INITIAL FAILED RECORD (in case anything fails) ==========
+      const initialRecord = await createInitialFailedTransactionRecord(
+        req.user.id, from_account_id, to_account_number, amount, description, ip, userAgent
+      );
+      if (initialRecord) {
+        failedRecordId = initialRecord.id;
+      }
+
+      // ========== VALIDATION CHECKS ==========
+      
+      // Validate amount
+      if (!amount || amount <= 0) {
+        if (failedRecordId) {
+          await updateFailedTransactionRecord(failedRecordId, "Invalid amount", "validation_error");
+        }
+        return res.status(400).json({ error: "Invalid amount" });
+      }
+
+      // Get source account
+      const { data: fromAccount, error: fromError } = await supabase
+        .from("accounts")
+        .select("*, users!inner(id, email, first_name, last_name, phone)")
+        .eq("id", from_account_id)
+        .eq("user_id", req.user.id)
+        .single();
+
+      if (fromError || !fromAccount) {
+        if (failedRecordId) {
+          await updateFailedTransactionRecord(failedRecordId, "Source account not found", "account_error");
+        }
+        return res.status(404).json({ error: "Source account not found" });
+      }
+
+      // Check balance
+      if (fromAccount.available_balance < amount) {
+        if (failedRecordId) {
+          await updateFailedTransactionRecord(
+            failedRecordId, 
+            "Insufficient funds", 
+            "balance_error",
+            { available_balance: fromAccount.available_balance, amount: amount }
+          );
+        }
+        return res.status(400).json({ 
+          error: "Insufficient funds",
+          failed_record_id: failedRecordId
+        });
+      }
+
+      // Get destination account
+      const { data: toAccount, error: toError } = await supabase
+        .from("accounts")
+        .select("*, users!inner(id, email, first_name, last_name, is_frozen)")
+        .eq("account_number", to_account_number)
+        .single();
+
+      if (toError || !toAccount) {
+        if (failedRecordId) {
+          await updateFailedTransactionRecord(failedRecordId, "Destination account not found", "account_error");
+        }
+        return res.status(404).json({ error: "Destination account not found" });
+      }
+      
+      // Update the failed record with correct to_account_id and to_user_id
+      if (failedRecordId) {
+        await supabase
+          .from("transactions")
+          .update({
+            to_account_id: toAccount.id,
+            to_user_id: toAccount.user_id
+          })
+          .eq("id", failedRecordId);
+      }
+
+      // Prevent self-transfer
+      if (toAccount.user_id === req.user.id) {
+        if (failedRecordId) {
+          await updateFailedTransactionRecord(failedRecordId, "Cannot transfer to own account", "validation_error");
+        }
+        return res.status(400).json({ error: "Cannot transfer to your own account" });
+      }
+
+      // Check if destination account is frozen
+      if (toAccount.users?.is_frozen) {
+        if (failedRecordId) {
+          await updateFailedTransactionRecord(failedRecordId, "Destination account frozen", "account_frozen");
+        }
+        return res.status(400).json({ error: "Destination account is frozen" });
+      }
+
+      // ========== SECURITY CHECKS ==========
+      
+      // 1. Update device trust tracking
+      const deviceTrust = await updateDeviceTrust(
+        req.user.id,
+        device_fingerprint || req.headers["user-agent"],
+        req.headers["user-agent"],
+        req.ip
+      );
+      
+      // 2. Get user's current transfer threshold
+      const userThreshold = await getUserTransferThreshold(
+        req.user.id,
+        device_fingerprint || req.headers["user-agent"]
+      );
+      
+      // 3. Check if this is a large transfer (over ₦200,000)
+      const isLargeTransfer = amount > 200000;
+      
+      // 4. Check if recipient is new (first time transfer)
+      const isNewRecipient = !(await hasTransferredToBefore(req.user.id, to_account_number));
+      
+      // 5. Check if amount exceeds device threshold
+      const exceedsThreshold = amount > userThreshold.threshold;
+      
+      // ========== SECURITY RESPONSES WITH FAILURE RECORDING ==========
+      
+      // Case 1: New device with amount above threshold
+      if (!skip_security_check && exceedsThreshold && userThreshold.reason === "new_device") {
+        if (failedRecordId) {
+          await updateFailedTransactionRecord(
+            failedRecordId, 
+            `New device limit: ₦${userThreshold.threshold.toLocaleString()}`, 
+            "security_new_device",
+            { threshold: userThreshold.threshold, device_age: userThreshold.deviceAge }
+          );
+        }
+        
+        return res.status(403).json({
+          error: "new_device_limit",
+          message: `This device is not yet trusted. For security, transfers are limited to ₦${userThreshold.threshold.toLocaleString()} on new devices.`,
+          threshold: userThreshold.threshold,
+          device_age: userThreshold.deviceAge,
+          required_days: 2 - (userThreshold.deviceAge || 0),
+          reason: "new_device",
+          failed_record_id: failedRecordId
+        });
+      }
+      
+      // Case 2: New recipient - require confirmation (not a failure yet)
+      if (!skip_security_check && isNewRecipient) {
+        // This is not a failure, just pending confirmation
+        if (failedRecordId) {
+          await updateFailedTransactionRecord(failedRecordId, "Awaiting new recipient confirmation", "pending_confirmation");
+        }
+        
+        return res.status(403).json({
+          error: "new_recipient",
+          message: "You haven't transferred to this recipient before. Please verify their details carefully.",
+          recipient: {
+            name: `${toAccount.users?.first_name || ""} ${toAccount.users?.last_name || ""}`.trim(),
+            account_number: to_account_number
+          },
+          require_confirmation: true,
+          failed_record_id: failedRecordId
+        });
+      }
+      
+      // Case 3: Large transfer - require confirmation
+      if (!skip_security_check && isLargeTransfer) {
+        if (failedRecordId) {
+          await updateFailedTransactionRecord(failedRecordId, "Awaiting large transfer confirmation", "pending_confirmation");
+        }
+        
+        return res.status(403).json({
+          error: "large_transfer",
+          message: `You are about to transfer ₦${amount.toLocaleString()}. Please verify the recipient details carefully to avoid errors.`,
+          recipient: {
+            name: `${toAccount.users?.first_name || ""} ${toAccount.users?.last_name || ""}`.trim(),
+            account_number: to_account_number
+          },
+          amount: amount,
+          require_confirmation: true,
+          failed_record_id: failedRecordId
+        });
+      }
+      
+      // ========== CONTINUE WITH NORMAL TRANSFER PROCESSING ==========
+      
+      // If we get here, delete the failed record since transfer will succeed
+      if (failedRecordId) {
+        await supabase.from("transactions").delete().eq("id", failedRecordId);
+        failedRecordId = null;
+      }
+      
+      // Calculate fee
+      let feeAmount = 0;
+      if (amount >= 10000) {
+        feeAmount = 50;
+      }
+
+      const totalDeduction = amount + feeAmount;
+
+      // Final balance check
+      if (fromAccount.available_balance < totalDeduction) {
+        // Re-create failed record since balance check failed
+        const newFailedRecord = await createInitialFailedTransactionRecord(
+          req.user.id, from_account_id, to_account_number, amount, description, ip, userAgent
+        );
+        if (newFailedRecord) {
+          await updateFailedTransactionRecord(
+            newFailedRecord.id, 
+            "Insufficient funds after fee calculation", 
+            "balance_error",
+            { available_balance: fromAccount.available_balance, amount: totalDeduction }
+          );
+        }
+        return res.status(400).json({
+          error: `Insufficient funds. Amount: ₦${amount} + Fee: ₦${feeAmount} = ₦${totalDeduction}`,
+        });
+      }
+
+      // Generate transaction ID
+      const transactionId = `TXN${Date.now()}${Math.floor(Math.random() * 10000)}`;
+
+      // Create transaction record
+      const transactionData = {
+        transaction_id: transactionId,
+        from_account_id,
+        to_account_id: toAccount.id,
+        from_user_id: req.user.id,
+        to_user_id: toAccount.user_id,
+        amount: amount,
+        fee_amount: feeAmount,
+        description: description || `Transfer to ${toAccount.account_number}`,
+        transaction_type: "transfer",
+        status: "pending",
+        created_at: new Date().toISOString(),
+      };
+
+      // Check for OTP requirement
+      const isLargeAmount = amount > 500000;
+      const needsOTP = requires_otp || isLargeAmount;
+
+      if (needsOTP && process.env.OTP_MODE === "on") {
+        transactionData.requires_otp = true;
+
+        const { data: transaction, error: txError } = await supabase
+          .from("transactions")
+          .insert(transactionData)
+          .select()
+          .single();
+
+        if (txError) throw txError;
+
+        const otpCode = Math.floor(100000 + Math.random() * 900000).toString();
+        const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
+
+        await supabase.from("otps").insert({
+          user_id: req.user.id,
+          transaction_id: transaction.id,
+          otp_code: otpCode,
+          otp_type: "transfer",
+          expires_at: expiresAt,
+        });
+
+        await sendOTPEmail(fromAccount.users.email, otpCode);
+
+        return res.json({
+          message: "OTP required to complete transfer",
+          requires_otp: true,
+          transaction_id: transaction.id,
+        });
+      }
+
+      // Process transfer immediately
+      transactionData.status = "completed";
+      transactionData.completed_at = new Date().toISOString();
+
+      const { data: transaction, error: txError } = await supabase
+        .from("transactions")
+        .insert(transactionData)
+        .select()
+        .single();
+
+      if (txError) throw txError;
+
+      // Update balances
+      const newSenderBalance = fromAccount.balance - totalDeduction;
+      const newSenderAvailable = fromAccount.available_balance - totalDeduction;
+
+      await supabase
+        .from("accounts")
+        .update({
+          balance: newSenderBalance,
+          available_balance: newSenderAvailable,
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", from_account_id);
+
+      const newReceiverBalance = toAccount.balance + amount;
+      const newReceiverAvailable = toAccount.available_balance + amount;
+
+      await supabase
+        .from("accounts")
+        .update({
+          balance: newReceiverBalance,
+          available_balance: newReceiverAvailable,
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", toAccount.id);
+
+      // Create notifications
+      await createNotification(
+        req.user.id,
+        "Transfer Completed",
+        `You transferred ₦${amount.toLocaleString()} to ${toAccount.account_number}. Fee: ₦${feeAmount}`,
+        "success",
+      );
+      
+      await createNotification(
+        toAccount.user_id,
+        "Money Received",
+        `You received ₦${amount.toLocaleString()} from ${fromAccount.users.first_name} ${fromAccount.users.last_name}`,
+        "success",
+      );
+
+      // Log successful transfer
+      await logSecurityEvent(req.user.id, "transfer_completed", {
+        amount,
+        to_account: toAccount.account_number,
+        transaction_id: transaction.id,
+      });
+
+      res.json({
+        message: "Transfer completed successfully",
+        transaction: {
+          id: transaction.id,
+          transaction_id: transaction.transaction_id,
+          amount: amount,
+          fee: feeAmount,
+          total_deducted: totalDeduction,
+          new_balance: newSenderAvailable,
+          description: transaction.description,
+          completed_at: transaction.completed_at,
+        },
+        recipient: {
+          name: `${toAccount.users?.first_name || ""} ${toAccount.users?.last_name || ""}`.trim(),
+          account_number: toAccount.account_number,
+        },
+      });
+      
+    } catch (error) {
+      console.error("Transfer error:", error);
+      
+      // Update the failed record if it exists
+      if (failedRecordId) {
+        await updateFailedTransactionRecord(
+          failedRecordId, 
+          error.message || "Internal server error", 
+          "server_error"
+        );
+      } else {
+        // Create a new failed record
+        const newFailedRecord = await createInitialFailedTransactionRecord(
+          req.user.id, 
+          req.body.from_account_id, 
+          req.body.to_account_number, 
+          req.body.amount, 
+          req.body.description,
+          req.ip,
+          req.headers['user-agent']
+        );
+        if (newFailedRecord) {
+          await updateFailedTransactionRecord(
+            newFailedRecord.id, 
+            error.message || "Internal server error", 
+            "server_error"
+          );
+        }
+      }
+      
+      await logSecurityEvent(req.user.id, "transfer_failed", {
+        error: error.message,
+      });
+      res.status(500).json({ error: "Transfer failed: " + error.message });
+    }
+  }
 );
 
-// ==================== TRANSACTION RECORDING HELPER FUNCTIONS ====================
-
-// Record a failed transaction
-/*async function recordFailedTransaction(userId, fromAccountId, toAccountId, amount, reason, failureType, availableBalance = null, metadata = null) {
+// Create a pending failed transaction record at the very beginning
+async function createInitialFailedTransactionRecord(userId, fromAccountId, toAccountNumber, amount, description, ip, userAgent) {
   try {
-    const transactionId = `FAIL${Date.now()}${Math.floor(Math.random() * 10000)}`;
+    // First, get the source account details
+    const { data: fromAccount } = await supabase
+      .from("accounts")
+      .select("account_number, user_id")
+      .eq("id", fromAccountId)
+      .single();
     
-    let description = `Failed transfer: ${reason}`;
-    if (failureType === "balance_error") {
-      description = `Failed transfer - Insufficient funds. Available: ₦${availableBalance?.toLocaleString() || "N/A"}, Required: ₦${amount?.toLocaleString() || "N/A"}`;
-    } else if (failureType === "security_new_device") {
-      description = `Failed transfer - New device security limit (₦${metadata?.threshold?.toLocaleString() || "500,000"})`;
-    } else if (failureType === "account_frozen") {
-      description = `Failed transfer - Recipient account frozen`;
-    } else if (failureType === "validation_error") {
-      description = `Failed transfer - ${reason}`;
+    // Try to get destination account info if it exists
+    let toAccountId = null;
+    let toUserId = null;
+    let toAccountNumberStored = toAccountNumber;
+    
+    const { data: toAccount } = await supabase
+      .from("accounts")
+      .select("id, user_id, account_number")
+      .eq("account_number", toAccountNumber)
+      .maybeSingle();
+    
+    if (toAccount) {
+      toAccountId = toAccount.id;
+      toUserId = toAccount.user_id;
     }
+    
+    const transactionId = `FAIL${Date.now()}${Math.floor(Math.random() * 10000)}`;
     
     const transactionData = {
       transaction_id: transactionId,
       from_account_id: fromAccountId,
       to_account_id: toAccountId,
       from_user_id: userId,
-      to_user_id: toAccountId ? null : undefined, // Will be set if toAccountId exists
-      amount: amount || 0,
+      to_user_id: toUserId,
+      amount: amount,
       fee_amount: 0,
-      description: description,
+      description: description || `Transfer to ${toAccountNumber}`,
       transaction_type: "transfer",
       status: "failed",
-      failed_reason: reason,
-      failure_type: failureType,
+      failed_reason: "Transaction validation in progress...",
+      failure_type: "pending_validation",
       created_at: new Date().toISOString(),
-      completed_at: new Date().toISOString(),
+      ip_address: ip,
+      user_agent: userAgent
     };
     
-    // Only add to_user_id if toAccountId exists
-    if (toAccountId) {
-      const { data: toAccount } = await supabase
-        .from("accounts")
-        .select("user_id")
-        .eq("id", toAccountId)
-        .single();
-      if (toAccount) {
-        transactionData.to_user_id = toAccount.user_id;
-      }
-    }
-    
-    const { error } = await supabase
+    const { data: inserted, error } = await supabase
       .from("transactions")
-      .insert(transactionData);
+      .insert(transactionData)
+      .select()
+      .single();
     
     if (error) {
-      console.error("Failed to record failed transaction:", error);
-    } else {
-      console.log(`Recorded failed transaction: ${transactionId} - ${reason}`);
-      
-      // Create notification for the user about the failed transaction
-      await createNotification(
-        userId,
-        "Transfer Failed",
-        `Your transfer of ₦${amount?.toLocaleString() || "0"} failed. Reason: ${reason}`,
-        "error"
-      );
+      console.error("Failed to create initial failed record:", error);
+      return null;
     }
+    
+    console.log(`📝 Created initial failed transaction record: ${transactionId}`);
+    return inserted;
+    
   } catch (error) {
-    console.error("Error recording failed transaction:", error);
+    console.error("Error creating initial failed record:", error);
+    return null;
   }
 }
 
-// Record a pending confirmation transaction
-async function recordPendingTransaction(userId, fromAccountId, toAccountId, amount, reason, statusType) {
+// Update failed transaction record with final reason
+async function updateFailedTransactionRecord(transactionRecordId, reason, failureType, details = {}) {
   try {
-    const transactionId = `PEND${Date.now()}${Math.floor(Math.random() * 10000)}`;
-    
-    const transactionData = {
-      transaction_id: transactionId,
-      from_account_id: fromAccountId,
-      to_account_id: toAccountId,
-      from_user_id: userId,
-      amount: amount || 0,
-      fee_amount: 0,
-      description: reason,
-      transaction_type: "transfer",
-      status: statusType || "pending_confirmation",
-      created_at: new Date().toISOString(),
+    const updates = {
+      failed_reason: reason,
+      failure_type: failureType,
+      completed_at: new Date().toISOString(),
+      updated_at: new Date().toISOString()
     };
     
-    if (toAccountId) {
-      const { data: toAccount } = await supabase
-        .from("accounts")
-        .select("user_id")
-        .eq("id", toAccountId)
-        .single();
-      if (toAccount) {
-        transactionData.to_user_id = toAccount.user_id;
-      }
+    // If we have additional details, add them to description
+    if (details.available_balance !== undefined) {
+      updates.description = `Failed transfer - Insufficient funds. Available: ₦${details.available_balance.toLocaleString()}, Required: ₦${details.amount?.toLocaleString() || "0"}`;
+    } else if (details.threshold !== undefined) {
+      updates.description = `Failed transfer - New device security limit (₦${details.threshold.toLocaleString()})`;
+    } else if (details.attempts_remaining !== undefined) {
+      updates.description = `Failed transfer - Incorrect PIN (${details.attempts_remaining} attempts remaining)`;
     }
     
     const { error } = await supabase
       .from("transactions")
-      .insert(transactionData);
+      .update(updates)
+      .eq("id", transactionRecordId);
     
     if (error) {
-      console.error("Failed to record pending transaction:", error);
+      console.error("Failed to update failed record:", error);
     } else {
-      console.log(`Recorded pending transaction: ${transactionId} - ${reason}`);
+      console.log(`✅ Updated failed transaction record: ${transactionRecordId} - ${reason}`);
     }
   } catch (error) {
-    console.error("Error recording pending transaction:", error);
+    console.error("Error updating failed record:", error);
   }
-}*/
+}
+
 
 // ==================== TRANSACTION RECORDING HELPER FUNCTIONS ====================
 
