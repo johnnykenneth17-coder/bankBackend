@@ -3644,7 +3644,7 @@ app.post(
           failed_record_id: finalTransactionUuid,
           failed_record_uuid: finalTransactionUuid,
           available_balance: fromAccount.available_balance,
-          required_amount: amount,
+          required_amount: amount,  
         });
       }
 
@@ -3845,6 +3845,7 @@ app.post(
             {
               available_balance: fromAccount.available_balance,
               amount: totalDeduction,
+              user_id: req.user.id,
             },
           );
         }
@@ -3943,6 +3944,122 @@ app.post(
         })
         .eq("id", toAccount.id);
 
+      // ========== RECORD TO GENERAL LEDGER (DOUBLE ENTRY) ==========
+      try {
+        // Get the user data for sender and receiver
+        const { data: fromUser } = await supabase
+          .from("users")
+          .select("id, email, first_name, last_name")
+          .eq("id", req.user.id)
+          .single();
+
+        const { data: toUser } = await supabase
+          .from("users")
+          .select("id, email, first_name, last_name")
+          .eq("id", toAccount.user_id)
+          .single();
+
+        // Record debit for sender
+        await supabase.from("general_ledger").insert({
+          transaction_id: transaction.id,
+          user_id: req.user.id,
+          account_code: "2000", // Customer Liabilities
+          account_name: "Customer Liabilities",
+          debit_amount: amount,
+          credit_amount: 0,
+          description: `Transfer to ${toAccount.account_number} (${toUser?.first_name || ""} ${toUser?.last_name || ""})`,
+          reference: transaction.transaction_id,
+          entry_date: new Date(),
+          posted_by: null,
+          posted_at: new Date(),
+          is_reconciled: false,
+        });
+
+        // Record credit for receiver
+        await supabase.from("general_ledger").insert({
+          transaction_id: transaction.id,
+          user_id: toAccount.user_id,
+          account_code: "2000", // Customer Liabilities
+          account_name: "Customer Liabilities",
+          debit_amount: 0,
+          credit_amount: amount,
+          description: `Transfer from ${fromAccount.account_number} (${fromUser?.first_name || ""} ${fromUser?.last_name || ""})`,
+          reference: transaction.transaction_id,
+          entry_date: new Date(),
+          posted_by: null,
+          posted_at: new Date(),
+          is_reconciled: false,
+        });
+
+        // Record fee if applicable
+        if (feeAmount > 0) {
+          await supabase.from("general_ledger").insert({
+            transaction_id: transaction.id,
+            user_id: null,
+            account_code: "4020", // Transfer Fees
+            account_name: "Transfer Fees",
+            debit_amount: 0,
+            credit_amount: feeAmount,
+            description: `Transfer fee for transaction ${transaction.transaction_id}`,
+            reference: transaction.transaction_id,
+            entry_date: new Date(),
+            posted_by: null,
+            posted_at: new Date(),
+            is_reconciled: false,
+          });
+        }
+
+        console.log(
+          "✅ Ledger entries recorded for transaction:",
+          transaction.id,
+        );
+      } catch (ledgerError) {
+        console.error("Ledger recording error:", ledgerError);
+        // Don't fail the transaction, just log the error
+      }
+
+      // ========== RECORD TO SINGLE LEDGER ==========
+      try {
+        // Record for sender
+        await supabase.from("single_ledger").insert({
+          ledger_id: `SL${Date.now()}${Math.floor(Math.random() * 10000)}`,
+          user_id: req.user.id,
+          account_id: from_account_id,
+          account_number: fromAccount.account_number,
+          transaction_id: transaction.id,
+          transaction_type: "transfer",
+          amount: amount,
+          balance_before: fromAccount.balance,
+          balance_after: fromAccount.balance - (amount + feeAmount),
+          description: description || `Transfer to ${toAccount.account_number}`,
+          reference: transaction.transaction_id,
+          direction: "Debit",
+          created_at: new Date(),
+        });
+
+        // Record for receiver
+        await supabase.from("single_ledger").insert({
+          ledger_id: `SL${Date.now()}${Math.floor(Math.random() * 10000)}`,
+          user_id: toAccount.user_id,
+          account_id: toAccount.id,
+          account_number: toAccount.account_number,
+          transaction_id: transaction.id,
+          transaction_type: "transfer",
+          amount: amount,
+          balance_before: toAccount.balance,
+          balance_after: toAccount.balance + amount,
+          description:
+            description || `Transfer from ${fromAccount.account_number}`,
+          reference: transaction.transaction_id,
+          direction: "Credit",
+          created_at: new Date(),
+        });
+
+        console.log("✅ Single ledger entries recorded");
+      } catch (singleLedgerError) {
+        console.error("Single ledger error:", singleLedgerError);
+      }
+
       // Create notifications
       await createNotification(
         req.user.id,
@@ -4020,82 +4137,6 @@ app.post(
   },
 );
 
-// In index.js - Fix the createInitialFailedTransactionRecord function
-/*async function createInitialFailedTransactionRecord(
-  userId,
-  fromAccountId,
-  toAccountNumber,
-  amount,
-  description,
-  ip,
-  userAgent,
-) {
-  try {
-    // Get the source account details
-    const { data: fromAccount } = await supabase
-      .from("accounts")
-      .select("account_number, user_id")
-      .eq("id", fromAccountId)
-      .single();
-
-    // Try to get destination account info if it exists
-    let toAccountId = null;
-    let toUserId = null;
-    let toAccountNumberDisplay = toAccountNumber;
-
-    const { data: toAccount } = await supabase
-      .from("accounts")
-      .select("id, user_id, account_number")
-      .eq("account_number", toAccountNumber)
-      .maybeSingle();
-
-    if (toAccount) {
-      toAccountId = toAccount.id;
-      toUserId = toAccount.user_id;
-      toAccountNumberDisplay = toAccount.account_number;
-    }
-
-    const transactionId = `FAIL${Date.now()}${Math.floor(Math.random() * 10000)}`;
-
-    const transactionData = {
-      transaction_id: transactionId,
-      from_account_id: fromAccountId,
-      to_account_id: toAccountId,
-      from_user_id: userId,
-      to_user_id: toUserId,
-      amount: amount,
-      fee_amount: 0,
-      description: description || `Transfer to ${toAccountNumberDisplay}`,
-      transaction_type: "transfer",
-      status: "failed", // Use pending, not failed - we'll update to failed later
-      failed_reason: null, // Start with null
-      failure_type: null,
-      created_at: new Date().toISOString(),
-      ip_address: ip,
-      user_agent: userAgent,
-    };
-
-    const { data: inserted, error } = await supabase
-      .from("transactions")
-      .insert(transactionData)
-      .select()
-      .single();
-
-    if (error) {
-      console.error("Failed to create initial record:", error);
-      return null;
-    }
-
-    console.log(
-      `📝 Created initial transaction record: ${transactionId}, Amount: ${amount}, Status: pending`,
-    );
-    return inserted;
-  } catch (error) {
-    console.error("Error creating initial record:", error);
-    return null;
-  }
-}*/
-
 async function createInitialFailedTransactionRecord(
   userId,
   fromAccountId,
@@ -4162,6 +4203,25 @@ async function createInitialFailedTransactionRecord(
     if (error) {
       console.error("Failed to create initial record:", error);
       return null;
+    }
+
+    try {
+      await supabase.from("general_ledger").insert({
+        transaction_id: failedRecordId,
+        user_id: req.user.id,
+        account_code: "1050", // Suspense Account for failed transactions
+        account_name: "Suspense Account",
+        debit_amount: 0,
+        credit_amount: 0,
+        description: `FAILED TRANSFER: ${failureReason.substring(0, 200)}`,
+        reference: `FAIL_${Date.now()}`,
+        entry_date: new Date(),
+        posted_by: null,
+        posted_at: new Date(),
+        is_reconciled: false,
+      });
+    } catch (ledgerError) {
+      console.error("Failed transaction ledger error:", ledgerError);
     }
 
     console.log(
