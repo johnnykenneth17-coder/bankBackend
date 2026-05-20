@@ -7,34 +7,6 @@ const supabase = createClient(
 );
 
 // Authentication middleware
-/*const authenticate = async (req, res, next) => {
-    try {
-        const token = req.header('Authorization')?.replace('Bearer ', '');
-        
-        if (!token) {
-            throw new Error();
-        }
-
-        const decoded = jwt.verify(token, process.env.JWT_SECRET);
-        const { data: user, error } = await supabase
-            .from('users')
-            .select('*')
-            .eq('id', decoded.userId)
-            .single();
-
-        if (error || !user || !user.is_active) {
-            throw new Error();
-        }
-
-        req.user = user;
-        req.token = token;
-        next();
-    } catch (error) {
-        res.status(401).json({ error: 'Please authenticate' });
-    }
-};*/
-
-// In auth.js - Make sure this is correct
 const authenticate = async (req, res, next) => {
     try {
         const authHeader = req.header('Authorization');

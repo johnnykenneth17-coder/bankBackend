@@ -1,70 +1,67 @@
-// In index.js - Fix createInitialFailedTransactionRecord
-async function createInitialFailedTransactionRecord(
-  userId,
-  fromAccountId,
-  toAccountNumber,
-  amount,
-  description,
-  ip,
-  userAgent,
-) {
-  try {
-    const { data: fromAccount } = await supabase
-      .from("accounts")
-      .select("account_number, user_id")
-      .eq("id", fromAccountId)
-      .single();
+app.get(
+  "/api/user/transactions",
+  authenticate,
+  checkAccountFrozen,
+  async (req, res) => {
+    try {
+      const { page = 1, limit = 20, start_date, end_date, type } = req.query;
+      const offset = (parseInt(page) - 1) * parseInt(limit);
 
-    let toAccountId = null;
-    let toUserId = null;
+      // Get user's account IDs
+      const { data: accounts, error: accountsError } = await supabase
+        .from("accounts")
+        .select("id")
+        .eq("user_id", req.user.id);
 
-    const { data: toAccount } = await supabase
-      .from("accounts")
-      .select("id, user_id, account_number")
-      .eq("account_number", toAccountNumber)
-      .maybeSingle();
+      if (accountsError) throw accountsError;
 
-    if (toAccount) {
-      toAccountId = toAccount.id;
-      toUserId = toAccount.user_id;
+      const accountIds = accounts.map((a) => a.id);
+
+      if (accountIds.length === 0) {
+        return res.json({
+          transactions: [],
+          pagination: { page: 1, limit: 20, total: 0, pages: 0 },
+        });
+      }
+
+      // UPDATED QUERY: Only show completed transactions to receiver
+      // For failed transactions, only show if user is sender
+      let query = supabase
+        .from("transactions")
+        .select(
+          "id, transaction_id, amount, description, transaction_type, status, created_at, completed_at, from_account_id, to_account_id, from_user_id, to_user_id, failed_reason",
+          { count: "exact" },
+        )
+        .or(
+          `from_account_id.in.(${accountIds.join(",")}),` +
+          `(to_account_id.in.(${accountIds.join(",")}) AND status = 'completed')`  // Only show completed to receiver
+        )
+        .order("created_at", { ascending: false });
+
+      // Apply filters
+      if (start_date) {
+        query = query.gte("created_at", start_date);
+      }
+      if (end_date) {
+        query = query.lte("created_at", `${end_date}T23:59:59`);
+      }
+      if (type && type !== "all") {
+        query = query.eq("transaction_type", type);
+      }
+
+      const {
+        data: transactions,
+        error,
+        count,
+      } = await query.range(offset, offset + parseInt(limit) - 1);
+
+      if (error) throw error;
+
+      // ... rest of the function remains the same
+      
+    } catch (error) {
+      console.error("Transactions fetch error:", error);
+      res.status(500).json({ error: "Failed to fetch transactions" });
     }
-
-    const transactionId = `PEND${Date.now()}${Math.floor(Math.random() * 10000)}`;
-
-    // IMPORTANT: Create as PENDING, not failed
-    const { data: inserted, error } = await supabase
-      .from("transactions")
-      .insert({
-        transaction_id: transactionId,
-        from_account_id: fromAccountId,
-        to_account_id: toAccountId,
-        from_user_id: userId,
-        to_user_id: toUserId,
-        amount: amount,
-        fee_amount: 0,
-        description: description || `Transfer to ${toAccountNumber}`,
-        transaction_type: "transfer",
-        status: "pending", // PENDING, not failed
-        failed_reason: null,
-        failure_type: null,
-        created_at: new Date().toISOString(),
-        ip_address: ip,
-        user_agent: userAgent,
-      })
-      .select()
-      .single();
-
-    if (error) {
-      console.error("Failed to create initial record:", error);
-      return null;
-    }
-
-    console.log(
-      `📝 Created initial PENDING record: ${inserted.id} (${transactionId})`,
-    );
-    return inserted;
-  } catch (error) {
-    console.error("Error creating initial record:", error);
-    return null;
-  }
-}
+  },
+);

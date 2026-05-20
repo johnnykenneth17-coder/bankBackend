@@ -349,74 +349,6 @@ async function sendPushNotificationForInAppNotification(
   }
 }
 
-// Fraud detection function
-/*async function detectFraudulentActivity(userId, transferData) {
-  const reasons = [];
-  let severity = "low";
-
-  try {
-    // Get recent transactions (last 24 hours)
-    const { data: recentTx } = await supabase
-      .from("transactions")
-      .select("amount, created_at")
-      .eq("from_user_id", userId)
-      .gte(
-        "created_at",
-        new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString(),
-      );
-
-    // Check for unusually large amount
-    const dailyTotal = (recentTx || []).reduce((sum, tx) => sum + tx.amount, 0);
-    if (transferData.amount > 500000) {
-      reasons.push("Amount exceeds ₦500,000 threshold");
-      severity = "high";
-    }
-
-    // Check daily limit
-    if (dailyTotal + transferData.amount > 1000000) {
-      reasons.push("Daily transfer limit exceeded");
-      severity = "high";
-    }
-
-    // Check for rapid successive transfers
-    const lastMinute = (recentTx || []).filter(
-      (tx) => new Date(tx.created_at) > new Date(Date.now() - 60 * 1000),
-    );
-    if (lastMinute.length > 3) {
-      reasons.push("Multiple transfers in short period");
-      severity = "medium";
-    }
-
-    // Check if beneficiary is new
-    const { data: existingBeneficiary } = await supabase
-      .from("beneficiaries")
-      .select("id")
-      .eq("user_id", userId)
-      .eq("account_number", transferData.to_account);
-
-    if (!existingBeneficiary || existingBeneficiary.length === 0) {
-      reasons.push("Transfer to new beneficiary");
-      severity = severity === "high" ? "high" : "medium";
-    }
-
-    // Check for unusual time (late night)
-    const hour = new Date().getHours();
-    if (hour >= 23 || hour <= 5) {
-      reasons.push("Unusual transaction time");
-      severity = severity === "high" ? "high" : "medium";
-    }
-  } catch (error) {
-    console.error("Fraud detection error:", error);
-  }
-
-  return {
-    isSuspicious: reasons.length > 0,
-    reasons,
-    severity,
-    reference: reasons.length > 0 ? `FLAG${Date.now()}` : null,
-  };
-}*/
-
 // ==================== DEVICE TRUST & TRANSFER HISTORY ====================
 
 // Track user's trusted devices
@@ -1062,231 +994,6 @@ app.post("/api/test-connection", (req, res) => {
 });
 
 // ==================== AUTHENTICATION ROUTES ====================
-
-// Register - Updated with all fields including passcode and face verification
-/*app.post("/api/auth/register", async (req, res) => {
-  try {
-    const {
-      email,
-      password,
-      first_name,
-      last_name,
-      middle_name,
-      phone,
-      country,
-      state,
-      city,
-      address,
-      postal_code,
-      date_of_birth,
-      gender,
-      marital_status,
-      occupation,
-      referral_code,
-      age,
-      identification_type,
-      identification_number,
-      security_question_1,
-      security_answer_1,
-      security_question_2,
-      security_answer_2,
-      passcode,  // 6-digit login passcode
-      face_images,  // array of face images from different angles (already compressed)
-    } = req.body;
-
-    console.log("Registration attempt for:", email);
-    console.log("Age:", age);
-    console.log("ID Type:", identification_type);
-    console.log("Has passcode:", !!passcode);
-    console.log("Face images received:", face_images ? face_images.length : 0);
-
-    // Validation
-    if (age && (age < 18 || age > 120)) {
-      return res.status(400).json({ error: "Age must be between 18 and 120" });
-    }
-
-    // Validate passcode (6 digits)
-    if (passcode && (!/^\d{6}$/.test(passcode))) {
-      return res.status(400).json({ error: "Passcode must be exactly 6 digits" });
-    }
-
-    // Check if user exists
-    const { data: existingUser } = await supabase
-      .from("users")
-      .select("email")
-      .eq("email", email)
-      .single();
-
-    if (existingUser) {
-      return res.status(400).json({ error: "Email already registered" });
-    }
-
-    // Hash password
-    const hashedPassword = await bcrypt.hash(password, 10);
-
-    // Hash passcode if provided (for login)
-    let hashedPasscode = null;
-    if (passcode) {
-      hashedPasscode = await bcrypt.hash(passcode, 10);
-    }
-
-    // Hash security answers
-    const hashedAnswer1 = await bcrypt.hash(
-      security_answer_1?.toLowerCase().trim() || "",
-      10,
-    );
-    const hashedAnswer2 = await bcrypt.hash(
-      security_answer_2?.toLowerCase().trim() || "",
-      10,
-    );
-
-    // Calculate age from date_of_birth if not provided
-    let calculatedAge = age;
-    if (!calculatedAge && date_of_birth) {
-      const birthDate = new Date(date_of_birth);
-      const today = new Date();
-      calculatedAge = today.getFullYear() - birthDate.getFullYear();
-      const monthDiff = today.getMonth() - birthDate.getMonth();
-      if (monthDiff < 0 || (monthDiff === 0 && today.getDate() < birthDate.getDate())) {
-        calculatedAge--;
-      }
-    }
-
-    // Create user with all fields
-    const { data: user, error } = await supabase
-      .from("users")
-      .insert({
-        email,
-        password_hash: hashedPassword,
-        first_name,
-        last_name,
-        middle_name: middle_name || null,
-        phone,
-        country: country || null,
-        state: state || null,
-        city: city || null,
-        address: address || null,
-        postal_code: postal_code || null,
-        date_of_birth: date_of_birth || null,
-        gender: gender || null,
-        marital_status: marital_status || null,
-        occupation: occupation || null,
-        referral_code: referral_code || null,
-        age: calculatedAge || null,
-        identification_type: identification_type || null,
-        identification_number: identification_number || null,
-        security_question_1,
-        security_answer_1: hashedAnswer1,
-        security_question_2,
-        security_answer_2: hashedAnswer2,
-        passcode_hash: hashedPasscode,
-        passcode_set_at: hashedPasscode ? new Date().toISOString() : null,
-        face_verified: !!face_images && face_images.length > 0,
-        face_verification_date: face_images && face_images.length > 0 ? new Date().toISOString() : null,
-        role: "user",
-        kyc_status: "pending",
-        is_active: true,
-        is_frozen: false,
-        created_at: new Date().toISOString(),
-        updated_at: new Date().toISOString(),
-      })
-      .select()
-      .single();
-
-    if (error) {
-      console.error("Supabase insert error:", error);
-      throw error;
-    }
-
-    console.log("User created with ID:", user.id);
-
-    // Store face images if provided
-    /*if (face_images && face_images.length > 0) {
-      for (let i = 0; i < face_images.length; i++) {
-        const faceImage = face_images[i];
-        // Store each face image as a descriptor (you can adjust based on your needs)
-        await supabase.from("face_descriptors").insert({
-          user_id: user.id,
-          descriptor: { image: faceImage, angle: i, timestamp: new Date().toISOString() },
-          is_active: true,
-          created_at: new Date().toISOString(),
-        });
-      }
-      console.log(`Stored ${face_images.length} face descriptors`);
-    }*
-
-      // Store face images if provided
-if (face_images && face_images.length > 0) {
-  for (let i = 0; i < face_images.length; i++) {
-    const faceImage = face_images[i];
-    await supabase.from("face_descriptors").insert({
-      user_id: user.id,
-      descriptor: { 
-        image: faceImage,  // ← Make sure the image is stored here
-        angle: i, 
-        timestamp: new Date().toISOString() 
-      },
-      is_active: true,
-      created_at: new Date().toISOString(),
-    });
-  }
-  console.log(`Stored ${face_images.length} face descriptors`);
-}
-
-    // Create checking account for user
-    const { error: accountError } = await supabase.from("accounts").insert({
-      user_id: user.id,
-      account_type: "checking",
-      currency: "NGN",
-      balance: 0.0,
-      available_balance: 0.0,
-      status: "active",
-      created_at: new Date().toISOString(),
-      updated_at: new Date().toISOString(),
-    });
-
-    if (accountError) {
-      console.error("Account creation error:", accountError);
-    }
-
-    // Generate token
-    const token = jwt.sign(
-      { userId: user.id, email: user.email, role: user.role },
-      process.env.JWT_SECRET,
-      { expiresIn: process.env.JWT_EXPIRE },
-    );
-
-    // Return user data (exclude sensitive info)
-    res.status(201).json({
-      message: "User created successfully",
-      token,
-      user: {
-        id: user.id,
-        email: user.email,
-        first_name: user.first_name,
-        last_name: user.last_name,
-        middle_name: user.middle_name,
-        role: user.role,
-        phone: user.phone,
-        country: user.country,
-        state: user.state,
-        city: user.city,
-        age: user.age,
-        gender: user.gender,
-        marital_status: user.marital_status,
-        occupation: user.occupation,
-        identification_type: user.identification_type,
-        identification_number: user.identification_number,
-        has_passcode: !!user.passcode_hash,
-        face_verified: user.face_verified,
-      },
-    });
-  } catch (error) {
-    console.error("Registration error:", error);
-    res.status(500).json({ error: "Registration failed: " + error.message });
-  }
-});*/
-
 // Register - Fixed with proper face image storage
 app.post("/api/auth/register", async (req, res) => {
   try {
@@ -1679,132 +1386,6 @@ app.post("/api/auth/login", authLimiter, async (req, res) => {
 });
 
 // ==================== PASSCODE AUTHENTICATION ROUTES ====================
-
-// Check if user has passcode set
-/*app.post("/api/auth/check-passcode", async (req, res) => {
-  try {
-    const { identifier } = req.body;
-
-    let query = supabase
-      .from("users")
-      .select("id, email, first_name, last_name, passcode_hash");
-
-    if (identifier.includes("@")) {
-      query = query.eq("email", identifier);
-    } else {
-      query = query.eq("phone", identifier);
-    }
-
-    const { data: user, error } = await query.single();
-
-    if (error || !user) {
-      return res.status(404).json({ error: "Account not found" });
-    }
-
-    const hasPasscode = !!(user.passcode_hash && user.passcode_hash !== null);
-
-    res.json({
-      has_passcode: hasPasscode,
-      user: {
-        id: user.id,
-        email: user.email,
-        first_name: user.first_name,
-        last_name: user.last_name,
-      },
-    });
-  } catch (error) {
-    console.error("Check passcode error:", error);
-    res.status(500).json({ error: "Failed to check passcode" });
-  }
-});
-
-// Verify passcode login
-app.post("/api/auth/verify-passcode", async (req, res) => {
-  try {
-    const { user_id, passcode } = req.body;
-
-    if (!passcode || passcode.length !== 6 || !/^\d{6}$/.test(passcode)) {
-      return res.status(400).json({ error: "Invalid passcode format" });
-    }
-
-    const { data: user, error } = await supabase
-      .from("users")
-      .select("*")
-      .eq("id", user_id)
-      .single();
-
-    if (error || !user)
-      return res.status(404).json({ error: "User not found" });
-    if (!user.is_active)
-      return res.status(403).json({ error: "Account is deactivated" });
-    if (user.is_frozen)
-      return res.status(403).json({ error: "Account is frozen" });
-
-    const maxAttempts = 5;
-    const attemptWindow = 15 * 60 * 1000;
-
-    if (user.passcode_attempts >= maxAttempts) {
-      const lastAttempt = new Date(user.last_passcode_attempt);
-      if (Date.now() - lastAttempt < attemptWindow) {
-        return res
-          .status(429)
-          .json({ error: "Too many incorrect attempts. Try again later." });
-      } else {
-        await supabase
-          .from("users")
-          .update({ passcode_attempts: 0 })
-          .eq("id", user_id);
-      }
-    }
-
-    const isValid = await bcrypt.compare(passcode, user.passcode_hash);
-
-    if (!isValid) {
-      const newAttempts = (user.passcode_attempts || 0) + 1;
-      await supabase
-        .from("users")
-        .update({
-          passcode_attempts: newAttempts,
-          last_passcode_attempt: new Date(),
-        })
-        .eq("id", user_id);
-      return res.status(401).json({
-        error: "Invalid passcode",
-        attempts_remaining: maxAttempts - newAttempts,
-      });
-    }
-
-    // Reset attempts on success
-    await supabase
-      .from("users")
-      .update({
-        passcode_attempts: 0,
-        last_passcode_attempt: null,
-        last_login: new Date(),
-      })
-      .eq("id", user_id);
-
-    const token = jwt.sign(
-      { userId: user.id, email: user.email, role: user.role },
-      process.env.JWT_SECRET,
-      { expiresIn: process.env.JWT_EXPIRE },
-    );
-
-    res.json({
-      token,
-      user: {
-        id: user.id,
-        email: user.email,
-        first_name: user.first_name,
-        last_name: user.last_name,
-        role: user.role,
-      },
-    });
-  } catch (error) {
-    console.error("Passcode verification error:", error);
-    res.status(500).json({ error: "Verification failed" });
-  }
-});*/
 
 // Check if user has passcode set
 app.post("/api/auth/check-passcode", async (req, res) => {
@@ -3443,7 +3024,7 @@ app.get("/api/user/accounts", authenticate, async (req, res) => {
 });
 
 // Get transactions with user details
-app.get(
+/*app.get(
   "/api/user/transactions",
   authenticate,
   checkAccountFrozen,
@@ -3595,6 +3176,123 @@ app.get(
         transaction.to_user_id !== req.user.id
       ) {
         return res.status(403).json({ error: "Access denied" });
+      }
+
+      res.json(transaction);
+    } catch (error) {
+      console.error("Transaction fetch error:", error);
+      res.status(500).json({ error: "Failed to fetch transaction" });
+    }
+  },
+);*/
+
+app.get(
+  "/api/user/transactions",
+  authenticate,
+  checkAccountFrozen,
+  async (req, res) => {
+    try {
+      const { page = 1, limit = 20, start_date, end_date, type } = req.query;
+      const offset = (parseInt(page) - 1) * parseInt(limit);
+
+      // Get user's account IDs
+      const { data: accounts, error: accountsError } = await supabase
+        .from("accounts")
+        .select("id")
+        .eq("user_id", req.user.id);
+
+      if (accountsError) throw accountsError;
+
+      const accountIds = accounts.map((a) => a.id);
+
+      if (accountIds.length === 0) {
+        return res.json({
+          transactions: [],
+          pagination: { page: 1, limit: 20, total: 0, pages: 0 },
+        });
+      }
+
+      // UPDATED QUERY: Only show completed transactions to receiver
+      // For failed transactions, only show if user is sender
+      let query = supabase
+        .from("transactions")
+        .select(
+          "id, transaction_id, amount, description, transaction_type, status, created_at, completed_at, from_account_id, to_account_id, from_user_id, to_user_id, failed_reason",
+          { count: "exact" },
+        )
+        .or(
+          `from_account_id.in.(${accountIds.join(",")}),` +
+            `(to_account_id.in.(${accountIds.join(",")}) AND status = 'completed')`, // Only show completed to receiver
+        )
+        .order("created_at", { ascending: false });
+
+      // Apply filters
+      if (start_date) {
+        query = query.gte("created_at", start_date);
+      }
+      if (end_date) {
+        query = query.lte("created_at", `${end_date}T23:59:59`);
+      }
+      if (type && type !== "all") {
+        query = query.eq("transaction_type", type);
+      }
+
+      const {
+        data: transactions,
+        error,
+        count,
+      } = await query.range(offset, offset + parseInt(limit) - 1);
+
+      if (error) throw error;
+
+      // ... rest of the function remains the same
+    } catch (error) {
+      console.error("Transactions fetch error:", error);
+      res.status(500).json({ error: "Failed to fetch transactions" });
+    }
+  },
+);
+
+app.get(
+  "/api/user/transactions/:transactionId",
+  authenticate,
+  async (req, res) => {
+    try {
+      const { transactionId } = req.params;
+
+      const { data: transaction, error } = await supabase
+        .from("transactions")
+        .select(
+          `
+          *,
+          from_account:accounts!transactions_from_account_id_fkey(id, account_number),
+          to_account:accounts!transactions_to_account_id_fkey(id, account_number),
+          from_user:users!transactions_from_user_id_fkey(id, first_name, last_name, email),
+          to_user:users!transactions_to_user_id_fkey(id, first_name, last_name, email)
+        `,
+        )
+        .eq("id", transactionId)
+        .single();
+
+      if (error) throw error;
+
+      // Verify user owns this transaction (only sender can see failed transactions)
+      if (
+        transaction.status === "failed" ||
+        transaction.status === "rejected"
+      ) {
+        // Only the sender can see failed transactions
+        if (transaction.from_user_id !== req.user.id) {
+          return res.status(403).json({ error: "Access denied" });
+        }
+      } else {
+        // For completed/pending, both parties can view
+        if (
+          transaction.from_user_id !== req.user.id &&
+          transaction.to_user_id !== req.user.id
+        ) {
+          return res.status(403).json({ error: "Access denied" });
+        }
       }
 
       res.json(transaction);
@@ -4253,7 +3951,7 @@ app.post(
 );
 
 // In index.js - Fix the createInitialFailedTransactionRecord function
-async function createInitialFailedTransactionRecord(
+/*async function createInitialFailedTransactionRecord(
   userId,
   fromAccountId,
   toAccountNumber,
@@ -4326,10 +4024,160 @@ async function createInitialFailedTransactionRecord(
     console.error("Error creating initial record:", error);
     return null;
   }
+}*/
+
+async function createInitialFailedTransactionRecord(
+  userId,
+  fromAccountId,
+  toAccountNumber,
+  amount,
+  description,
+  ip,
+  userAgent,
+) {
+  try {
+    // Get the source account details
+    const { data: fromAccount } = await supabase
+      .from("accounts")
+      .select("account_number, user_id")
+      .eq("id", fromAccountId)
+      .single();
+
+    // Try to get destination account info if it exists - BUT DON'T SET to_user_id for failed
+    let toAccountId = null;
+    let toUserId = null;
+    let toAccountNumberDisplay = toAccountNumber;
+
+    const { data: toAccount } = await supabase
+      .from("accounts")
+      .select("id, user_id, account_number")
+      .eq("account_number", toAccountNumber)
+      .maybeSingle();
+
+    if (toAccount) {
+      toAccountId = toAccount.id;
+      // CRITICAL: DON'T set toUserId for failed transactions!
+      // This ensures the failed transaction only shows for sender
+      toUserId = null; // ← KEY FIX - don't set to_user_id for failed
+      toAccountNumberDisplay = toAccount.account_number;
+    }
+
+    const transactionId = `FAIL${Date.now()}${Math.floor(Math.random() * 10000)}`;
+
+    const transactionData = {
+      transaction_id: transactionId,
+      from_account_id: fromAccountId,
+      to_account_id: toAccountId,
+      from_user_id: userId,
+      to_user_id: null, // ← CRITICAL FIX: Set to null for failed transactions
+      amount: amount,
+      fee_amount: 0,
+      description:
+        description || `Failed transfer to ${toAccountNumberDisplay}`,
+      transaction_type: "transfer",
+      status: "failed", // Set to failed directly
+      failed_reason: null,
+      failure_type: null,
+      created_at: new Date().toISOString(),
+      ip_address: ip,
+      user_agent: userAgent,
+    };
+
+    const { data: inserted, error } = await supabase
+      .from("transactions")
+      .insert(transactionData)
+      .select()
+      .single();
+
+    if (error) {
+      console.error("Failed to create initial record:", error);
+      return null;
+    }
+
+    console.log(
+      `📝 Created initial failed transaction record: ${transactionId}, Amount: ${amount}`,
+    );
+    return inserted;
+  } catch (error) {
+    console.error("Error creating initial record:", error);
+    return null;
+  }
+}
+
+async function updateFailedTransactionRecord(
+  transactionRecordId,
+  reason,
+  failureType,
+  details = {},
+) {
+  if (!transactionRecordId) {
+    console.error(
+      "No transactionRecordId provided to updateFailedTransactionRecord",
+    );
+    return false;
+  }
+
+  try {
+    console.log(
+      `🔄 Updating failed record ${transactionRecordId}: ${reason} (${failureType})`,
+    );
+
+    let finalReason = reason;
+    let finalDescription = `Failed transfer - ${reason}`;
+
+    // Build proper messages based on failure type
+    if (failureType === "balance_error") {
+      finalReason = `Insufficient balance. Available: ₦${details.available_balance?.toLocaleString() || "N/A"}, Required: ₦${details.amount?.toLocaleString() || "N/A"}`;
+      finalDescription = `Failed transfer - Insufficient funds. Available: ₦${details.available_balance?.toLocaleString() || "N/A"}, Required: ₦${details.amount?.toLocaleString() || "N/A"}`;
+    } else if (failureType === "validation_error") {
+      finalReason = reason;
+      finalDescription = `Failed transfer - ${reason}`;
+    } else if (failureType === "account_error") {
+      finalReason = reason;
+      finalDescription = `Failed transfer - ${reason}`;
+    } else if (failureType === "security_new_device") {
+      finalReason = reason;
+      finalDescription = `Failed transfer - ${reason}`;
+    } else if (failureType === "account_frozen") {
+      finalReason = reason;
+      finalDescription = `Failed transfer - ${reason}`;
+    } else if (failureType === "pin_error") {
+      finalReason = reason;
+      finalDescription = `Failed transfer - ${reason}`;
+    }
+
+    const updates = {
+      failed_reason: finalReason,
+      failure_type: failureType,
+      description: finalDescription,
+      status: "failed",
+      // CRITICAL: Ensure to_user_id remains null for failed
+      to_user_id: null,
+      completed_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    };
+
+    const { error } = await supabase
+      .from("transactions")
+      .update(updates)
+      .eq("id", transactionRecordId);
+
+    if (error) {
+      console.error("Failed to update failed record:", error);
+      return false;
+    }
+
+    console.log(`✅ Successfully updated failed record ${transactionRecordId}`);
+    console.log(`   New failure_reason: ${finalReason}`);
+    return true;
+  } catch (error) {
+    console.error("Error updating failed record:", error);
+    return false;
+  }
 }
 
 // In index.js - Completely rewrite the updateFailedTransactionRecord function
-async function updateFailedTransactionRecord(
+/*async function updateFailedTransactionRecord(
   transactionRecordId,
   reason,
   failureType,
@@ -4396,137 +4244,6 @@ async function updateFailedTransactionRecord(
   } catch (error) {
     console.error("Error updating failed record:", error);
     return false;
-  }
-}
-
-// ==================== TRANSACTION RECORDING HELPER FUNCTIONS ====================
-
-// Record a failed transaction - FIXED VERSION
-/*async function recordFailedTransaction(userId, fromAccountId, toAccountId, amount, reason, failureType, availableBalance = null, metadata = null) {
-  try {
-    // Generate a unique transaction ID
-    const transactionId = `FAIL${Date.now()}${Math.floor(Math.random() * 10000)}`;
-    
-    // Build a descriptive failure message
-    let description = `Failed transfer: ${reason}`;
-    if (failureType === "balance_error") {
-      description = `Failed transfer - Insufficient funds. Available: ₦${availableBalance?.toLocaleString() || "N/A"}, Required: ₦${amount?.toLocaleString() || "N/A"}`;
-    } else if (failureType === "security_new_device") {
-      description = `Failed transfer - New device security limit (₦${metadata?.threshold?.toLocaleString() || "500,000"})`;
-    } else if (failureType === "account_frozen") {
-      description = `Failed transfer - Recipient account frozen`;
-    } else if (failureType === "validation_error") {
-      description = `Failed transfer - ${reason}`;
-    } else if (failureType === "pin_error") {
-      description = `Failed transfer - Incorrect PIN (${metadata?.attempts_remaining || 0} attempts remaining)`;
-    } else if (failureType === "server_error") {
-      description = `Failed transfer - System error: ${reason.substring(0, 100)}`;
-    }
-    
-    // Get recipient user ID if toAccountId exists
-    let toUserId = null;
-    if (toAccountId) {
-      const { data: toAccount } = await supabase
-        .from("accounts")
-        .select("user_id")
-        .eq("id", toAccountId)
-        .single();
-      if (toAccount) {
-        toUserId = toAccount.user_id;
-      }
-    }
-    
-    const transactionData = {
-      transaction_id: transactionId,
-      from_account_id: fromAccountId,
-      to_account_id: toAccountId,
-      from_user_id: userId,
-      to_user_id: toUserId,
-      amount: amount || 0,
-      fee_amount: 0,
-      description: description,
-      transaction_type: "transfer",
-      status: "failed",
-      failed_reason: reason,
-      failure_type: failureType,
-      created_at: new Date().toISOString(),
-      completed_at: new Date().toISOString(),
-      ip_address: metadata?.ip || null,
-      user_agent: metadata?.userAgent || null
-    };
-    
-    const { data: inserted, error } = await supabase
-      .from("transactions")
-      .insert(transactionData)
-      .select()
-      .single();
-    
-    if (error) {
-      console.error("Failed to record failed transaction:", error);
-      // Try without selecting (just insert)
-      await supabase.from("transactions").insert(transactionData);
-    } else {
-      console.log(`✅ Recorded failed transaction: ${transactionId} - ${reason}`);
-    }
-    
-    // Create notification for the user about the failed transaction
-    await createNotification(
-      userId,
-      "Transfer Failed",
-      `Your transfer of ₦${amount?.toLocaleString() || "0"} failed. Reason: ${reason}`,
-      "error"
-    );
-    
-    return transactionId;
-  } catch (error) {
-    console.error("Error recording failed transaction:", error);
-    return null;
-  }
-}
-
-// Record a pending confirmation transaction
-async function recordPendingTransaction(userId, fromAccountId, toAccountId, amount, reason, statusType) {
-  try {
-    const transactionId = `PEND${Date.now()}${Math.floor(Math.random() * 10000)}`;
-    
-    // Get recipient user ID
-    let toUserId = null;
-    if (toAccountId) {
-      const { data: toAccount } = await supabase
-        .from("accounts")
-        .select("user_id")
-        .eq("id", toAccountId)
-        .single();
-      if (toAccount) {
-        toUserId = toAccount.user_id;
-      }
-    }
-    
-    const transactionData = {
-      transaction_id: transactionId,
-      from_account_id: fromAccountId,
-      to_account_id: toAccountId,
-      from_user_id: userId,
-      to_user_id: toUserId,
-      amount: amount || 0,
-      fee_amount: 0,
-      description: reason,
-      transaction_type: "transfer",
-      status: statusType || "pending_confirmation",
-      created_at: new Date().toISOString(),
-    };
-    
-    const { error } = await supabase
-      .from("transactions")
-      .insert(transactionData);
-    
-    if (error) {
-      console.error("Failed to record pending transaction:", error);
-    } else {
-      console.log(`✅ Recorded pending transaction: ${transactionId} - ${reason}`);
-    }
-  } catch (error) {
-    console.error("Error recording pending transaction:", error);
   }
 }*/
 
@@ -5366,91 +5083,7 @@ app.get("/api/user/beneficiaries/recent", authenticate, async (req, res) => {
   }
 });
 
-//=====================================================================
-// Get beneficiaries
-/*app.get(
-  "/api/user/beneficiaries",
-  authenticate,
-  checkAccountFrozen,
-  async (req, res) => {
-    try {
-      const { data: beneficiaries, error } = await supabase
-        .from("beneficiaries")
-        .select("*")
-        .eq("user_id", req.user.id)
-        .eq("is_active", true);
-
-      if (error) throw error;
-
-      res.json(beneficiaries);
-    } catch (error) {
-      console.error("Beneficiaries fetch error:", error);
-      res.status(500).json({ error: "Failed to fetch beneficiaries" });
-    }
-  },
-);
-
-// Add beneficiary
-app.post(
-  "/api/user/beneficiaries",
-  authenticate,
-  checkAccountFrozen,
-  async (req, res) => {
-    try {
-      const {
-        beneficiary_name,
-        account_number,
-        bank_name,
-        bank_code,
-        relationship,
-      } = req.body;
-
-      const { data: beneficiary, error } = await supabase
-        .from("beneficiaries")
-        .insert({
-          user_id: req.user.id,
-          beneficiary_name,
-          account_number,
-          bank_name,
-          bank_code,
-          relationship,
-        })
-        .select()
-        .single();
-
-      if (error) throw error;
-
-      res.json({ message: "Beneficiary added successfully", beneficiary });
-    } catch (error) {
-      console.error("Add beneficiary error:", error);
-      res.status(500).json({ error: "Failed to add beneficiary" });
-    }
-  },
-);
-
-// Remove beneficiary
-app.delete(
-  "/api/user/beneficiaries/:id",
-  authenticate,
-  checkAccountFrozen,
-  async (req, res) => {
-    try {
-      const { id } = req.params;
-
-      await supabase
-        .from("beneficiaries")
-        .update({ is_active: false })
-        .eq("id", id)
-        .eq("user_id", req.user.id);
-
-      res.json({ message: "Beneficiary removed successfully" });
-    } catch (error) {
-      console.error("Remove beneficiary error:", error);
-      res.status(500).json({ error: "Failed to remove beneficiary" });
-    }
-  },
-);*/
-
+// =========================Bills Sections =========================
 // Get bills
 app.get(
   "/api/user/bills",
@@ -7746,260 +7379,6 @@ app.post(
 );
 
 // ==================== HARVEST PLAN ADD UP SAVINGS ====================
-
-// Add up savings to harvest plan
-/*app.post(
-  "/api/user/savings/harvest/:id/add-up",
-  authenticate,
-  checkAccountFrozen,
-  async (req, res) => {
-    try {
-      const { id } = req.params;
-      const { amount } = req.body;
-
-      if (!amount || amount <= 0) {
-        return res.status(400).json({ error: "Invalid amount" });
-      }
-
-      // Get harvest enrollment
-      const { data: enrollment, error: hError } = await supabase
-        .from("user_harvest_enrollments")
-        .select(`
-          *,
-          users!inner(id, email, first_name, last_name, is_frozen),
-          harvest_plans!inner(
-            id, 
-            name, 
-            daily_amount, 
-            duration_days, 
-            total_amount,
-            reward_items
-          )
-        `)
-        .eq("id", id)
-        .eq("user_id", req.user.id)
-        .single();
-
-      if (hError || !enrollment) {
-        return res.status(404).json({ error: "Harvest plan not found" });
-      }
-
-      if (enrollment.status !== "active") {
-        return res.status(400).json({ error: "Cannot add to this savings plan" });
-      }
-
-      if (enrollment.users?.is_frozen) {
-        return res.status(403).json({ error: "Account frozen" });
-      }
-
-      // Get user's primary account
-      const { data: account, error: accError } = await supabase
-        .from("accounts")
-        .select("*")
-        .eq("user_id", req.user.id)
-        .eq("account_type", "checking")
-        .single();
-
-      if (accError || !account) {
-        return res.status(404).json({ error: "Account not found" });
-      }
-
-      // Check if sufficient balance
-      if (account.available_balance < amount) {
-        return res.status(400).json({ error: "Insufficient funds" });
-      }
-
-      // Calculate how many days this amount represents
-      const dailyAmount = enrollment.daily_amount;
-      const additionalDays = Math.floor(amount / dailyAmount);
-      const remainingAmount = amount % dailyAmount;
-      
-      // Calculate new totals
-      const planTotalDays = enrollment.harvest_plans.duration_days;
-      const currentDaysCompleted = enrollment.days_completed || 0;
-      const newDaysCompleted = Math.min(
-        currentDaysCompleted + additionalDays,
-        planTotalDays
-      );
-      
-      // Calculate new total saved
-      const newTotalSaved = (enrollment.total_saved || 0) + amount;
-      
-      // Check if user would exceed total savings amount
-      const planTotalAmount = enrollment.harvest_plans.total_amount;
-      if (newTotalSaved > planTotalAmount) {
-        const maxAllowed = planTotalAmount - (enrollment.total_saved || 0);
-        return res.status(400).json({
-          error: "amount_exceeds_limit",
-          message: `Adding ₦${amount.toLocaleString()} would exceed your plan's total savings target. Maximum additional amount: ₦${maxAllowed.toLocaleString()}`,
-          max_allowed: maxAllowed
-        });
-      }
-
-      // Deduct amount from user's account
-      const newBalance = account.balance - amount;
-      const newAvailable = account.available_balance - amount;
-
-      const { error: updateBalanceError } = await supabase
-        .from("accounts")
-        .update({
-          balance: newBalance,
-          available_balance: newAvailable,
-          updated_at: new Date().toISOString()
-        })
-        .eq("id", account.id);
-
-      if (updateBalanceError) throw updateBalanceError;
-
-      // Calculate progress for notifications
-      const wasCompleted = newDaysCompleted >= planTotalDays;
-      const progressBefore = (currentDaysCompleted / planTotalDays) * 100;
-      const progressAfter = (newDaysCompleted / planTotalDays) * 100;
-
-      // Update enrollment
-      const { error: updateError } = await supabase
-        .from("user_harvest_enrollments")
-        .update({
-          total_saved: newTotalSaved,
-          days_completed: newDaysCompleted,
-          updated_at: new Date().toISOString(),
-          status: wasCompleted ? "completed" : "active"
-        })
-        .eq("id", id);
-
-      if (updateError) throw updateError;
-
-      // Create transaction record
-      const transactionId = `ADDUP${Date.now()}${Math.floor(Math.random() * 10000)}`;
-      await supabase.from("transactions").insert({
-        transaction_id: transactionId,
-        from_account_id: account.id,
-        from_user_id: req.user.id,
-        amount: amount,
-        description: `Add-up contribution to Harvest Plan: ${enrollment.harvest_plans.name}`,
-        transaction_type: "savings_add_up",
-        status: "completed",
-        completed_at: new Date().toISOString(),
-        created_at: new Date().toISOString()
-      });
-
-      // Create savings transaction record
-      await supabase.from("savings_transactions").insert({
-        user_id: req.user.id,
-        savings_type: "harvest",
-        savings_id: id,
-        amount: amount,
-        transaction_type: "add_up",
-        description: `One-time add-up contribution of ₦${amount.toLocaleString()} (${additionalDays} days equivalent)`
-      });
-
-      // Create notification for user
-      await supabase.from("notifications").insert({
-        user_id: req.user.id,
-        title: "Add-Up Contribution Successful",
-        message: `You added ₦${amount.toLocaleString()} to your ${enrollment.harvest_plans.name} plan. ${additionalDays} days of savings added!`,
-        type: "success",
-        created_at: new Date().toISOString()
-      });
-
-      // Log security event
-      await logSecurityEvent(req.user.id, "harvest_plan_add_up", {
-        plan_id: id,
-        plan_name: enrollment.harvest_plans.name,
-        amount: amount,
-        additional_days: additionalDays,
-        new_total_saved: newTotalSaved,
-        new_days_completed: newDaysCompleted
-      });
-
-      res.json({
-        success: true,
-        message: `Successfully added ₦${amount.toLocaleString()} to your harvest plan!`,
-        data: {
-          amount_added: amount,
-          additional_days: additionalDays,
-          remaining_amount: remainingAmount,
-          total_saved: newTotalSaved,
-          days_completed: newDaysCompleted,
-          total_days: planTotalDays,
-          progress_percent: (newDaysCompleted / planTotalDays) * 100,
-          was_completed: wasCompleted
-        }
-      });
-    } catch (error) {
-      console.error("Add up savings error:", error);
-      res.status(500).json({ error: "Failed to add savings: " + error.message });
-    }
-  }
-);*/
-
-// Get harvest plan add-up summary (for displaying potential additional days)
-/*app.get(
-  "/api/user/savings/harvest/:id/add-up-summary",
-  authenticate,
-  async (req, res) => {
-    try {
-      const { id } = req.params;
-      const { amount } = req.query;
-
-      if (!amount || amount <= 0) {
-        return res.status(400).json({ error: "Invalid amount" });
-      }
-
-      // Get harvest enrollment
-      const { data: enrollment, error: hError } = await supabase
-        .from("user_harvest_enrollments")
-        .select(`
-          *,
-          harvest_plans!inner(
-            daily_amount,
-            duration_days,
-            total_amount
-          )
-        `)
-        .eq("id", id)
-        .eq("user_id", req.user.id)
-        .single();
-
-      if (hError || !enrollment) {
-        return res.status(404).json({ error: "Harvest plan not found" });
-      }
-
-      const dailyAmount = enrollment.daily_amount;
-      const additionalDays = Math.floor(amount / dailyAmount);
-      const remainingAmount = amount % dailyAmount;
-      const newTotalSaved = (enrollment.total_saved || 0) + amount;
-      const newDaysCompleted = Math.min(
-        (enrollment.days_completed || 0) + additionalDays,
-        enrollment.harvest_plans.duration_days
-      );
-      
-      const planTotalAmount = enrollment.harvest_plans.total_amount;
-      const exceedsLimit = newTotalSaved > planTotalAmount;
-      const maxAllowed = planTotalAmount - (enrollment.total_saved || 0);
-
-      res.json({
-        success: true,
-        summary: {
-          amount: amount,
-          daily_amount: dailyAmount,
-          additional_days: additionalDays,
-          remaining_amount: remainingAmount,
-          current_saved: enrollment.total_saved || 0,
-          new_total_saved: newTotalSaved,
-          current_days: enrollment.days_completed || 0,
-          new_days: newDaysCompleted,
-          total_days: enrollment.harvest_plans.duration_days,
-          exceeds_limit: exceedsLimit,
-          max_allowed: maxAllowed
-        }
-      });
-    } catch (error) {
-      console.error("Add up summary error:", error);
-      res.status(500).json({ error: "Failed to calculate summary" });
-    }
-  }
-);*/
 
 // Execute add-up savings (with PIN verification)
 app.post(
@@ -11844,97 +11223,6 @@ app.post(
   },
 );
 
-// Get all users (admin)
-/*app.get("/api/admin/users", authenticate, authorizeAdmin, async (req, res) => {
-  try {
-    const {
-      page = 1,
-      limit = 20,
-      search,
-      status,
-      sort_by = "created_at",
-      sort_order = "desc",
-    } = req.query;
-
-    const offset = (parseInt(page) - 1) * parseInt(limit);
-
-    // Use count query separately for performance
-    let countQuery = supabase
-      .from("users")
-      .select("*", { count: "exact", head: true });
-    let dataQuery = supabase
-      .from("users")
-      .select(
-        "id, email, first_name, last_name, phone, role, kyc_status, is_active, is_frozen, created_at",
-      );
-
-    // Apply filters
-    if (search) {
-      const searchFilter = `email.ilike.%${search}%,first_name.ilike.%${search}%,last_name.ilike.%${search}%`;
-      countQuery = countQuery.or(searchFilter);
-      dataQuery = dataQuery.or(searchFilter);
-    }
-
-    if (status === "frozen") {
-      countQuery = countQuery.eq("is_frozen", true);
-      dataQuery = dataQuery.eq("is_frozen", true);
-    } else if (status === "active") {
-      countQuery = countQuery.eq("is_active", true).eq("is_frozen", false);
-      dataQuery = dataQuery.eq("is_active", true).eq("is_frozen", false);
-    } else if (status === "inactive") {
-      countQuery = countQuery.eq("is_active", false);
-      dataQuery = dataQuery.eq("is_active", false);
-    }
-
-    // Execute queries in parallel
-    const [countResult, dataResult] = await Promise.all([
-      countQuery,
-      dataQuery
-        .order(sort_by, { ascending: sort_order === "asc" })
-        .range(offset, offset + parseInt(limit) - 1),
-    ]);
-
-    if (dataResult.error) throw dataResult.error;
-
-    // Get balances separately - only for displayed users, not all
-    const userIds = (dataResult.data || []).map((u) => u.id);
-    let balances = {};
-
-    if (userIds.length > 0) {
-      const { data: accountsData } = await supabase
-        .from("accounts")
-        .select("user_id, balance")
-        .in("user_id", userIds);
-
-      // Aggregate balances
-      balances = (accountsData || []).reduce((acc, accRow) => {
-        acc[accRow.user_id] =
-          (acc[accRow.user_id] || 0) + (accRow.balance || 0);
-        return acc;
-      }, {});
-    }
-
-    // Merge balances into users
-    const usersWithBalance = (dataResult.data || []).map((user) => ({
-      ...user,
-      total_balance: balances[user.id] || 0,
-    }));
-
-    res.json({
-      users: usersWithBalance,
-      pagination: {
-        page: parseInt(page),
-        limit: parseInt(limit),
-        total: countResult.count || 0,
-        pages: Math.ceil((countResult.count || 0) / parseInt(limit)),
-      },
-    });
-  } catch (error) {
-    console.error("Admin users fetch error:", error);
-    res.status(500).json({ error: "Failed to fetch users" });
-  }
-});*/
-
 // Get all users (admin) - Updated
 app.get("/api/admin/users", authenticate, authorizeAdmin, async (req, res) => {
   try {
@@ -12844,135 +12132,6 @@ app.get(
     }
   },
 );
-
-// Get single user details (admin) - UPDATED with all fields
-/*app.get(
-  "/api/admin/users/:userId",
-  authenticate,
-  authorizeAdmin,
-  async (req, res) => {
-    try {
-      const { userId } = req.params;
-
-      // Get user with all fields
-      const { data: user, error: userError } = await supabase
-        .from("users")
-        .select(`
-          id,
-          email,
-          first_name,
-          last_name,
-          middle_name,
-          phone,
-          date_of_birth,
-          age,
-          gender,
-          marital_status,
-          occupation,
-          referral_code,
-          address,
-          city,
-          state,
-          country,
-          postal_code,
-          identification_type,
-          identification_number,
-          security_question_1,
-          security_question_2,
-          role,
-          kyc_status,
-          is_active,
-          is_frozen,
-          freeze_reason,
-          two_factor_enabled,
-          face_verified,
-          face_quality_score,
-          face_embedding,
-          created_at,
-          updated_at,
-          last_login
-        `)
-        .eq("id", userId)
-        .single();
-
-      if (userError || !user) {
-        return res.status(404).json({ error: "User not found" });
-      }
-
-      // Get accounts
-      const { data: accounts } = await supabase
-        .from("accounts")
-        .select("*")
-        .eq("user_id", userId);
-
-      // Get cards
-      const { data: cards } = await supabase
-        .from("cards")
-        .select("*")
-        .eq("user_id", userId);
-
-      // Get recent transactions (last 50)
-      const { data: transactions } = await supabase
-        .from("transactions")
-        .select(`
-          id,
-          transaction_id,
-          amount,
-          description,
-          transaction_type,
-          status,
-          created_at,
-          completed_at,
-          from_account_id,
-          to_account_id,
-          from_user_id,
-          to_user_id
-        `)
-        .or(`from_user_id.eq.${userId},to_user_id.eq.${userId}`)
-        .order("created_at", { ascending: false })
-        .limit(50);
-
-      // Get face descriptors
-      /*const { data: faceDescriptors } = await supabase
-        .from("face_descriptors")
-        .select("id, created_at")
-        .eq("user_id", userId)
-        .eq("is_active", true)
-        .limit(1);*
-
-        // Get face descriptors with images
-const { data: faceDescriptors } = await supabase
-  .from("face_descriptors")
-  .select("descriptor, created_at")
-  .eq("user_id", userId)
-  .eq("is_active", true)
-  .order("created_at", { ascending: true })
-  .limit(5);  // Get up to 5 face images
-
-// Include in the response
-completeUser.face_descriptors = faceDescriptors || [];
-completeUser.face_image = faceDescriptors?.[0]?.descriptor?.image || null;
-
-      // Combine all data
-      const completeUser = {
-        ...user,
-        accounts: accounts || [],
-        cards: cards || [],
-        transactions: transactions || [],
-        has_face_descriptor: (faceDescriptors && faceDescriptors.length > 0),
-        face_descriptor_count: faceDescriptors?.length || 0,
-      };
-
-      res.json(completeUser);
-    } catch (error) {
-      console.error("Admin user fetch error:", error);
-      res.status(500).json({
-        error: "Failed to fetch user",
-        details: error.message,
-      });
-    }
-  },
-);*/
 
 // Get single user details (admin) - FIXED with face images
 app.get(
@@ -13887,72 +13046,6 @@ app.get(
     }
   },
 );
-
-// Get admin dashboard stats
-/*app.get("/api/admin/stats", authenticate, authorizeAdmin, async (req, res) => {
-  try {
-    // Total users
-    const { count: totalUsers } = await supabase
-      .from("users")
-      .select("*", { count: "exact", head: true });
-
-    // Active users (not frozen, active)
-    const { count: activeUsers } = await supabase
-      .from("users")
-      .select("*", { count: "exact", head: true })
-      .eq("is_active", true)
-      .eq("is_frozen", false);
-
-    // Frozen users
-    const { count: frozenUsers } = await supabase
-      .from("users")
-      .select("*", { count: "exact", head: true })
-      .eq("is_frozen", true);
-
-    // Pending KYC
-    const { count: pendingKYC } = await supabase
-      .from("users")
-      .select("*", { count: "exact", head: true })
-      .eq("kyc_status", "pending");
-
-    // Total transactions today
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
-    const { count: todayTransactions } = await supabase
-      .from("transactions")
-      .select("*", { count: "exact", head: true })
-      .gte("created_at", today.toISOString());
-
-    // Total volume today
-    const { data: volumeData } = await supabase
-      .from("transactions")
-      .select("amount")
-      .gte("created_at", today.toISOString())
-      .eq("status", "completed");
-
-    const todayVolume = volumeData?.reduce((sum, t) => sum + t.amount, 0) || 0;
-
-    // Open support tickets
-    const { count: openTickets } = await supabase
-      .from("support_tickets")
-      .select("*", { count: "exact", head: true })
-      .eq("status", "open");
-
-    res.json({
-      totalUsers,
-      activeUsers,
-      frozenUsers,
-      pendingKYC,
-      todayTransactions,
-      todayVolume,
-      openTickets,
-      timestamp: new Date(),
-    });
-  } catch (error) {
-    console.error("Admin stats error:", error);
-    res.status(500).json({ error: "Failed to fetch stats" });
-  }
-});*/
 
 // Get admin dashboard stats
 app.get("/api/admin/stats", authenticate, authorizeAdmin, async (req, res) => {

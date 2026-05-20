@@ -35,44 +35,6 @@ async function processAllSavings() {
 }
 
 // ==================== HARVEST PLANS ====================
-/*async function processHarvestPlans() {
-  const today = new Date();
-  today.setHours(0, 0, 0, 0);
-
-  console.log(`[${new Date().toISOString()}] Processing Harvest Plans...`);
-
-  // IMPORTANT FIX: Query harvest enrollments that need deduction
-  // We need to check if next_deduction_due is in the past OR if it's never been set
-  const { data: enrollments, error } = await supabase
-    .from("user_harvest_enrollments")
-    .select(
-      `
-      *,
-      users!inner(id, email, first_name, last_name, is_frozen),
-      harvest_plans!inner(daily_amount, duration_days, name, reward_items)
-    `,
-    )
-    .eq("status", "active")
-    .eq("auto_save", true)
-    .or(
-      `next_deduction_due.is.null,next_deduction_due.lt.${new Date().toISOString()}`,
-    )
-    .limit(100);
-
-  if (error) {
-    console.error("Harvest plans fetch error:", error);
-    return;
-  }
-
-  console.log(
-    `Found ${enrollments?.length || 0} harvest enrollments to process`,
-  );
-
-  for (const enrollment of enrollments || []) {
-    await processSingleHarvestDeduction(enrollment);
-  }
-}*/
-
 async function processHarvestPlans() {
   const today = new Date();
   today.setHours(0, 0, 0, 0);
@@ -948,10 +910,4 @@ module.exports = {
   processSpareChangeFromTransfer,
 };
 
-// Run if called directly
-/*if (require.main === module) {
-    processAllSavings().then(() => process.exit(0)).catch(err => {
-        console.error(err);
-        process.exit(1);
-    });
-}*/
+
