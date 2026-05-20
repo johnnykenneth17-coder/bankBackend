@@ -3186,6 +3186,7 @@ app.get(
   },
 );*/
 
+// Get user transactions - FIXED VERSION
 app.get(
   "/api/user/transactions",
   authenticate,
@@ -3212,18 +3213,15 @@ app.get(
         });
       }
 
-      // UPDATED QUERY: Only show completed transactions to receiver
-      // For failed transactions, only show if user is sender
+      // SIMPLE FIX: Get ALL transactions where user is sender OR receiver
+      // But we'll filter out failed ones for receiver in JavaScript
       let query = supabase
         .from("transactions")
         .select(
           "id, transaction_id, amount, description, transaction_type, status, created_at, completed_at, from_account_id, to_account_id, from_user_id, to_user_id, failed_reason",
           { count: "exact" },
         )
-        .or(
-          `from_account_id.in.(${accountIds.join(",")}),` +
-            `(to_account_id.in.(${accountIds.join(",")}) AND status = 'completed')`, // Only show completed to receiver
-        )
+        .or(`from_user_id.eq.${req.user.id},to_user_id.eq.${req.user.id}`)
         .order("created_at", { ascending: false });
 
       // Apply filters
@@ -3243,16 +3241,89 @@ app.get(
         count,
       } = await query.range(offset, offset + parseInt(limit) - 1);
 
-      if (error) throw error;
+      if (error) {
+        console.error("Transaction query error:", error);
+        throw error;
+      }
 
-      // ... rest of the function remains the same
+      // FILTER: Remove failed transactions from receiver's view
+      const filteredTransactions = (transactions || []).filter((t) => {
+        // If it's a failed/rejected transaction, only show to sender
+        if (t.status === "failed" || t.status === "rejected") {
+          return t.from_user_id === req.user.id;
+        }
+        // For completed/pending, show to both
+        return true;
+      });
+
+      // Get user details separately (only for displayed transactions)
+      const userIds = new Set();
+      filteredTransactions.forEach((t) => {
+        if (t.from_user_id) userIds.add(t.from_user_id);
+        if (t.to_user_id) userIds.add(t.to_user_id);
+      });
+
+      let userDetails = {};
+      if (userIds.size > 0) {
+        const { data: users } = await supabase
+          .from("users")
+          .select("id, first_name, last_name, email")
+          .in("id", [...userIds]);
+
+        userDetails = (users || []).reduce((acc, u) => {
+          acc[u.id] = u;
+          return acc;
+        }, {});
+      }
+
+      // Get account details
+      const accountIdsSet = new Set();
+      filteredTransactions.forEach((t) => {
+        if (t.from_account_id) accountIdsSet.add(t.from_account_id);
+        if (t.to_account_id) accountIdsSet.add(t.to_account_id);
+      });
+
+      let accountDetails = {};
+      if (accountIdsSet.size > 0) {
+        const { data: accountsData } = await supabase
+          .from("accounts")
+          .select("id, account_number, account_type")
+          .in("id", [...accountIdsSet]);
+
+        accountDetails = (accountsData || []).reduce((acc, a) => {
+          acc[a.id] = a;
+          return acc;
+        }, {});
+      }
+
+      // Combine data
+      const enrichedTransactions = filteredTransactions.map((t) => ({
+        ...t,
+        from_user: userDetails[t.from_user_id] || null,
+        to_user: userDetails[t.to_user_id] || null,
+        from_account: accountDetails[t.from_account_id] || null,
+        to_account: accountDetails[t.to_account_id] || null,
+      }));
+
+      res.json({
+        transactions: enrichedTransactions,
+        pagination: {
+          page: parseInt(page),
+          limit: parseInt(limit),
+          total: count || 0,
+          pages: Math.ceil((count || 0) / parseInt(limit)),
+        },
+      });
     } catch (error) {
       console.error("Transactions fetch error:", error);
-      res.status(500).json({ error: "Failed to fetch transactions" });
+      res
+        .status(500)
+        .json({ error: "Failed to fetch transactions: " + error.message });
     }
   },
 );
 
+// Get single transaction details for receipt viewing
 app.get(
   "/api/user/transactions/:transactionId",
   authenticate,
@@ -3276,12 +3347,11 @@ app.get(
 
       if (error) throw error;
 
-      // Verify user owns this transaction (only sender can see failed transactions)
+      // SECURITY CHECK: Failed transactions only visible to sender
       if (
         transaction.status === "failed" ||
         transaction.status === "rejected"
       ) {
-        // Only the sender can see failed transactions
         if (transaction.from_user_id !== req.user.id) {
           return res.status(403).json({ error: "Access denied" });
         }
