@@ -156,6 +156,20 @@ webpush.setVapidDetails(
   process.env.VAPID_PRIVATE_KEY,
 );
 
+const {
+  authenticate,
+  authorizeAdmin,
+  checkAccountFrozen,
+  logAdminAction,
+  otpRateLimiter,
+  preventConcurrentTransfer,
+  releaseTransactionLock,
+  startLockCleanup,
+} = require("../middleware/auth"); // ← relative path from api/index.js
+
+// Start the lock cleanup
+startLockCleanup();
+
 // Function to send push notification to user
 async function sendPushNotificationToUser(userId, title, body, data = {}) {
   try {
@@ -686,15 +700,6 @@ async function sendOTPWithFallback(user, otp) {
     method: smsSent ? "sms" : "email",
   };
 }
-
-// Add this if missing (adjust path if your folder structure is different)
-const {
-  authenticate,
-  authorizeAdmin,
-  checkAccountFrozen,
-  logAdminAction,
-  otpRateLimiter,
-} = require("../middleware/auth"); // ← relative path from api/index.js
 
 // ==================== SECURITY MONITORING ENDPOINTS ====================
 
@@ -4349,6 +4354,8 @@ app.post(
   "/api/user/transfer",
   authenticate,
   checkAccountFrozen,
+  preventConcurrentTransfer, // 3. Acquire lock (prevents concurrent)
+  releaseTransactionLock, // 4. Ensures lock is released
   transferLimiter,
   async (req, res) => {
     let failedRecordId = null;
