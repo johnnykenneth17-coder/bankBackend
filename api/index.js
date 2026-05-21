@@ -1525,7 +1525,7 @@ app.post("/api/auth/register-face", authenticate, async (req, res) => {
 });
 
 // Register face during user registration (add to existing registration route)
-/*async function registerFaceWithAI(userId, faceImages) {
+async function registerFaceWithAI(userId, faceImages) {
   try {
     const response = await axios.post(
       `${AI_SERVICE_URL}/v1/face/register`,
@@ -1637,7 +1637,7 @@ async function verifyLivenessWithAI(frames) {
 // Generate secure session ID for face verification
 function generateFaceSessionId() {
   return crypto.randomBytes(32).toString("hex");
-}*/
+}
 
 // New endpoint: Start face verification session
 app.post("/api/auth/face/start-session", async (req, res) => {
@@ -3102,14 +3102,6 @@ async function checkTierTransferLimit(userId, amount) {
   }
 }
 
-// Add this check in the transfer route after balance check
-const tierLimitCheck = await checkTierTransferLimit(req.user.id, amount);
-if (!tierLimitCheck.allowed) {
-  return res
-    .status(400)
-    .json({ error: tierLimitCheck.error, tier_limit_exceeded: true });
-}
-
 // ==================== FORGOT PASSWORD ROUTES (EMAIL ONLY) ====================
 
 // Step 1: Request OTP via Email Only
@@ -4177,54 +4169,6 @@ app.post(
         return res.status(404).json({ error: "Source account not found" });
       }
 
-      // Check balance
-      /*if (fromAccount.available_balance < amount) {
-        console.log(
-          `❌ Balance check failed: Available: ${fromAccount.available_balance}, Required: ${amount}`,
-        );
-
-        if (failedRecordId) {
-          // Update the failed record with the correct reason
-          const failureReason = `Insufficient balance. Available: ₦${fromAccount.available_balance.toLocaleString()}, Required: ₦${amount.toLocaleString()}`;
-
-          const { error: updateError } = await supabase
-            .from("transactions")
-            .update({
-              failed_reason: failureReason,
-              failure_type: "balance_error",
-              description: `Failed transfer - Insufficient funds. Available: ₦${fromAccount.available_balance.toLocaleString()}, Required: ₦${amount.toLocaleString()}`,
-              status: "failed",
-              completed_at: new Date().toISOString(),
-              updated_at: new Date().toISOString(),
-            })
-            .eq("id", failedRecordId);
-
-          if (updateError) {
-            console.error("Failed to update failed record:", updateError);
-          } else {
-            console.log(
-              `✅ Updated failed record ${failedRecordId} with balance error`,
-            );
-
-            // Verify the update worked by fetching the record
-            const { data: verified } = await supabase
-              .from("transactions")
-              .select("failed_reason")
-              .eq("id", failedRecordId)
-              .single();
-
-            console.log(`Verified failure reason: ${verified?.failed_reason}`);
-          }
-        }
-
-        return res.status(400).json({
-          error: "Insufficient funds",
-          failed_record_id: failedRecordId,
-          available_balance: fromAccount.available_balance,
-          required_amount: amount,
-        });
-      }*/
-
       // In index.js - REPLACE your entire balance check section with this
 
       // ========== BALANCE CHECK WITH DIRECT DATABASE UPDATE ==========
@@ -4316,6 +4260,14 @@ app.post(
           available_balance: fromAccount.available_balance,
           required_amount: amount,
         });
+      }
+
+      // Add this check in the transfer route after balance check
+      const tierLimitCheck = await checkTierTransferLimit(req.user.id, amount);
+      if (!tierLimitCheck.allowed) {
+        return res
+          .status(400)
+          .json({ error: tierLimitCheck.error, tier_limit_exceeded: true });
       }
 
       // Get destination account
