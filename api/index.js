@@ -1320,6 +1320,111 @@ app.post("/api/auth/login", authLimiter, async (req, res) => {
 
 // ==================== PASSCODE AUTHENTICATION ROUTES ====================
 
+// Check if user has passcode set - IMPROVED phone number matching
+app.post("/api/auth/check-passcode", async (req, res) => {
+  try {
+    const { identifier } = req.body;
+
+    console.log(`Check passcode for identifier: ${identifier}`);
+
+    let query = supabase
+      .from("users")
+      .select("id, email, first_name, last_name, passcode_hash, phone");
+
+    if (identifier.includes("@")) {
+      // Email login
+      query = query.eq("email", identifier.toLowerCase());
+    } else {
+      // Phone number login - try multiple formats
+      const cleanPhone = identifier.trim().replace(/\s/g, "");
+
+      // Try exact match first
+      let { data: user, error } = await query.eq("phone", cleanPhone).single();
+
+      if (!user) {
+        // Try with +234 prefix (Nigeria)
+        let withPrefix = cleanPhone;
+        if (!cleanPhone.startsWith("+")) {
+          if (cleanPhone.startsWith("0")) {
+            withPrefix = "+234" + cleanPhone.substring(1);
+          } else if (!cleanPhone.startsWith("234")) {
+            withPrefix = "+234" + cleanPhone;
+          } else {
+            withPrefix = "+" + cleanPhone;
+          }
+        }
+
+        const { data: userWithPrefix } = await supabase
+          .from("users")
+          .select("id, email, first_name, last_name, passcode_hash, phone")
+          .eq("phone", withPrefix)
+          .single();
+
+        if (userWithPrefix) {
+          user = userWithPrefix;
+        } else {
+          // Try without country code
+          let withoutPrefix = cleanPhone;
+          if (cleanPhone.startsWith("+234")) {
+            withoutPrefix = "0" + cleanPhone.substring(4);
+          } else if (cleanPhone.startsWith("234")) {
+            withoutPrefix = "0" + cleanPhone.substring(3);
+          }
+
+          const { data: userWithoutPrefix } = await supabase
+            .from("users")
+            .select("id, email, first_name, last_name, passcode_hash, phone")
+            .eq("phone", withoutPrefix)
+            .single();
+
+          if (userWithoutPrefix) {
+            user = userWithoutPrefix;
+          }
+        }
+      }
+
+      if (!user) {
+        console.log(`No user found for phone: ${cleanPhone}`);
+        return res.status(404).json({ error: "Account not found" });
+      }
+
+      const hasPasscode = !!(user.passcode_hash && user.passcode_hash !== null);
+
+      return res.json({
+        has_passcode: hasPasscode,
+        user: {
+          id: user.id,
+          email: user.email,
+          first_name: user.first_name,
+          last_name: user.last_name,
+        },
+      });
+    }
+
+    const { data: user, error } = await query.single();
+
+    if (error || !user) {
+      console.log(`No user found for identifier: ${identifier}`);
+      return res.status(404).json({ error: "Account not found" });
+    }
+
+    const hasPasscode = !!(user.passcode_hash && user.passcode_hash !== null);
+
+    res.json({
+      has_passcode: hasPasscode,
+      user: {
+        id: user.id,
+        email: user.email,
+        first_name: user.first_name,
+        last_name: user.last_name,
+      },
+    });
+  } catch (error) {
+    console.error("Check passcode error:", error);
+    res.status(500).json({ error: "Failed to check passcode" });
+  }
+});
+
 // Verify passcode login
 app.post("/api/auth/verify-passcode", async (req, res) => {
   try {
@@ -2338,7 +2443,7 @@ async function sendOTPSMS(phoneNumber, otp) {
 // ==================== ACCOUNT TIER MANAGEMENT ====================
 
 // Get user's current tier and limits - SAFE VERSION
-app.get("/api/user/tier-info", authenticate, async (req, res) => {
+/*app.get("/api/user/tier-info", authenticate, async (req, res) => {
   try {
     // Get user's current tier
     const { data: user, error: userError } = await supabase
@@ -2593,6 +2698,150 @@ app.get("/api/user/tier-info", authenticate, async (req, res) => {
         id_verified: false,
       },
     });
+  }
+});*/
+
+// Get user's current tier and limits
+app.get("/api/user/tier-info", authenticate, async (req, res) => {
+  try {
+    // Get user's current tier
+    const { data: user, error: userError } = await supabase
+      .from("users")
+      .select(
+        "account_tier, email_verified, phone_verified, identification_type, identification_number",
+      )
+      .eq("id", req.user.id)
+      .single();
+
+    if (userError) throw userError;
+
+    // Get tier limits
+    const { data: limits, error: limitsError } = await supabase
+      .from("account_tier_limits")
+      .select("*")
+      .eq("tier", user.account_tier)
+      .single();
+
+    if (limitsError) throw limitsError;
+
+    // Check if user is eligible for next tier
+    const nextTier = user.account_tier + 1;
+    let nextTierRequirements = null;
+    let canUpgrade = false;
+    let upgradeRequirements = [];
+
+    if (nextTier <= 3) {
+      const { data: nextLimits } = await supabase
+        .from("account_tier_limits")
+        .select("*")
+        .eq("tier", nextTier)
+        .single();
+
+      if (nextLimits) {
+        nextTierRequirements = nextLimits;
+
+        // Check requirements for next tier
+        if (nextLimits.requires_bvn_nin) {
+          const hasValidId =
+            user.identification_type &&
+            (user.identification_type.toLowerCase() === "nin" ||
+              user.identification_type.toLowerCase() === "bvn") &&
+            user.identification_number;
+          upgradeRequirements.push({
+            requirement: "BVN/NIN Verification",
+            met: !!hasValidId,
+            action: "provide_id",
+          });
+        }
+
+        if (nextLimits.requires_email_verification) {
+          upgradeRequirements.push({
+            requirement: "Email Verification",
+            met: user.email_verified || false,
+            action: "verify_email",
+          });
+        }
+
+        if (nextLimits.requires_address_proof) {
+          const { data: addressProof } = await supabase
+            .from("users")
+            .select("address_proof_status")
+            .eq("id", req.user.id)
+            .single();
+          upgradeRequirements.push({
+            requirement: "Proof of Address",
+            met: addressProof?.address_proof_status === "verified",
+            action: "upload_address",
+          });
+        }
+
+        canUpgrade = upgradeRequirements.every((r) => r.met === true);
+      }
+    }
+
+    // Get total user balance
+    const { data: accounts } = await supabase
+      .from("accounts")
+      .select("balance")
+      .eq("user_id", req.user.id);
+
+    const totalBalance =
+      accounts?.reduce((sum, acc) => sum + (acc.balance || 0), 0) || 0;
+
+    // Check if balance exceeds current tier limit
+    const exceedsBalanceLimit = totalBalance > limits.max_balance;
+
+    // Get today's total transfers
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const { data: todayTransfers } = await supabase
+      .from("transactions")
+      .select("amount")
+      .eq("from_user_id", req.user.id)
+      .eq("status", "completed")
+      .gte("created_at", today.toISOString());
+
+    const todayTransferred =
+      todayTransfers?.reduce((sum, t) => sum + t.amount, 0) || 0;
+    const remainingDailyLimit = Math.max(
+      0,
+      limits.daily_transfer_limit - todayTransferred,
+    );
+
+    res.json({
+      success: true,
+      current_tier: user.account_tier,
+      tier_name: limits.tier_name,
+      limits: {
+        max_balance: limits.max_balance,
+        daily_transfer_limit: limits.daily_transfer_limit,
+        single_transfer_limit: limits.single_transfer_limit,
+        monthly_transfer_limit: limits.monthly_transfer_limit,
+      },
+      usage: {
+        total_balance: totalBalance,
+        today_transferred: todayTransferred,
+        remaining_daily_limit: remainingDailyLimit,
+        exceeds_balance_limit: exceedsBalanceLimit,
+      },
+      next_tier:
+        nextTier <= 3
+          ? {
+              tier: nextTier,
+              tier_name: nextTierRequirements?.tier_name,
+              requirements: upgradeRequirements,
+              can_upgrade: canUpgrade,
+            }
+          : null,
+      verification_status: {
+        email_verified: user.email_verified || false,
+        phone_verified: user.phone_verified || false,
+        id_verified: !!(user.identification_type && user.identification_number),
+      },
+    });
+  } catch (error) {
+    console.error("Tier info error:", error);
+    res.status(500).json({ error: "Failed to get tier information" });
   }
 });
 
@@ -10194,7 +10443,7 @@ app.post(
 });*/
 
 // Get account limits with tier information - SAFE VERSION
-app.get("/api/user/account-limits", authenticate, async (req, res) => {
+/*app.get("/api/user/account-limits", authenticate, async (req, res) => {
   try {
     const userId = req.user.id;
 
@@ -10317,6 +10566,80 @@ app.get("/api/user/account-limits", authenticate, async (req, res) => {
       current_balance: 0,
       balance_percentage: 0,
     });
+  }
+});*/
+
+// Get account limits with tier information
+app.get("/api/user/account-limits", authenticate, async (req, res) => {
+  try {
+    const userId = req.user.id;
+
+    // Get user's tier
+    const { data: user, error: userError } = await supabase
+      .from("users")
+      .select("account_tier")
+      .eq("id", userId)
+      .single();
+
+    if (userError) throw userError;
+
+    // Get tier limits
+    const { data: tierLimits, error: limitsError } = await supabase
+      .from("account_tier_limits")
+      .select("*")
+      .eq("tier", user.account_tier)
+      .single();
+
+    if (limitsError) throw limitsError;
+
+    // Get user's total balance
+    const { data: accounts } = await supabase
+      .from("accounts")
+      .select("balance")
+      .eq("user_id", userId);
+
+    const totalBalance =
+      accounts?.reduce((sum, acc) => sum + (acc.balance || 0), 0) || 0;
+
+    // Get today's transactions sum
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const { data: todayTxs } = await supabase
+      .from("transactions")
+      .select("amount")
+      .eq("from_user_id", userId)
+      .eq("status", "completed")
+      .gte("created_at", today.toISOString());
+
+    const dailyUsed = todayTxs?.reduce((sum, t) => sum + t.amount, 0) || 0;
+
+    // Get this month's transactions sum
+    const monthStart = new Date();
+    monthStart.setDate(1);
+    monthStart.setHours(0, 0, 0, 0);
+    const { data: monthTxs } = await supabase
+      .from("transactions")
+      .select("amount")
+      .eq("from_user_id", userId)
+      .eq("status", "completed")
+      .gte("created_at", monthStart.toISOString());
+
+    const monthlyUsed = monthTxs?.reduce((sum, t) => sum + t.amount, 0) || 0;
+
+    res.json({
+      max_balance: tierLimits.max_balance,
+      daily_limit: tierLimits.daily_transfer_limit,
+      single_transfer_limit: tierLimits.single_transfer_limit,
+      monthly_limit: tierLimits.monthly_transfer_limit,
+      daily_used: dailyUsed,
+      monthly_used: monthlyUsed,
+      current_tier: user.account_tier,
+      current_balance: totalBalance,
+      balance_percentage: (totalBalance / tierLimits.max_balance) * 100,
+    });
+  } catch (error) {
+    console.error("Account limits error:", error);
+    res.status(500).json({ error: "Failed to fetch limits" });
   }
 });
 
