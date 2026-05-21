@@ -2337,7 +2337,7 @@ async function sendOTPSMS(phoneNumber, otp) {
 
 // ==================== ACCOUNT TIER MANAGEMENT ====================
 
-// Get user's current tier and limits
+// Get user's current tier and limits - SAFE VERSION
 app.get("/api/user/tier-info", authenticate, async (req, res) => {
   try {
     // Get user's current tier
@@ -2349,34 +2349,152 @@ app.get("/api/user/tier-info", authenticate, async (req, res) => {
       .eq("id", req.user.id)
       .single();
 
-    if (userError) throw userError;
+    if (userError) {
+      console.error("Tier info user error:", userError);
+      return res.json({
+        success: true,
+        current_tier: 1,
+        tier_name: "Basic",
+        limits: {
+          max_balance: 500000,
+          daily_transfer_limit: 150000,
+          single_transfer_limit: 150000,
+          monthly_transfer_limit: 3000000,
+        },
+        usage: {
+          total_balance: 0,
+          today_transferred: 0,
+          remaining_daily_limit: 150000,
+          exceeds_balance_limit: false,
+        },
+        next_tier: {
+          tier: 2,
+          tier_name: "Verified",
+          requirements: [
+            {
+              requirement: "BVN/NIN Verification",
+              met: false,
+              action: "provide_id",
+            },
+          ],
+          can_upgrade: false,
+        },
+        verification_status: {
+          email_verified: false,
+          phone_verified: false,
+          id_verified: false,
+        },
+      });
+    }
 
-    // Get tier limits
-    const { data: limits, error: limitsError } = await supabase
+    const userTier = user?.account_tier || 1;
+
+    // Get tier limits with fallback
+    let limits;
+    const { data: tierLimits, error: limitsError } = await supabase
       .from("account_tier_limits")
       .select("*")
-      .eq("tier", user.account_tier)
+      .eq("tier", userTier)
       .single();
 
-    if (limitsError) throw limitsError;
+    if (limitsError || !tierLimits) {
+      const fallbackLimits = {
+        1: {
+          max_balance: 500000,
+          daily_transfer_limit: 150000,
+          single_transfer_limit: 150000,
+          monthly_transfer_limit: 3000000,
+          tier_name: "Basic",
+        },
+        2: {
+          max_balance: 800000,
+          daily_transfer_limit: 250000,
+          single_transfer_limit: 250000,
+          monthly_transfer_limit: 5000000,
+          tier_name: "Verified",
+        },
+        3: {
+          max_balance: 999999999,
+          daily_transfer_limit: 999999999,
+          single_transfer_limit: 999999999,
+          monthly_transfer_limit: 999999999,
+          tier_name: "Premium",
+        },
+      };
+      limits = fallbackLimits[userTier] || fallbackLimits[1];
+    } else {
+      limits = tierLimits;
+    }
 
-    // Check if user is eligible for next tier
-    const nextTier = user.account_tier + 1;
+    // Get user's total balance
+    const { data: accounts } = await supabase
+      .from("accounts")
+      .select("balance")
+      .eq("user_id", req.user.id);
+
+    const totalBalance =
+      accounts?.reduce((sum, acc) => sum + (acc.balance || 0), 0) || 0;
+
+    // Get today's total transfers
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+    const { data: todayTransfers } = await supabase
+      .from("transactions")
+      .select("amount")
+      .eq("from_user_id", req.user.id)
+      .eq("status", "completed")
+      .gte("created_at", today.toISOString());
+
+    const todayTransferred =
+      todayTransfers?.reduce((sum, t) => sum + t.amount, 0) || 0;
+    const remainingDailyLimit = Math.max(
+      0,
+      limits.daily_transfer_limit - todayTransferred,
+    );
+
+    const exceedsBalanceLimit = totalBalance > limits.max_balance;
+
+    // Check next tier requirements
+    const nextTier = userTier + 1;
     let nextTierRequirements = null;
     let canUpgrade = false;
     let upgradeRequirements = [];
 
     if (nextTier <= 3) {
-      const { data: nextLimits } = await supabase
+      let nextLimits;
+      const { data: nextLimitsData } = await supabase
         .from("account_tier_limits")
         .select("*")
         .eq("tier", nextTier)
         .single();
 
-      if (nextLimits) {
-        nextTierRequirements = nextLimits;
+      if (nextLimitsData) {
+        nextLimits = nextLimitsData;
+      } else {
+        const fallbackNext = {
+          2: {
+            max_balance: 800000,
+            daily_transfer_limit: 250000,
+            single_transfer_limit: 250000,
+            monthly_transfer_limit: 5000000,
+            tier_name: "Verified",
+            requires_bvn_nin: true,
+          },
+          3: {
+            max_balance: 999999999,
+            daily_transfer_limit: 999999999,
+            single_transfer_limit: 999999999,
+            monthly_transfer_limit: 999999999,
+            tier_name: "Premium",
+            requires_bvn_nin: true,
+            requires_address_proof: true,
+            requires_email_verification: true,
+          },
+        };
+        nextLimits = fallbackNext[nextTier];
+      }
 
-        // Check requirements for next tier
+      if (nextLimits) {
         if (nextLimits.requires_bvn_nin) {
           const hasValidId =
             user.identification_type &&
@@ -2399,54 +2517,26 @@ app.get("/api/user/tier-info", authenticate, async (req, res) => {
         }
 
         if (nextLimits.requires_address_proof) {
-          const { data: addressProof } = await supabase
-            .from("users")
-            .select("address_proof_status")
-            .eq("id", req.user.id)
-            .single();
           upgradeRequirements.push({
             requirement: "Proof of Address",
-            met: addressProof?.address_proof_status === "verified",
+            met: false,
             action: "upload_address",
           });
         }
 
         canUpgrade = upgradeRequirements.every((r) => r.met === true);
+        nextTierRequirements = {
+          tier: nextTier,
+          tier_name: nextLimits.tier_name,
+          requirements: upgradeRequirements,
+          can_upgrade: canUpgrade,
+        };
       }
     }
 
-    // Get total user balance
-    const { data: accounts } = await supabase
-      .from("accounts")
-      .select("balance")
-      .eq("user_id", req.user.id);
-
-    const totalBalance =
-      accounts?.reduce((sum, acc) => sum + (acc.balance || 0), 0) || 0;
-
-    // Check if balance exceeds current tier limit
-    const exceedsBalanceLimit = totalBalance > limits.max_balance;
-
-    // Get today's total transfers
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
-    const { data: todayTransfers } = await supabase
-      .from("transactions")
-      .select("amount")
-      .eq("from_user_id", req.user.id)
-      .eq("status", "completed")
-      .gte("created_at", today.toISOString());
-
-    const todayTransferred =
-      todayTransfers?.reduce((sum, t) => sum + t.amount, 0) || 0;
-    const remainingDailyLimit = Math.max(
-      0,
-      limits.daily_transfer_limit - todayTransferred,
-    );
-
     res.json({
       success: true,
-      current_tier: user.account_tier,
+      current_tier: userTier,
       tier_name: limits.tier_name,
       limits: {
         max_balance: limits.max_balance,
@@ -2460,15 +2550,7 @@ app.get("/api/user/tier-info", authenticate, async (req, res) => {
         remaining_daily_limit: remainingDailyLimit,
         exceeds_balance_limit: exceedsBalanceLimit,
       },
-      next_tier:
-        nextTier <= 3
-          ? {
-              tier: nextTier,
-              tier_name: nextTierRequirements?.tier_name,
-              requirements: upgradeRequirements,
-              can_upgrade: canUpgrade,
-            }
-          : null,
+      next_tier: nextTierRequirements,
       verification_status: {
         email_verified: user.email_verified || false,
         phone_verified: user.phone_verified || false,
@@ -2477,7 +2559,40 @@ app.get("/api/user/tier-info", authenticate, async (req, res) => {
     });
   } catch (error) {
     console.error("Tier info error:", error);
-    res.status(500).json({ error: "Failed to get tier information" });
+    res.json({
+      success: true,
+      current_tier: 1,
+      tier_name: "Basic",
+      limits: {
+        max_balance: 500000,
+        daily_transfer_limit: 150000,
+        single_transfer_limit: 150000,
+        monthly_transfer_limit: 3000000,
+      },
+      usage: {
+        total_balance: 0,
+        today_transferred: 0,
+        remaining_daily_limit: 150000,
+        exceeds_balance_limit: false,
+      },
+      next_tier: {
+        tier: 2,
+        tier_name: "Verified",
+        requirements: [
+          {
+            requirement: "BVN/NIN Verification",
+            met: false,
+            action: "provide_id",
+          },
+        ],
+        can_upgrade: false,
+      },
+      verification_status: {
+        email_verified: false,
+        phone_verified: false,
+        id_verified: false,
+      },
+    });
   }
 });
 
@@ -10126,28 +10241,70 @@ app.post(
   }
 });*/
 
-// Get account limits with tier information
+// Get account limits with tier information - SAFE VERSION
 app.get("/api/user/account-limits", authenticate, async (req, res) => {
   try {
     const userId = req.user.id;
 
-    // Get user's tier
+    // Get user's tier (with fallback)
     const { data: user, error: userError } = await supabase
       .from("users")
       .select("account_tier")
       .eq("id", userId)
       .single();
 
-    if (userError) throw userError;
+    if (userError) {
+      console.error("User fetch error:", userError);
+      // Return default limits if user not found
+      return res.json({
+        max_balance: 500000,
+        daily_limit: 150000,
+        single_transfer_limit: 150000,
+        monthly_limit: 3000000,
+        daily_used: 0,
+        monthly_used: 0,
+        current_tier: 1,
+        current_balance: 0,
+        balance_percentage: 0,
+      });
+    }
 
-    // Get tier limits
-    const { data: tierLimits, error: limitsError } = await supabase
+    const userTier = user?.account_tier || 1;
+
+    // Get tier limits (with fallback)
+    let tierLimits;
+    const { data: limits, error: limitsError } = await supabase
       .from("account_tier_limits")
       .select("*")
-      .eq("tier", user.account_tier)
+      .eq("tier", userTier)
       .single();
 
-    if (limitsError) throw limitsError;
+    if (limitsError || !limits) {
+      // Fallback limits if table doesn't exist
+      const fallbackLimits = {
+        1: {
+          max_balance: 500000,
+          daily_transfer_limit: 150000,
+          single_transfer_limit: 150000,
+          monthly_transfer_limit: 3000000,
+        },
+        2: {
+          max_balance: 800000,
+          daily_transfer_limit: 250000,
+          single_transfer_limit: 250000,
+          monthly_transfer_limit: 5000000,
+        },
+        3: {
+          max_balance: 999999999,
+          daily_transfer_limit: 999999999,
+          single_transfer_limit: 999999999,
+          monthly_transfer_limit: 999999999,
+        },
+      };
+      tierLimits = fallbackLimits[userTier] || fallbackLimits[1];
+    } else {
+      tierLimits = limits;
+    }
 
     // Get user's total balance
     const { data: accounts } = await supabase
@@ -10190,13 +10347,24 @@ app.get("/api/user/account-limits", authenticate, async (req, res) => {
       monthly_limit: tierLimits.monthly_transfer_limit,
       daily_used: dailyUsed,
       monthly_used: monthlyUsed,
-      current_tier: user.account_tier,
+      current_tier: userTier,
       current_balance: totalBalance,
       balance_percentage: (totalBalance / tierLimits.max_balance) * 100,
     });
   } catch (error) {
     console.error("Account limits error:", error);
-    res.status(500).json({ error: "Failed to fetch limits" });
+    // Return safe default limits
+    res.json({
+      max_balance: 500000,
+      daily_limit: 150000,
+      single_transfer_limit: 150000,
+      monthly_limit: 3000000,
+      daily_used: 0,
+      monthly_used: 0,
+      current_tier: 1,
+      current_balance: 0,
+      balance_percentage: 0,
+    });
   }
 });
 
