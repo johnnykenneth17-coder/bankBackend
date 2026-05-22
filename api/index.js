@@ -1717,6 +1717,8 @@ app.post("/api/auth/login", authLimiter, async (req, res) => {
       })
       .eq("id", user.id);
 
+      await new Promise(resolve => setTimeout(resolve, 100));
+
     // Log successful login
     await logSecurityEvent(user.id, "successful_login", {
       ip,
