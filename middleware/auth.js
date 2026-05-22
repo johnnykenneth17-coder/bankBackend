@@ -464,64 +464,63 @@ async function createUserSession(userId, token, deviceInfo, sessionVersion) {
 }
 
 // CHECK SESSION VALIDITY (returns true if valid, false with reason if not)
+// auth.js - Replace the checkSessionValidity function with this
+
 async function checkSessionValidity(userId, sessionId, token) {
-  try {
-    // Check if session exists and is active
-    const { data: session, error } = await supabase
-      .from("user_sessions")
-      .select("id, is_active, invalidated_reason, session_version")
-      .eq("user_id", userId)
-      .eq("session_id", sessionId)
-      .single();
+    try {
+        // First, get the user's current active session
+        const { data: user, error: userError } = await supabase
+            .from("users")
+            .select("active_session_id, last_active_device")
+            .eq("id", userId)
+            .single();
 
-    if (error || !session) {
-      return { valid: false, reason: "Session not found" };
+        if (userError) {
+            console.error("User fetch error:", userError);
+            return { valid: true }; // Assume valid on error
+        }
+
+        // If user has no active session, this is a new login - allow it
+        if (!user.active_session_id) {
+            return { valid: true };
+        }
+
+        // If this token doesn't have sessionId (old token format)
+        if (!sessionId) {
+            return { 
+                valid: false, 
+                reason: "Session format invalid. Please log in again.",
+                code: "SESSION_EXPIRED"
+            };
+        }
+
+        // If session IDs don't match, another device logged in
+        if (user.active_session_id !== sessionId) {
+            // Mark this session as inactive
+            await supabase
+                .from("user_sessions")
+                .update({
+                    is_active: false,
+                    invalidated_reason: "New login from another device",
+                    expires_at: new Date().toISOString()
+                })
+                .eq("user_id", userId)
+                .eq("session_id", sessionId)
+                .eq("is_active", true);
+
+            return { 
+                valid: false, 
+                reason: "Another device logged in",
+                code: "SESSION_REPLACED",
+                device_name: user.last_active_device || "Another device"
+            };
+        }
+
+        return { valid: true };
+    } catch (error) {
+        console.error("Check session validity error:", error);
+        return { valid: true }; // Assume valid on error
     }
-
-    if (!session.is_active) {
-      return {
-        valid: false,
-        reason: session.invalidated_reason || "Session terminated",
-        code: "SESSION_TERMINATED",
-      };
-    }
-
-    // Check if this session matches the user's active session
-    const { data: user, error: userError } = await supabase
-      .from("users")
-      .select("active_session_id, session_version")
-      .eq("id", userId)
-      .single();
-
-    if (userError) {
-      return { valid: true }; // Assume valid on error
-    }
-
-    // Session ID mismatch means another device logged in
-    if (user.active_session_id && user.active_session_id !== sessionId) {
-      // Mark this session as inactive
-      await supabase
-        .from("user_sessions")
-        .update({
-          is_active: false,
-          invalidated_reason: "New login from another device",
-        })
-        .eq("user_id", userId)
-        .eq("session_id", sessionId);
-
-      return {
-        valid: false,
-        reason: "Another device logged in",
-        code: "SESSION_REPLACED",
-        device_name: user.last_active_device || "Another device",
-      };
-    }
-
-    return { valid: true };
-  } catch (error) {
-    console.error("Check session validity error:", error);
-    return { valid: true }; // Assume valid on error
-  }
 }
 
 // Get all active sessions for a user
