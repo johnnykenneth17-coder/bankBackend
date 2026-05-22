@@ -464,9 +464,67 @@ async function createUserSession(userId, token, deviceInfo, sessionVersion) {
 }
 
 // CHECK SESSION VALIDITY (returns true if valid, false with reason if not)
-// auth.js - Replace the checkSessionValidity function with this
-
 async function checkSessionValidity(userId, sessionId, token) {
+  try {
+    // Check if session exists and is active
+    const { data: session, error } = await supabase
+      .from("user_sessions")
+      .select("id, is_active, invalidated_reason, session_version")
+      .eq("user_id", userId)
+      .eq("session_id", sessionId)
+      .single();
+
+    if (error || !session) {
+      return { valid: false, reason: "Session not found" };
+    }
+
+    if (!session.is_active) {
+      return {
+        valid: false,
+        reason: session.invalidated_reason || "Session terminated",
+        code: "SESSION_TERMINATED",
+      };
+    }
+
+    // Check if this session matches the user's active session
+    const { data: user, error: userError } = await supabase
+      .from("users")
+      .select("active_session_id, session_version")
+      .eq("id", userId)
+      .single();
+
+    if (userError) {
+      return { valid: true }; // Assume valid on error
+    }
+
+    // Session ID mismatch means another device logged in
+    if (user.active_session_id && user.active_session_id !== sessionId) {
+      // Mark this session as inactive
+      await supabase
+        .from("user_sessions")
+        .update({
+          is_active: false,
+          invalidated_reason: "New login from another device",
+        })
+        .eq("user_id", userId)
+        .eq("session_id", sessionId);
+
+      return {
+        valid: false,
+        reason: "Another device logged in",
+        code: "SESSION_REPLACED",
+        device_name: user.last_active_device || "Another device",
+      };
+    }
+
+    return { valid: true };
+  } catch (error) {
+    console.error("Check session validity error:", error);
+    return { valid: true }; // Assume valid on error
+  }
+}
+
+/* async function checkSessionValidity(userId, sessionId, token) {
     try {
         // First, get the user's current active session
         const { data: user, error: userError } = await supabase
@@ -521,7 +579,7 @@ async function checkSessionValidity(userId, sessionId, token) {
         console.error("Check session validity error:", error);
         return { valid: true }; // Assume valid on error
     }
-}
+} */
 
 // Get all active sessions for a user
 async function getUserActiveSessions(userId) {
