@@ -1441,7 +1441,7 @@ app.post("/api/auth/login", authLimiter, async (req, res) => {
     }
 
     // Generate token with device info
-    /*const token = jwt.sign(
+    const token = jwt.sign(
       {
         userId: user.id,
         email: user.email,
@@ -1453,7 +1453,7 @@ app.post("/api/auth/login", authLimiter, async (req, res) => {
       { expiresIn: process.env.JWT_EXPIRE },
     );
 
-    res.json({
+    /*res.json({
       token,
       user: {
         id: user.id,
@@ -1466,11 +1466,11 @@ app.post("/api/auth/login", authLimiter, async (req, res) => {
       },
     });*/
 
-    const token = jwt.sign(
+    /*const token = jwt.sign(
       { userId: user.id, email: user.email, role: user.role },
       process.env.JWT_SECRET,
       { expiresIn: process.env.JWT_EXPIRE },
-    );
+    );*/
 
     // Get device info
     const deviceInfo = getDeviceInfo(req);
