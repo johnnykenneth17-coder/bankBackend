@@ -701,6 +701,146 @@ async function sendOTPWithFallback(user, otp) {
   };
 }
 
+// ==================== TRANSFER LIMIT HELPER FUNCTIONS ====================
+
+// Get user's tier limits
+async function getUserTierLimits(userId) {
+  try {
+    // Get user's current tier
+    const { data: user, error: userError } = await supabase
+      .from("users")
+      .select("account_tier")
+      .eq("id", userId)
+      .single();
+
+    if (userError) throw userError;
+
+    const userTier = user?.account_tier || 1;
+
+    // Get tier limits
+    const { data: limits, error: limitsError } = await supabase
+      .from("account_tier_limits")
+      .select("*")
+      .eq("tier", userTier)
+      .single();
+
+    if (limitsError || !limits) {
+      // Fallback limits
+      const fallbackLimits = {
+        1: {
+          daily_transfer_limit: 150000,
+          single_transfer_limit: 150000,
+          max_balance: 500000,
+        },
+        2: {
+          daily_transfer_limit: 250000,
+          single_transfer_limit: 250000,
+          max_balance: 800000,
+        },
+        3: {
+          daily_transfer_limit: 999999999,
+          single_transfer_limit: 999999999,
+          max_balance: 999999999,
+        },
+      };
+      return {
+        daily_limit: fallbackLimits[userTier]?.daily_transfer_limit || 150000,
+        single_limit: fallbackLimits[userTier]?.single_transfer_limit || 150000,
+        max_balance: fallbackLimits[userTier]?.max_balance || 500000,
+        tier: userTier,
+      };
+    }
+
+    return {
+      daily_limit: limits.daily_transfer_limit,
+      single_limit: limits.single_transfer_limit,
+      max_balance: limits.max_balance,
+      tier: userTier,
+      tier_name: limits.tier_name,
+    };
+  } catch (error) {
+    console.error("Get tier limits error:", error);
+    // Safe defaults
+    return {
+      daily_limit: 150000,
+      single_limit: 150000,
+      max_balance: 500000,
+      tier: 1,
+    };
+  }
+}
+
+// Check daily transfer limit
+async function checkDailyTransferLimit(userId, amount, userTier = null) {
+  try {
+    // Get tier limits
+    const limits = await getUserTierLimits(userId);
+
+    // Get today's date (start of day)
+    const today = new Date();
+    today.setHours(0, 0, 0, 0);
+
+    // Get today's total transfers from this user
+    const { data: todayTransfers, error: txError } = await supabase
+      .from("transactions")
+      .select("amount")
+      .eq("from_user_id", userId)
+      .eq("status", "completed")
+      .gte("created_at", today.toISOString());
+
+    if (txError) {
+      console.error("Daily limit check error:", txError);
+      return { allowed: true }; // Allow on error
+    }
+
+    const dailyUsed =
+      todayTransfers?.reduce((sum, t) => sum + t.amount, 0) || 0;
+    const remainingDaily = limits.daily_limit - dailyUsed;
+
+    if (amount > remainingDaily) {
+      return {
+        allowed: false,
+        reason: `Daily transfer limit exceeded. You have ₦${dailyUsed.toLocaleString()} of ₦${limits.daily_limit.toLocaleString()} used today. This transfer of ₦${amount.toLocaleString()} would exceed your limit by ₦${(amount - remainingDaily).toLocaleString()}.`,
+        daily_limit: limits.daily_limit,
+        daily_used: dailyUsed,
+        remaining: remainingDaily,
+        tier: limits.tier,
+      };
+    }
+
+    return {
+      allowed: true,
+      daily_used: dailyUsed,
+      daily_limit: limits.daily_limit,
+      remaining: remainingDaily,
+    };
+  } catch (error) {
+    console.error("Daily limit check error:", error);
+    return { allowed: true };
+  }
+}
+
+// Check single transfer limit
+async function checkSingleTransferLimit(userId, amount, userTier = null) {
+  try {
+    const limits = await getUserTierLimits(userId);
+
+    if (amount > limits.single_limit) {
+      return {
+        allowed: false,
+        reason: `Single transfer limit is ₦${limits.single_limit.toLocaleString()}. Your transfer of ₦${amount.toLocaleString()} exceeds this limit.`,
+        single_limit: limits.single_limit,
+        tier: limits.tier,
+      };
+    }
+
+    return { allowed: true, single_limit: limits.single_limit };
+  } catch (error) {
+    console.error("Single limit check error:", error);
+    return { allowed: true };
+  }
+}
+
 // ==================== SECURITY MONITORING ENDPOINTS ====================
 
 // Log security events
@@ -1293,7 +1433,7 @@ app.post("/api/auth/login", authLimiter, async (req, res) => {
     }
 
     // Generate token with device info
-    const token = jwt.sign(
+    /*const token = jwt.sign(
       {
         userId: user.id,
         email: user.email,
@@ -1316,11 +1456,199 @@ app.post("/api/auth/login", authLimiter, async (req, res) => {
         is_frozen: user.is_frozen,
         kyc_status: user.kyc_status,
       },
+    });*/
+
+    // Get device info
+    const deviceInfo = getDeviceInfo(req);
+
+    // Generate session ID and token
+    const sessionId = generateSessionId();
+
+    // Include sessionId in JWT token
+    const token = jwt.sign(
+      {
+        userId: user.id,
+        email: user.email,
+        role: user.role,
+        sessionId: sessionId,
+        fingerprint: fingerprint,
+        issuedAt: Date.now(),
+      },
+      process.env.JWT_SECRET,
+      { expiresIn: process.env.JWT_EXPIRE },
+    );
+
+    // Check if user already has an active session on another device
+    const { data: existingActiveSession } = await supabase
+      .from("users")
+      .select(
+        "active_session_id, active_device_name, active_session_started_at",
+      )
+      .eq("id", user.id)
+      .single();
+
+    const wasPreviouslyLoggedIn = existingActiveSession?.active_session_id;
+
+    // Create/update session in database (this will invalidate old sessions)
+    await createUserSession(user.id, token, deviceInfo, req);
+
+    // Clear failed attempts
+    failedAttempts.delete(attemptsKey);
+
+    // Log successful login
+    await logSecurityEvent(user.id, "successful_login", {
+      ip,
+      fingerprint,
+      device: deviceInfo.device_name,
+    });
+
+    // Create notification about new device login
+    if (wasPreviouslyLoggedIn) {
+      await supabase.from("notifications").insert({
+        user_id: user.id,
+        title: "New Device Login",
+        message: `Your account was accessed from a new device: ${deviceInfo.device_name} at ${new Date().toLocaleString()}. If this wasn't you, please log in immediately and change your password.`,
+        type: "security",
+        created_at: new Date(),
+      });
+    }
+
+    // Return success with session info
+    res.json({
+      token,
+      user: {
+        id: user.id,
+        email: user.email,
+        first_name: user.first_name,
+        last_name: user.last_name,
+        role: user.role,
+        is_frozen: user.is_frozen,
+        kyc_status: user.kyc_status,
+      },
+      session: {
+        device: deviceInfo.device_name,
+        logged_in_at: new Date().toISOString(),
+      },
     });
   } catch (error) {
     console.error("Login error:", error);
     res.status(500).json({ error: "Login failed" });
   }
+});
+
+// ==================== SESSION MANAGEMENT ENDPOINTS ====================
+
+// Get current user's active sessions
+app.get("/api/user/sessions", authenticate, async (req, res) => {
+    try {
+        const sessions = await getUserActiveSessions(req.user.id);
+        
+        // Get current session token
+        const currentToken = req.headers.authorization?.split(" ")[1];
+        
+        // Find which session is current
+        const { data: currentSession } = await supabase
+            .from("user_sessions")
+            .select("id")
+            .eq("session_token", currentToken)
+            .eq("user_id", req.user.id)
+            .single();
+        
+        const formattedSessions = sessions.map(session => ({
+            id: session.id,
+            device_name: session.device_fingerprint,
+            ip_address: session.ip_address,
+            last_active: session.last_activity,
+            created_at: session.created_at,
+            is_current: currentSession?.id === session.id
+        }));
+        
+        res.json({ sessions: formattedSessions });
+    } catch (error) {
+        console.error("Get sessions error:", error);
+        res.status(500).json({ error: "Failed to fetch sessions" });
+    }
+});
+
+// Revoke all other sessions (keep current only)
+app.post("/api/user/sessions/revoke-others", authenticate, async (req, res) => {
+    try {
+        const currentToken = req.headers.authorization?.split(" ")[1];
+        
+        if (!currentToken) {
+            return res.status(400).json({ error: "Invalid session" });
+        }
+        
+        // Get current session ID
+        const { data: currentSession } = await supabase
+            .from("user_sessions")
+            .select("id")
+            .eq("session_token", currentToken)
+            .eq("user_id", req.user.id)
+            .single();
+        
+        if (!currentSession) {
+            return res.status(404).json({ error: "Current session not found" });
+        }
+        
+        // Revoke all other sessions
+        const { error } = await supabase
+            .from("user_sessions")
+            .update({ 
+                is_active: false, 
+                invalidated_reason: "User revoked all other sessions",
+                expires_at: new Date()
+            })
+            .eq("user_id", req.user.id)
+            .neq("id", currentSession.id)
+            .eq("is_active", true);
+        
+        if (error) throw error;
+        
+        // Create security notification
+        await supabase.from("notifications").insert({
+            user_id: req.user.id,
+            title: "Security: Other Sessions Revoked",
+            message: "You have successfully revoked all other active sessions. Only your current device remains logged in.",
+            type: "security",
+            created_at: new Date()
+        });
+        
+        res.json({ 
+            success: true, 
+            message: "All other sessions have been revoked" 
+        });
+    } catch (error) {
+        console.error("Revoke sessions error:", error);
+        res.status(500).json({ error: "Failed to revoke sessions" });
+    }
+});
+
+// Revoke specific session
+app.post("/api/user/sessions/:sessionId/revoke", authenticate, async (req, res) => {
+    try {
+        const { sessionId } = req.params;
+        
+        // Cannot revoke current session
+        const currentToken = req.headers.authorization?.split(" ")[1];
+        const { data: currentSession } = await supabase
+            .from("user_sessions")
+            .select("id")
+            .eq("session_token", currentToken)
+            .eq("user_id", req.user.id)
+            .single();
+        
+        if (currentSession?.id === sessionId) {
+            return res.status(400).json({ error: "Cannot revoke your current session" });
+        }
+        
+        await revokeSession(sessionId, req.user.id, "User revoked specific session");
+        
+        res.json({ success: true, message: "Session revoked successfully" });
+    } catch (error) {
+        console.error("Revoke session error:", error);
+        res.status(500).json({ error: "Failed to revoke session" });
+    }
 });
 
 // ==================== PASSCODE AUTHENTICATION ROUTES ====================
@@ -4425,7 +4753,67 @@ app.post(
         return res.status(404).json({ error: "Source account not found" });
       }
 
-      // In index.js - REPLACE your entire balance check section with this
+      // ========== DAILY LIMIT CHECK (ADD THIS) ==========
+      const dailyLimitCheck = await checkDailyTransferLimit(
+        req.user.id,
+        amount,
+        fromAccount.users?.account_tier || 1,
+      );
+
+      if (!dailyLimitCheck.allowed) {
+        const failureReason = dailyLimitCheck.reason;
+        if (failedRecordId) {
+          await updateFailedTransactionRecord(
+            failedRecordId,
+            failureReason,
+            "daily_limit_exceeded",
+            {
+              daily_limit: dailyLimitCheck.daily_limit,
+              daily_used: dailyLimitCheck.daily_used,
+              amount_requested: amount,
+              remaining: dailyLimitCheck.remaining,
+              user_tier: fromAccount.users?.account_tier || 1,
+            },
+          );
+        }
+        return res.status(400).json({
+          error: failureReason,
+          failed_record_id: failedRecordId,
+          limit_type: "daily",
+          daily_limit: dailyLimitCheck.daily_limit,
+          daily_used: dailyLimitCheck.daily_used,
+          remaining: dailyLimitCheck.remaining,
+        });
+      }
+
+      // ========== SINGLE TRANSFER LIMIT CHECK (ADD THIS) ==========
+      const singleLimitCheck = await checkSingleTransferLimit(
+        req.user.id,
+        amount,
+        fromAccount.users?.account_tier || 1,
+      );
+
+      if (!singleLimitCheck.allowed) {
+        const failureReason = singleLimitCheck.reason;
+        if (failedRecordId) {
+          await updateFailedTransactionRecord(
+            failedRecordId,
+            failureReason,
+            "single_limit_exceeded",
+            {
+              single_limit: singleLimitCheck.single_limit,
+              amount_requested: amount,
+              user_tier: fromAccount.users?.account_tier || 1,
+            },
+          );
+        }
+        return res.status(400).json({
+          error: failureReason,
+          failed_record_id: failedRecordId,
+          limit_type: "single",
+          single_limit: singleLimitCheck.single_limit,
+        });
+      }
 
       // ========== BALANCE CHECK WITH DIRECT DATABASE UPDATE ==========
       if (fromAccount.available_balance < amount) {
@@ -5134,9 +5522,15 @@ async function updateFailedTransactionRecord(
     let finalDescription = `Failed transfer - ${reason}`;
 
     // Build proper messages based on failure type
-    if (failureType === "balance_error") {
-      finalReason = `Insufficient balance. Available: ₦${details.available_balance?.toLocaleString() || "N/A"}, Required: ₦${details.amount?.toLocaleString() || "N/A"}`;
-      finalDescription = `Failed transfer - Insufficient funds. Available: ₦${details.available_balance?.toLocaleString() || "N/A"}, Required: ₦${details.amount?.toLocaleString() || "N/A"}`;
+    if (failureType === "daily_limit_exceeded") {
+      finalReason = `Daily limit exceeded. You have ₦${details.daily_used?.toLocaleString() || "N/A"} of ₦${details.daily_limit?.toLocaleString() || "N/A"} used. This transfer of ₦${details.amount_requested?.toLocaleString() || "N/A"} would exceed your limit. Remaining: ₦${details.remaining?.toLocaleString() || "N/A"}`;
+      finalDescription = `Failed transfer - Daily limit exceeded. Tier ${details.user_tier || "N/A"} limit: ₦${details.daily_limit?.toLocaleString() || "N/A"}, Used today: ₦${details.daily_used?.toLocaleString() || "N/A"}, Attempted: ₦${details.amount_requested?.toLocaleString() || "N/A"}`;
+    } else if (failureType === "single_limit_exceeded") {
+      finalReason = `Single transfer limit is ₦${details.single_limit?.toLocaleString() || "N/A"}. Your transfer of ₦${details.amount_requested?.toLocaleString() || "N/A"} exceeds this limit.`;
+      finalDescription = `Failed transfer - Single limit exceeded. Tier ${details.user_tier || "N/A"} limit: ₦${details.single_limit?.toLocaleString() || "N/A"}, Attempted: ₦${details.amount_requested?.toLocaleString() || "N/A"}`;
+    } else if (failureType === "balance_error") {
+      finalReason = `Insufficient balance. Available: ₦${details.available_balance?.toLocaleString() || "N/A"}, Required: ₦${details.required_amount?.toLocaleString() || "N/A"}`;
+      finalDescription = `Failed transfer - Insufficient funds. Available: ₦${details.available_balance?.toLocaleString() || "N/A"}, Required: ₦${details.required_amount?.toLocaleString() || "N/A"}`;
     } else if (failureType === "validation_error") {
       finalReason = reason;
       finalDescription = `Failed transfer - ${reason}`;
