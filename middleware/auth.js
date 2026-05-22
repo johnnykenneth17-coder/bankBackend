@@ -290,7 +290,7 @@ function getDeviceInfo(req) {
 
 // ==================== FIXED: PROFESSIONAL SESSION VALIDATION ====================
 
-async function checkSessionValidity(userId, sessionId, token) {
+/*async function checkSessionValidity(userId, sessionId, token) {
   try {
     console.log(
       `[Session Check] Checking validity for user: ${userId}, sessionId: ${sessionId}`,
@@ -393,7 +393,7 @@ async function checkSessionValidity(userId, sessionId, token) {
     console.error("[Session Check] Error:", error);
     return { valid: true }; // Assume valid on error to prevent false logouts
   }
-}
+}*/
 
 // ==================== FIXED: INVALIDATE ALL USER SESSIONS ====================
 
@@ -636,7 +636,7 @@ const checkSingleDeviceSession = async (req, res, next) => {
   }
 };
 
-/* async function checkSessionValidity(userId, sessionId, token) {
+ async function checkSessionValidity(userId, sessionId, token) {
     try {
         // First, get the user's current active session
         const { data: user, error: userError } = await supabase
@@ -691,7 +691,7 @@ const checkSingleDeviceSession = async (req, res, next) => {
         console.error("Check session validity error:", error);
         return { valid: true }; // Assume valid on error
     }
-} */
+} 
 
 // ==================== FIXED: GET USER ACTIVE SESSIONS ====================
 
