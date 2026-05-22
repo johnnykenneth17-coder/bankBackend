@@ -238,185 +238,285 @@ const startLockCleanup = () => {
 // Add these functions to auth.js
 
 // Generate unique session ID
-function generateSessionId() {
+/*function generateSessionId() {
   return crypto.randomBytes(32).toString("hex");
+}*/
+
+
+// Generate unique session ID
+function generateSessionId(userId) {
+    const timestamp = Date.now().toString(36);
+    const random = crypto.randomBytes(16).toString('hex');
+    const version = Date.now();
+    return `${userId.substring(0, 8)}_${timestamp}_${random}_${version}`;
 }
 
 // Get device info for tracking
 function getDeviceInfo(req) {
-  const userAgent = req.headers["user-agent"] || "Unknown";
-  const ip =
-    req.ip ||
-    req.connection?.remoteAddress ||
-    req.headers["x-forwarded-for"] ||
-    "Unknown";
+    const userAgent = req.headers["user-agent"] || "Unknown";
+    const ip = req.ip ||
+        req.connection?.remoteAddress ||
+        req.headers["x-forwarded-for"] ||
+        "Unknown";
 
-  // Parse user agent for device type
-  let deviceType = "Unknown";
-  let browser = "Unknown";
-  let os = "Unknown";
+    let deviceType = "Unknown";
+    let browser = "Unknown";
+    let os = "Unknown";
 
-  if (userAgent.includes("Mobile")) deviceType = "Mobile";
-  else if (userAgent.includes("Tablet")) deviceType = "Tablet";
-  else deviceType = "Desktop";
+    if (userAgent.includes("Mobile")) deviceType = "Mobile";
+    else if (userAgent.includes("Tablet")) deviceType = "Tablet";
+    else deviceType = "Desktop";
 
-  if (userAgent.includes("Chrome")) browser = "Chrome";
-  else if (userAgent.includes("Firefox")) browser = "Firefox";
-  else if (userAgent.includes("Safari")) browser = "Safari";
-  else if (userAgent.includes("Edge")) browser = "Edge";
+    if (userAgent.includes("Chrome")) browser = "Chrome";
+    else if (userAgent.includes("Firefox")) browser = "Firefox";
+    else if (userAgent.includes("Safari")) browser = "Safari";
+    else if (userAgent.includes("Edge")) browser = "Edge";
 
-  if (userAgent.includes("Windows")) os = "Windows";
-  else if (userAgent.includes("Mac")) os = "macOS";
-  else if (userAgent.includes("Linux")) os = "Linux";
-  else if (userAgent.includes("Android")) os = "Android";
-  else if (userAgent.includes("iOS")) os = "iOS";
+    if (userAgent.includes("Windows")) os = "Windows";
+    else if (userAgent.includes("Mac")) os = "macOS";
+    else if (userAgent.includes("Linux")) os = "Linux";
+    else if (userAgent.includes("Android")) os = "Android";
+    else if (userAgent.includes("iOS")) os = "iOS";
 
-  return {
-    device_name: `${deviceType} - ${browser} on ${os}`,
-    ip_address: ip,
-    user_agent: userAgent,
-    device_type: deviceType,
-    browser: browser,
-    os: os,
-  };
+    return {
+        device_name: `${deviceType} - ${browser} on ${os}`,
+        ip_address: ip,
+        user_agent: userAgent,
+        device_type: deviceType,
+        browser: browser,
+        os: os,
+    };
 }
 
-// Replace the entire checkSingleDeviceSession function
-const checkSingleDeviceSession = async (req, res, next) => {
-  try {
-    const authHeader = req.header("Authorization");
-    const token = authHeader?.replace("Bearer ", "");
-
-    if (!token) {
-      return res.status(401).json({ error: "Please authenticate" });
-    }
-
-    let decoded;
+// INVALIDATE ALL SESSIONS for a user (called before login)
+async function invalidateAllUserSessions(userId, reason = "New login from another device") {
     try {
-      decoded = jwt.verify(token, process.env.JWT_SECRET);
-    } catch (jwtError) {
-      return res.status(401).json({ error: "Invalid token" });
-    }
+        // Get all active sessions for logging
+        const { data: oldSessions } = await supabase
+            .from("user_sessions")
+            .select("id, session_id, device_name")
+            .eq("user_id", userId)
+            .eq("is_active", true);
 
-    // Get user with active session
-    const { data: user, error } = await supabase
-      .from("users")
-      .select("id, active_session_id, is_active, is_frozen")
-      .eq("id", decoded.userId)
-      .single();
+        if (oldSessions && oldSessions.length > 0) {
+            console.log(`Invalidating ${oldSessions.length} old session(s) for user ${userId}`);
+            
+            // Invalidate all sessions
+            const { error } = await supabase
+                .from("user_sessions")
+                .update({
+                    is_active: false,
+                    is_current: false,
+                    invalidated_reason: reason,
+                    expires_at: new Date().toISOString()
+                })
+                .eq("user_id", userId)
+                .eq("is_active", true);
 
-    if (error || !user) {
-      return res.status(401).json({ error: "User not found" });
-    }
+            if (error) {
+                console.error("Failed to invalidate sessions:", error);
+            }
 
-    // CRITICAL: Check if this token's session ID matches the active session
-    if (user.active_session_id && decoded.sessionId) {
-      if (user.active_session_id !== decoded.sessionId) {
-        // Mark this session as inactive
+            // Create notifications for old sessions (optional)
+            for (const session of oldSessions) {
+                await supabase.from("notifications").insert({
+                    user_id: userId,
+                    title: "Session Terminated",
+                    message: `Your session on ${session.device_name || "another device"} has been terminated due to a new login.`,
+                    type: "security",
+                    created_at: new Date().toISOString(),
+                });
+            }
+        }
+
+        // Clear active_session_id from users table
         await supabase
-          .from("user_sessions")
-          .update({
-            is_active: false,
-            is_current: false,
-            invalidated_reason: "New login from another device",
-          })
-          .eq("session_token", token);
+            .from("users")
+            .update({ 
+                active_session_id: null,
+                session_version: supabase.raw("session_version + 1")
+            })
+            .eq("id", userId);
 
-        return res.status(401).json({
-          error: "session_expired",
-          message:
-            "You have been logged out because a new login was detected on another device.",
-          code: "SESSION_REPLACED",
-        });
-      }
-    } else if (user.active_session_id && !decoded.sessionId) {
-      // Old token without session ID - invalidate it
-      return res.status(401).json({
-        error: "session_expired",
-        message: "Your session has expired. Please log in again.",
-        code: "SESSION_EXPIRED",
-      });
+        return oldSessions?.length || 0;
+    } catch (error) {
+        console.error("Invalidate sessions error:", error);
+        return 0;
     }
+}
 
-    // Update last activity
-    await supabase
-      .from("user_sessions")
-      .update({ last_activity: new Date() })
-      .eq("session_token", token);
+// MIDDLEWARE: Check single device session
+const checkSingleDeviceSession = async (req, res, next) => {
+    try {
+        const authHeader = req.header("Authorization");
+        const token = authHeader?.replace("Bearer ", "");
 
-    req.user = user;
-    req.token = token;
-    req.sessionId = decoded.sessionId;
-    next();
-  } catch (error) {
-    console.error("Session check error:", error.message);
-    res.status(401).json({ error: "Please authenticate" });
-  }
+        if (!token) {
+            return res.status(401).json({ error: "Please authenticate" });
+        }
+
+        let decoded;
+        try {
+            decoded = jwt.verify(token, process.env.JWT_SECRET);
+        } catch (jwtError) {
+            return res.status(401).json({ error: "Invalid token" });
+        }
+
+        // If token doesn't have sessionId, it's an old token
+        if (!decoded.sessionId) {
+            return res.status(401).json({
+                error: "session_expired",
+                message: "Your session has expired. Please log in again.",
+                code: "SESSION_EXPIRED"
+            });
+        }
+
+        // Check session validity
+        const { valid, reason, code, device_name } = await checkSessionValidity(
+            decoded.userId,
+            decoded.sessionId,
+            token
+        );
+
+        if (!valid) {
+            return res.status(401).json({
+                error: "session_expired",
+                message: reason,
+                code: code || "SESSION_INVALID",
+                device_name: device_name
+            });
+        }
+
+        // Update last activity
+        await supabase
+            .from("user_sessions")
+            .update({ last_activity: new Date().toISOString() })
+            .eq("session_token", token)
+            .eq("is_active", true);
+
+        req.user = { id: decoded.userId, email: decoded.email, role: decoded.role };
+        req.token = token;
+        req.sessionId = decoded.sessionId;
+        next();
+    } catch (error) {
+        console.error("Session check error:", error.message);
+        res.status(401).json({ error: "Please authenticate" });
+    }
 };
 
-// Create user session
-async function createUserSession(userId, token, deviceInfo) {
-  try {
-    const sessionId = generateSessionId();
-    const expiresAt = new Date();
-    expiresAt.setDate(expiresAt.getDate() + 7);
+// CREATE NEW SESSION
+async function createUserSession(userId, token, deviceInfo, sessionVersion) {
+    try {
+        const sessionId = generateSessionId(userId);
+        const expiresAt = new Date();
+        expiresAt.setDate(expiresAt.getDate() + 7); // 7 days expiry
 
-    // Get old session info for notification
-    const { data: oldUser } = await supabase
-      .from("users")
-      .select("active_session_id")
-      .eq("id", userId)
-      .single();
+        // First, invalidate all old sessions
+        await invalidateAllUserSessions(userId, "New login from another device");
 
-    const hadActiveSession = oldUser?.active_session_id;
+        // Insert new session
+        const { data: session, error: sessionError } = await supabase
+            .from("user_sessions")
+            .insert({
+                user_id: userId,
+                session_token: token,
+                session_id: sessionId,
+                device_fingerprint: deviceInfo.device_name,
+                device_name: deviceInfo.device_name,
+                ip_address: deviceInfo.ip_address,
+                user_agent: deviceInfo.user_agent,
+                expires_at: expiresAt.toISOString(),
+                is_active: true,
+                is_current: true,
+                session_version: sessionVersion,
+            })
+            .select()
+            .single();
 
-    // Insert new session
-    const { data: session, error: sessionError } = await supabase
-      .from("user_sessions")
-      .insert({
-        user_id: userId,
-        session_token: token,
-        session_id: sessionId,
-        device_fingerprint: deviceInfo.device_name,
-        device_name: deviceInfo.device_name,
-        ip_address: deviceInfo.ip_address,
-        user_agent: deviceInfo.user_agent,
-        expires_at: expiresAt,
-        is_active: true,
-        is_current: true,
-      })
-      .select()
-      .single();
+        if (sessionError) {
+            console.error("Session insert error:", sessionError);
+            throw sessionError;
+        }
 
-    if (sessionError) throw sessionError;
+        // Update user's active session
+        await supabase
+            .from("users")
+            .update({
+                active_session_id: sessionId,
+                last_active_device: deviceInfo.device_name,
+                active_session_started_at: new Date().toISOString(),
+                last_login: new Date().toISOString(),
+                session_version: sessionVersion,
+            })
+            .eq("id", userId);
 
-    // Update user's active session
-    await supabase
-      .from("users")
-      .update({
-        active_session_id: sessionId,
-        last_active_device: deviceInfo.device_name,
-        active_session_started_at: new Date(),
-        last_login: new Date(),
-      })
-      .eq("id", userId);
-
-    // Create notification if there was a previous session
-    if (hadActiveSession) {
-      await supabase.from("notifications").insert({
-        user_id: userId,
-        title: "Security Alert: New Device Login",
-        message: `Your account was accessed from a new device (${deviceInfo.device_name}). If this wasn't you, please log in immediately and change your password.`,
-        type: "security",
-        created_at: new Date(),
-      });
+        console.log(`New session created for user ${userId}: ${sessionId}`);
+        return { sessionId, session };
+    } catch (error) {
+        console.error("Create session error:", error);
+        throw error;
     }
+}
 
-    return { sessionId, session };
-  } catch (error) {
-    console.error("Create session error:", error);
-    throw error;
-  }
+// CHECK SESSION VALIDITY (returns true if valid, false with reason if not)
+async function checkSessionValidity(userId, sessionId, token) {
+    try {
+        // Check if session exists and is active
+        const { data: session, error } = await supabase
+            .from("user_sessions")
+            .select("id, is_active, invalidated_reason, session_version")
+            .eq("user_id", userId)
+            .eq("session_id", sessionId)
+            .single();
+
+        if (error || !session) {
+            return { valid: false, reason: "Session not found" };
+        }
+
+        if (!session.is_active) {
+            return { 
+                valid: false, 
+                reason: session.invalidated_reason || "Session terminated",
+                code: "SESSION_TERMINATED"
+            };
+        }
+
+        // Check if this session matches the user's active session
+        const { data: user, error: userError } = await supabase
+            .from("users")
+            .select("active_session_id, session_version")
+            .eq("id", userId)
+            .single();
+
+        if (userError) {
+            return { valid: true }; // Assume valid on error
+        }
+
+        // Session ID mismatch means another device logged in
+        if (user.active_session_id && user.active_session_id !== sessionId) {
+            // Mark this session as inactive
+            await supabase
+                .from("user_sessions")
+                .update({
+                    is_active: false,
+                    invalidated_reason: "New login from another device"
+                })
+                .eq("user_id", userId)
+                .eq("session_id", sessionId);
+
+            return { 
+                valid: false, 
+                reason: "Another device logged in",
+                code: "SESSION_REPLACED",
+                device_name: user.last_active_device || "Another device"
+            };
+        }
+
+        return { valid: true };
+    } catch (error) {
+        console.error("Check session validity error:", error);
+        return { valid: true }; // Assume valid on error
+    }
 }
 
 // Get all active sessions for a user
@@ -467,6 +567,41 @@ async function revokeSession(sessionId, userId, reason = "User initiated") {
   return true;
 }
 
+// REVOKE CURRENT SESSION (logout)
+async function revokeCurrentSession(userId, sessionId, token) {
+    try {
+        // Update session to inactive
+        const { error: sessionError } = await supabase
+            .from("user_sessions")
+            .update({
+                is_active: false,
+                is_current: false,
+                invalidated_reason: "User logged out",
+                expires_at: new Date().toISOString()
+            })
+            .eq("user_id", userId)
+            .eq("session_id", sessionId);
+
+        if (sessionError) {
+            console.error("Session revoke error:", sessionError);
+        }
+
+        // Clear user's active session
+        await supabase
+            .from("users")
+            .update({ 
+                active_session_id: null,
+                active_session_started_at: null
+            })
+            .eq("id", userId);
+
+        return true;
+    } catch (error) {
+        console.error("Revoke session error:", error);
+        return false;
+    }
+}
+
 // Export new functions
 module.exports = {
   authenticate,
@@ -480,7 +615,8 @@ module.exports = {
   checkSingleDeviceSession, // Add this
   createUserSession, // Add this
   getUserActiveSessions, // Add this
-  revokeSession, // Add this
+  revokeSession,
+  revokeCurrentSession, // Add this
   generateSessionId,
   getDeviceInfo,
 };
