@@ -165,6 +165,12 @@ const {
   preventConcurrentTransfer,
   releaseTransactionLock,
   startLockCleanup,
+   checkSingleDeviceSession,  // Add this
+    createUserSession,          // Add this
+    getUserActiveSessions,      // Add this
+    revokeSession,              // Add this
+    generateSessionId,          // Add this
+    getDeviceInfo 
 } = require("../middleware/auth"); // ← relative path from api/index.js
 
 // Start the lock cleanup
