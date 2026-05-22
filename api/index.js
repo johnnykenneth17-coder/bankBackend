@@ -165,16 +165,18 @@ const {
   preventConcurrentTransfer,
   releaseTransactionLock,
   startLockCleanup,
-   checkSingleDeviceSession,  // Add this
-    createUserSession,          // Add this
-    getUserActiveSessions,      // Add this
-    revokeSession,              // Add this
-    generateSessionId,          // Add this
-    getDeviceInfo 
+  checkSingleDeviceSession, // Add this
+  createUserSession, // Add this
+  getUserActiveSessions, // Add this
+  revokeSession, // Add this
+  generateSessionId, // Add this
+  getDeviceInfo,
 } = require("../middleware/auth"); // ← relative path from api/index.js
 
 // Start the lock cleanup
 startLockCleanup();
+
+let cleanupInterval = null;
 
 // Function to send push notification to user
 async function sendPushNotificationToUser(userId, title, body, data = {}) {
@@ -1464,39 +1466,77 @@ app.post("/api/auth/login", authLimiter, async (req, res) => {
       },
     });*/
 
-    // Get device info
-    const deviceInfo = getDeviceInfo(req);
-
-    // Generate session ID and token
-    const sessionId = generateSessionId();
-
-    // Include sessionId in JWT token
     const token = jwt.sign(
-      {
-        userId: user.id,
-        email: user.email,
-        role: user.role,
-        sessionId: sessionId,
-        fingerprint: fingerprint,
-        issuedAt: Date.now(),
-      },
+      { userId: user.id, email: user.email, role: user.role },
       process.env.JWT_SECRET,
       { expiresIn: process.env.JWT_EXPIRE },
     );
 
-    // Check if user already has an active session on another device
-    const { data: existingActiveSession } = await supabase
+    // Get device info
+    const deviceInfo = getDeviceInfo(req);
+
+    // ========== PUT THE NEW CODE HERE ==========
+    // RIGHT HERE - Before creating the session, invalidate all existing sessions
+
+    // CRITICAL: First, mark ALL existing sessions for this user as inactive
+    const { error: invalidateError } = await supabase
+      .from("user_sessions")
+      .update({
+        is_active: false,
+        is_current: false,
+        invalidated_reason: "New login from another device",
+      })
+      .eq("user_id", user.id)
+      .eq("is_active", true);
+
+    if (invalidateError) {
+      console.error("Failed to invalidate old sessions:", invalidateError);
+    }
+
+    // Clear the active_session_id from users table
+    await supabase
       .from("users")
-      .select(
-        "active_session_id, active_device_name, active_session_started_at",
-      )
-      .eq("id", user.id)
+      .update({ active_session_id: null })
+      .eq("id", user.id);
+
+    // THEN create the new session
+    const sessionId = generateSessionId();
+    const expiresAt = new Date();
+    expiresAt.setDate(expiresAt.getDate() + 7);
+
+    // Insert new session
+    const { data: newSession, error: sessionError } = await supabase
+      .from("user_sessions")
+      .insert({
+        user_id: user.id,
+        session_token: token,
+        session_id: sessionId,
+        device_fingerprint: deviceInfo.device_name,
+        device_name: deviceInfo.device_name,
+        ip_address: deviceInfo.ip_address,
+        user_agent: deviceInfo.user_agent,
+        expires_at: expiresAt,
+        is_active: true,
+        is_current: true,
+      })
+      .select()
       .single();
 
-    const wasPreviouslyLoggedIn = existingActiveSession?.active_session_id;
-
-    // Create/update session in database (this will invalidate old sessions)
-    await createUserSession(user.id, token, deviceInfo, req);
+    if (sessionError) {
+      console.error("Session insert error:", sessionError);
+    } else {
+      // Update user's active session ID
+      await supabase
+        .from("users")
+        .update({
+          active_session_id: sessionId,
+          last_active_device: deviceInfo.device_name,
+          active_session_started_at: new Date(),
+          last_login: new Date(),
+        })
+        .eq("id", user.id);
+    }
+    // ========== END OF NEW CODE ==========
 
     // Clear failed attempts
     failedAttempts.delete(attemptsKey);
@@ -1544,118 +1584,197 @@ app.post("/api/auth/login", authLimiter, async (req, res) => {
 
 // ==================== SESSION MANAGEMENT ENDPOINTS ====================
 
-// Get current user's active sessions
-app.get("/api/user/sessions", authenticate, async (req, res) => {
+// Add this route - it checks if the current session is still valid
+/*app.get("/api/auth/check-session", authenticate, async (req, res) => {
     try {
-        const sessions = await getUserActiveSessions(req.user.id);
+        const token = req.headers.authorization?.split(' ')[1];
+        const decoded = jwt.verify(token, process.env.JWT_SECRET);
         
-        // Get current session token
-        const currentToken = req.headers.authorization?.split(" ")[1];
-        
-        // Find which session is current
-        const { data: currentSession } = await supabase
-            .from("user_sessions")
-            .select("id")
-            .eq("session_token", currentToken)
-            .eq("user_id", req.user.id)
+        // Check if this session is still the active one
+        const { data: user, error } = await supabase
+            .from('users')
+            .select('active_session_id')
+            .eq('id', req.user.id)
             .single();
         
-        const formattedSessions = sessions.map(session => ({
-            id: session.id,
-            device_name: session.device_fingerprint,
-            ip_address: session.ip_address,
-            last_active: session.last_activity,
-            created_at: session.created_at,
-            is_current: currentSession?.id === session.id
-        }));
+        if (error) {
+            return res.json({ valid: true }); // Assume valid on error
+        }
         
-        res.json({ sessions: formattedSessions });
+        // If session ID doesn't match, it's invalid
+        if (user.active_session_id && decoded.sessionId && user.active_session_id !== decoded.sessionId) {
+            return res.json({ 
+                valid: false, 
+                reason: 'Another device logged in',
+                code: 'SESSION_REPLACED'
+            });
+        }
+        
+        res.json({ valid: true });
     } catch (error) {
-        console.error("Get sessions error:", error);
-        res.status(500).json({ error: "Failed to fetch sessions" });
+        res.json({ valid: true }); // Assume valid on error
     }
+});*/
+
+app.get("/api/auth/check-session", authenticate, async (req, res) => {
+  try {
+    const token = req.headers.authorization?.split(" ")[1];
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+
+    // Get user with active session
+    const { data: user, error } = await supabase
+      .from("users")
+      .select("active_session_id, last_active_device")
+      .eq("id", req.user.id)
+      .single();
+
+    if (error) {
+      return res.json({ valid: true });
+    }
+
+    // If session ID doesn't match, it's invalid
+    if (
+      user.active_session_id &&
+      decoded.sessionId &&
+      user.active_session_id !== decoded.sessionId
+    ) {
+      return res.json({
+        valid: false,
+        reason: "Another device logged in",
+        code: "SESSION_REPLACED",
+        device_name: user.last_active_device || "Another device",
+      });
+    }
+
+    res.json({ valid: true });
+  } catch (error) {
+    res.json({ valid: true });
+  }
+});
+
+// Get current user's active sessions
+app.get("/api/user/sessions", authenticate, async (req, res) => {
+  try {
+    const sessions = await getUserActiveSessions(req.user.id);
+
+    // Get current session token
+    const currentToken = req.headers.authorization?.split(" ")[1];
+
+    // Find which session is current
+    const { data: currentSession } = await supabase
+      .from("user_sessions")
+      .select("id")
+      .eq("session_token", currentToken)
+      .eq("user_id", req.user.id)
+      .single();
+
+    const formattedSessions = sessions.map((session) => ({
+      id: session.id,
+      device_name: session.device_fingerprint,
+      ip_address: session.ip_address,
+      last_active: session.last_activity,
+      created_at: session.created_at,
+      is_current: currentSession?.id === session.id,
+    }));
+
+    res.json({ sessions: formattedSessions });
+  } catch (error) {
+    console.error("Get sessions error:", error);
+    res.status(500).json({ error: "Failed to fetch sessions" });
+  }
 });
 
 // Revoke all other sessions (keep current only)
 app.post("/api/user/sessions/revoke-others", authenticate, async (req, res) => {
-    try {
-        const currentToken = req.headers.authorization?.split(" ")[1];
-        
-        if (!currentToken) {
-            return res.status(400).json({ error: "Invalid session" });
-        }
-        
-        // Get current session ID
-        const { data: currentSession } = await supabase
-            .from("user_sessions")
-            .select("id")
-            .eq("session_token", currentToken)
-            .eq("user_id", req.user.id)
-            .single();
-        
-        if (!currentSession) {
-            return res.status(404).json({ error: "Current session not found" });
-        }
-        
-        // Revoke all other sessions
-        const { error } = await supabase
-            .from("user_sessions")
-            .update({ 
-                is_active: false, 
-                invalidated_reason: "User revoked all other sessions",
-                expires_at: new Date()
-            })
-            .eq("user_id", req.user.id)
-            .neq("id", currentSession.id)
-            .eq("is_active", true);
-        
-        if (error) throw error;
-        
-        // Create security notification
-        await supabase.from("notifications").insert({
-            user_id: req.user.id,
-            title: "Security: Other Sessions Revoked",
-            message: "You have successfully revoked all other active sessions. Only your current device remains logged in.",
-            type: "security",
-            created_at: new Date()
-        });
-        
-        res.json({ 
-            success: true, 
-            message: "All other sessions have been revoked" 
-        });
-    } catch (error) {
-        console.error("Revoke sessions error:", error);
-        res.status(500).json({ error: "Failed to revoke sessions" });
+  try {
+    const currentToken = req.headers.authorization?.split(" ")[1];
+
+    if (!currentToken) {
+      return res.status(400).json({ error: "Invalid session" });
     }
+
+    // Get current session ID
+    const { data: currentSession } = await supabase
+      .from("user_sessions")
+      .select("id")
+      .eq("session_token", currentToken)
+      .eq("user_id", req.user.id)
+      .single();
+
+    if (!currentSession) {
+      return res.status(404).json({ error: "Current session not found" });
+    }
+
+    // Revoke all other sessions
+    const { error } = await supabase
+      .from("user_sessions")
+      .update({
+        is_active: false,
+        invalidated_reason: "User revoked all other sessions",
+        expires_at: new Date(),
+      })
+      .eq("user_id", req.user.id)
+      .neq("id", currentSession.id)
+      .eq("is_active", true);
+
+    if (error) throw error;
+
+    // Create security notification
+    await supabase.from("notifications").insert({
+      user_id: req.user.id,
+      title: "Security: Other Sessions Revoked",
+      message:
+        "You have successfully revoked all other active sessions. Only your current device remains logged in.",
+      type: "security",
+      created_at: new Date(),
+    });
+
+    res.json({
+      success: true,
+      message: "All other sessions have been revoked",
+    });
+  } catch (error) {
+    console.error("Revoke sessions error:", error);
+    res.status(500).json({ error: "Failed to revoke sessions" });
+  }
 });
 
 // Revoke specific session
-app.post("/api/user/sessions/:sessionId/revoke", authenticate, async (req, res) => {
+app.post(
+  "/api/user/sessions/:sessionId/revoke",
+  authenticate,
+  async (req, res) => {
     try {
-        const { sessionId } = req.params;
-        
-        // Cannot revoke current session
-        const currentToken = req.headers.authorization?.split(" ")[1];
-        const { data: currentSession } = await supabase
-            .from("user_sessions")
-            .select("id")
-            .eq("session_token", currentToken)
-            .eq("user_id", req.user.id)
-            .single();
-        
-        if (currentSession?.id === sessionId) {
-            return res.status(400).json({ error: "Cannot revoke your current session" });
-        }
-        
-        await revokeSession(sessionId, req.user.id, "User revoked specific session");
-        
-        res.json({ success: true, message: "Session revoked successfully" });
+      const { sessionId } = req.params;
+
+      // Cannot revoke current session
+      const currentToken = req.headers.authorization?.split(" ")[1];
+      const { data: currentSession } = await supabase
+        .from("user_sessions")
+        .select("id")
+        .eq("session_token", currentToken)
+        .eq("user_id", req.user.id)
+        .single();
+
+      if (currentSession?.id === sessionId) {
+        return res
+          .status(400)
+          .json({ error: "Cannot revoke your current session" });
+      }
+
+      await revokeSession(
+        sessionId,
+        req.user.id,
+        "User revoked specific session",
+      );
+
+      res.json({ success: true, message: "Session revoked successfully" });
     } catch (error) {
-        console.error("Revoke session error:", error);
-        res.status(500).json({ error: "Failed to revoke session" });
+      console.error("Revoke session error:", error);
+      res.status(500).json({ error: "Failed to revoke session" });
     }
-});
+  },
+);
 
 // ==================== PASSCODE AUTHENTICATION ROUTES ====================
 
@@ -2112,7 +2231,7 @@ app.post("/api/auth/face/start-session", async (req, res) => {
         .json({ error: "Face not registered for this user" });
     }
 
-    const sessionId = generateFaceSessionId();
+    //const sessionId = generateFaceSessionId();
 
     faceVerificationStates.set(sessionId, {
       user_id: user.id,
