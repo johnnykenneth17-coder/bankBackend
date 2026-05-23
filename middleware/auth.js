@@ -288,7 +288,6 @@ function getDeviceInfo(req) {
   };
 }
 
-
 // ==================== FIXED: INVALIDATE ALL USER SESSIONS ====================
 
 async function invalidateAllUserSessions(
@@ -435,7 +434,7 @@ async function createUserSession(userId, token, deviceInfo) {
 
 // REPLACE the entire checkSingleDeviceSession function in auth.js with this:
 
-const checkSingleDeviceSession = async (req, res, next) => {
+/*const checkSingleDeviceSession = async (req, res, next) => {
   try {
     const authHeader = req.header("Authorization");
     const token = authHeader?.replace("Bearer ", "");
@@ -509,13 +508,87 @@ const checkSingleDeviceSession = async (req, res, next) => {
     console.error("[Session Middleware] Error:", error.message);
     res.status(401).json({ error: "Please authenticate" });
   }
+};*/
+
+const checkSingleDeviceSession = async (req, res, next) => {
+  try {
+    const authHeader = req.header("Authorization");
+    const token = authHeader?.replace("Bearer ", "");
+
+    if (!token) {
+      return res.status(401).json({ error: "Please authenticate" });
+    }
+
+    let decoded;
+    try {
+      decoded = jwt.verify(token, process.env.JWT_SECRET);
+    } catch (jwtError) {
+      return res.status(401).json({ error: "Invalid token" });
+    }
+
+    const { data: user, error: userError } = await supabase
+      .from("users")
+      .select("id, active_session_id, is_active, is_frozen, last_active_device")
+      .eq("id", decoded.userId)
+      .single();
+
+    if (userError || !user) {
+      return res.status(401).json({ error: "User not found" });
+    }
+
+    if (!user.is_active) {
+      return res.status(401).json({ error: "Account deactivated" });
+    }
+
+    // Only enforce single-device when BOTH the token AND the DB have a sessionId.
+    // If either is missing, allow through — never false-logout during transitions.
+    if (decoded.sessionId && user.active_session_id) {
+      if (user.active_session_id !== decoded.sessionId) {
+        console.log(
+          `[Session Middleware] MISMATCH: DB=${user.active_session_id}, Token=${decoded.sessionId}`,
+        );
+
+        await supabase
+          .from("user_sessions")
+          .update({
+            is_active: false,
+            is_current: false,
+            invalidated_reason: "New login from another device",
+          })
+          .eq("session_token", token);
+
+        return res.status(401).json({
+          error: "session_expired",
+          message:
+            "You have been logged out because a new login was detected on another device.",
+          code: "SESSION_REPLACED",
+          device_name: user.last_active_device || "Another device",
+        });
+      }
+    }
+
+    // Update last activity
+    if (decoded.sessionId) {
+      await supabase
+        .from("user_sessions")
+        .update({ last_activity: new Date().toISOString() })
+        .eq("session_token", token)
+        .eq("is_active", true);
+    }
+
+    req.user = user;
+    req.token = token;
+    req.sessionId = decoded.sessionId;
+    next();
+  } catch (error) {
+    console.error("[Session Middleware] Error:", error.message);
+    res.status(401).json({ error: "Please authenticate" });
+  }
 };
-
-
 
 // REPLACE the checkSessionValidity function in auth.js with this:
 
-async function checkSessionValidity(userId, sessionId, token) {
+/*async function checkSessionValidity(userId, sessionId, token) {
   try {
     const { data: user, error: userError } = await supabase
       .from("users")
@@ -570,6 +643,62 @@ async function checkSessionValidity(userId, sessionId, token) {
   } catch (error) {
     console.error("checkSessionValidity error:", error);
     return { valid: true }; // Fail open
+  }
+}*/
+
+async function checkSessionValidity(userId, sessionId, token) {
+  try {
+    const { data: user, error: userError } = await supabase
+      .from("users")
+      .select("active_session_id, last_active_device")
+      .eq("id", userId)
+      .single();
+
+    if (userError || !user) {
+      // DB error — fail open, never false-logout
+      console.error("checkSessionValidity DB error:", userError);
+      return { valid: true };
+    }
+
+    // No active_session_id in DB = session is being set up (race window)
+    // or user has no session at all. Either way, don't logout.
+    if (!user.active_session_id) {
+      return { valid: true };
+    }
+
+    // No sessionId in token = old token format. Allow it — don't force logout.
+    // It will expire naturally by JWT expiry date.
+    if (!sessionId) {
+      return { valid: true };
+    }
+
+    // Both sides have a value and they don't match = another device logged in.
+    // This is the ONLY case that should trigger session-expired.html.
+    if (user.active_session_id !== sessionId) {
+      await supabase
+        .from("user_sessions")
+        .update({
+          is_active: false,
+          invalidated_reason: "New login from another device",
+          expires_at: new Date().toISOString(),
+        })
+        .eq("user_id", userId)
+        .eq("session_id", sessionId)
+        .eq("is_active", true);
+
+      return {
+        valid: false,
+        reason:
+          "Your account was accessed from another device. This session has been terminated.",
+        code: "SESSION_REPLACED",
+        device_name: user.last_active_device || "Another device",
+      };
+    }
+
+    return { valid: true };
+  } catch (error) {
+    console.error("checkSessionValidity error:", error);
+    return { valid: true }; // Always fail open
   }
 }
 

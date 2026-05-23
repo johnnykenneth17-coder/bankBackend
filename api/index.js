@@ -1782,45 +1782,8 @@ app.post("/api/user/logout", authenticate, async (req, res) => {
 
 // ==================== SESSION MANAGEMENT ENDPOINTS ====================
 
-// Add this route - it checks if the current session is still valid
-/*app.get("/api/auth/check-session", authenticate, async (req, res) => {
-  try {
-    const token = req.headers.authorization?.split(" ")[1];
-    const decoded = jwt.verify(token, process.env.JWT_SECRET);
-
-    // Get user with active session
-    const { data: user, error } = await supabase
-      .from("users")
-      .select("active_session_id, last_active_device")
-      .eq("id", req.user.id)
-      .single();
-
-    if (error) {
-      return res.json({ valid: true });
-    }
-
-    // If session ID doesn't match, it's invalid
-    if (
-      user.active_session_id &&
-      decoded.sessionId &&
-      user.active_session_id !== decoded.sessionId
-    ) {
-      return res.json({
-        valid: false,
-        reason: "Another device logged in",
-        code: "SESSION_REPLACED",
-        device_name: user.last_active_device || "Another device",
-      });
-    }
-
-    res.json({ valid: true });
-  } catch (error) {
-    res.json({ valid: true });
-  }
-});*/
-
 // Check session validity endpoint
-app.get("/api/auth/check-session", authenticate, async (req, res) => {
+/*app.get("/api/auth/check-session", authenticate, async (req, res) => {
   try {
     const token = req.headers.authorization?.split(" ")[1];
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
@@ -1851,6 +1814,40 @@ app.get("/api/auth/check-session", authenticate, async (req, res) => {
     res.json({ valid: true });
   } catch (error) {
     console.error("Session check error:", error);
+    res.json({ valid: true });
+  }
+});*/
+
+app.get("/api/auth/check-session", authenticate, async (req, res) => {
+  try {
+    const token = req.headers.authorization?.split(" ")[1];
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+
+    // If token has no sessionId, just say valid — don't force logout.
+    // The token will expire naturally via JWT expiry.
+    if (!decoded.sessionId) {
+      return res.json({ valid: true });
+    }
+
+    const { valid, reason, code, device_name } = await checkSessionValidity(
+      req.user.id,
+      decoded.sessionId,
+      token
+    );
+
+    if (!valid) {
+      return res.json({
+        valid: false,
+        reason: reason,
+        code: code,
+        device_name: device_name,
+      });
+    }
+
+    res.json({ valid: true });
+  } catch (error) {
+    console.error("Session check error:", error);
+    // On any error, say valid — never force logout due to server errors
     res.json({ valid: true });
   }
 });
