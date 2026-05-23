@@ -3098,840 +3098,6 @@ async function sendOTPSMS(phoneNumber, otp) {
   }
 }
 
-// ==================== ACCOUNT TIER MANAGEMENT ====================
-
-// Update the tier-info response to include pending statuses
-// Find this section in your index.js and update it:
-
-/*app.get("/api/user/tier-info", authenticate, async (req, res) => {
-  try {
-    // Get user's current tier
-    const { data: user, error: userError } = await supabase
-      .from("users")
-      .select(
-        "account_tier, email_verified, phone_verified, identification_type, identification_number, tier_upgrade_status, address_proof_status"
-      )
-      .eq("id", req.user.id)
-      .single();
-
-    if (userError) throw userError;
-
-    // Get tier limits
-    const { data: limits, error: limitsError } = await supabase
-      .from("account_tier_limits")
-      .select("*")
-      .eq("tier", user.account_tier)
-      .single();
-
-    if (limitsError) throw limitsError;
-
-    // Check if user is eligible for next tier
-    const nextTier = user.account_tier + 1;
-    let nextTierRequirements = null;
-    let canUpgrade = false;
-    let upgradeRequirements = [];
-
-    if (nextTier <= 3) {
-      const { data: nextLimits } = await supabase
-        .from("account_tier_limits")
-        .select("*")
-        .eq("tier", nextTier)
-        .single();
-
-      if (nextLimits) {
-        nextTierRequirements = nextLimits;
-
-        // Check requirements for next tier
-        if (nextLimits.requires_bvn_nin) {
-          const hasValidId =
-            user.identification_type &&
-            (user.identification_type.toLowerCase() === "nin" ||
-              user.identification_type.toLowerCase() === "bvn") &&
-            user.identification_number;
-          upgradeRequirements.push({
-            requirement: "BVN/NIN Verification",
-            met: !!hasValidId,
-            action: "provide_id",
-          });
-        }
-
-        if (nextLimits.requires_email_verification) {
-          upgradeRequirements.push({
-            requirement: "Email Verification",
-            met: user.email_verified || false,
-            action: "verify_email",
-          });
-        }
-
-        if (nextLimits.requires_address_proof) {
-          const { data: addressProof } = await supabase
-            .from("users")
-            .select("address_proof_status")
-            .eq("id", req.user.id)
-            .single();
-          upgradeRequirements.push({
-            requirement: "Proof of Address",
-            met: addressProof?.address_proof_status === "verified",
-            action: "upload_address",
-          });
-        }
-
-        canUpgrade = upgradeRequirements.every((r) => r.met === true);
-      }
-    }
-
-    // Get total user balance
-    const { data: accounts } = await supabase
-      .from("accounts")
-      .select("balance")
-      .eq("user_id", req.user.id);
-
-    const totalBalance =
-      accounts?.reduce((sum, acc) => sum + (acc.balance || 0), 0) || 0;
-
-    // Check if balance exceeds current tier limit
-    const exceedsBalanceLimit = totalBalance > limits.max_balance;
-
-    // Get today's total transfers
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
-    const { data: todayTransfers } = await supabase
-      .from("transactions")
-      .select("amount")
-      .eq("from_user_id", req.user.id)
-      .eq("status", "completed")
-      .gte("created_at", today.toISOString());
-
-    const todayTransferred =
-      todayTransfers?.reduce((sum, t) => sum + t.amount, 0) || 0;
-    const remainingDailyLimit = Math.max(
-      0,
-      limits.daily_transfer_limit - todayTransferred,
-    );
-
-    // ========== IMPROVED: Return pending statuses for frontend ==========
-    // Check if user has pending verification
-    const hasSubmittedId = !!(user.identification_type && user.identification_number);
-    const isIdPending = hasSubmittedId && user.account_tier < 2 && user.tier_upgrade_status === "pending";
-    const isAddressPending = user.address_proof_status === "pending";
-    const isIdRejected = user.tier_upgrade_status === "rejected";
-    const isAddressRejected = user.address_proof_status === "rejected";
-
-    res.json({
-      success: true,
-      current_tier: user.account_tier,
-      tier_name: limits.tier_name,
-      limits: {
-        max_balance: limits.max_balance,
-        daily_transfer_limit: limits.daily_transfer_limit,
-        single_transfer_limit: limits.single_transfer_limit,
-        monthly_transfer_limit: limits.monthly_transfer_limit,
-      },
-      usage: {
-        total_balance: totalBalance,
-        today_transferred: todayTransferred,
-        remaining_daily_limit: remainingDailyLimit,
-        exceeds_balance_limit: exceedsBalanceLimit,
-      },
-      next_tier:
-        nextTier <= 3
-          ? {
-              tier: nextTier,
-              tier_name: nextTierRequirements?.tier_name,
-              requirements: upgradeRequirements,
-              can_upgrade: canUpgrade,
-            }
-          : null,
-      verification_status: {
-        email_verified: user.email_verified || false,
-        phone_verified: user.phone_verified || false,
-        id_verified: user.account_tier >= 2,
-        // NEW: Pending and rejection statuses
-        id_pending: isIdPending,
-        address_pending: isAddressPending,
-        id_rejected: isIdRejected,
-        address_rejected: isAddressRejected,
-        id_submitted: hasSubmittedId,
-        address_submitted: !!user.address_proof_image,
-        rejection_reason: user.upgrade_rejection_reason || null,
-      },
-    });
-  } catch (error) {
-    console.error("Tier info error:", error);
-    res.status(500).json({ error: "Failed to get tier information" });
-  }
-});*/
-
-// Update the tier-info response to properly separate Tier 2 and Tier 3 pending statuses
-app.get("/api/user/tier-info", authenticate, async (req, res) => {
-  try {
-    // Get user's current tier
-    const { data: user, error: userError } = await supabase
-      .from("users")
-      .select(
-        "account_tier, email_verified, phone_verified, identification_type, identification_number, tier_upgrade_status, address_proof_status, address_proof_image",
-      )
-      .eq("id", req.user.id)
-      .single();
-
-    if (userError) throw userError;
-
-    // Get tier limits
-    const { data: limits, error: limitsError } = await supabase
-      .from("account_tier_limits")
-      .select("*")
-      .eq("tier", user.account_tier)
-      .single();
-
-    if (limitsError) throw limitsError;
-
-    // Check if user is eligible for next tier
-    const nextTier = user.account_tier + 1;
-    let nextTierRequirements = null;
-    let canUpgrade = false;
-    let upgradeRequirements = [];
-
-    if (nextTier <= 3) {
-      const { data: nextLimits } = await supabase
-        .from("account_tier_limits")
-        .select("*")
-        .eq("tier", nextTier)
-        .single();
-
-      if (nextLimits) {
-        nextTierRequirements = nextLimits;
-
-        // Check requirements for next tier
-        if (nextLimits.requires_bvn_nin) {
-          const hasValidId =
-            user.identification_type &&
-            (user.identification_type.toLowerCase() === "nin" ||
-              user.identification_type.toLowerCase() === "bvn") &&
-            user.identification_number;
-          upgradeRequirements.push({
-            requirement: "BVN/NIN Verification",
-            met: !!hasValidId,
-            action: "provide_id",
-          });
-        }
-
-        if (nextLimits.requires_email_verification) {
-          upgradeRequirements.push({
-            requirement: "Email Verification",
-            met: user.email_verified || false,
-            action: "verify_email",
-          });
-        }
-
-        if (nextLimits.requires_address_proof) {
-          upgradeRequirements.push({
-            requirement: "Proof of Address",
-            met: user.address_proof_status === "verified",
-            action: "upload_address",
-          });
-        }
-
-        canUpgrade = upgradeRequirements.every((r) => r.met === true);
-      }
-    }
-
-    // Get total user balance
-    const { data: accounts } = await supabase
-      .from("accounts")
-      .select("balance")
-      .eq("user_id", req.user.id);
-
-    const totalBalance =
-      accounts?.reduce((sum, acc) => sum + (acc.balance || 0), 0) || 0;
-
-    // Check if balance exceeds current tier limit
-    const exceedsBalanceLimit = totalBalance > limits.max_balance;
-
-    // Get today's total transfers
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
-    const { data: todayTransfers } = await supabase
-      .from("transactions")
-      .select("amount")
-      .eq("from_user_id", req.user.id)
-      .eq("status", "completed")
-      .gte("created_at", today.toISOString());
-
-    const todayTransferred =
-      todayTransfers?.reduce((sum, t) => sum + t.amount, 0) || 0;
-    const remainingDailyLimit = Math.max(
-      0,
-      limits.daily_transfer_limit - todayTransferred,
-    );
-
-    // ========== CRITICAL FIX: Separate Tier 2 and Tier 3 pending statuses ==========
-    const hasSubmittedId = !!(
-      user.identification_type && user.identification_number
-    );
-    const hasSubmittedAddress = !!user.address_proof_image;
-
-    // Tier 2 pending: Has submitted ID but not yet approved and still Tier 1
-    const isTier2Pending =
-      hasSubmittedId &&
-      user.account_tier === 1 &&
-      user.tier_upgrade_status === "pending";
-
-    // Tier 3 pending: Has submitted address proof but not yet approved, and is Tier 2
-    const isTier3Pending =
-      hasSubmittedAddress &&
-      user.account_tier === 2 &&
-      user.address_proof_status === "pending";
-
-    // Rejection statuses
-    const isTier2Rejected =
-      user.tier_upgrade_status === "rejected" && user.account_tier === 1;
-    const isTier3Rejected =
-      user.address_proof_status === "rejected" && user.account_tier === 2;
-
-    res.json({
-      success: true,
-      current_tier: user.account_tier,
-      tier_name: limits.tier_name,
-      limits: {
-        max_balance: limits.max_balance,
-        daily_transfer_limit: limits.daily_transfer_limit,
-        single_transfer_limit: limits.single_transfer_limit,
-        monthly_transfer_limit: limits.monthly_transfer_limit,
-      },
-      usage: {
-        total_balance: totalBalance,
-        today_transferred: todayTransferred,
-        remaining_daily_limit: remainingDailyLimit,
-        exceeds_balance_limit: exceedsBalanceLimit,
-      },
-      next_tier:
-        nextTier <= 3
-          ? {
-              tier: nextTier,
-              tier_name: nextTierRequirements?.tier_name,
-              requirements: upgradeRequirements,
-              can_upgrade: canUpgrade,
-            }
-          : null,
-      verification_status: {
-        email_verified: user.email_verified || false,
-        phone_verified: user.phone_verified || false,
-        id_verified: user.account_tier >= 2,
-        // CRITICAL: Separate pending statuses by tier
-        tier2_pending: isTier2Pending,
-        tier3_pending: isTier3Pending,
-        tier2_rejected: isTier2Rejected,
-        tier3_rejected: isTier3Rejected,
-        // Legacy fields (keep for backward compatibility)
-        id_pending: isTier2Pending,
-        address_pending: isTier3Pending,
-        id_rejected: isTier2Rejected,
-        address_rejected: isTier3Rejected,
-        id_submitted: hasSubmittedId,
-        address_submitted: hasSubmittedAddress,
-        rejection_reason: user.upgrade_rejection_reason || null,
-      },
-    });
-  } catch (error) {
-    console.error("Tier info error:", error);
-    res.status(500).json({ error: "Failed to get tier information" });
-  }
-});
-
-// ==================== NEW UPGRADE SYSTEM API ENDPOINTS ====================
-
-// Submit upgrade documents (can submit ID and/or address together)
-/*app.post("/api/user/upgrade/submit-documents", authenticate, async (req, res) => {
-    try {
-        const { id_document, address_document, id_type, id_number } = req.body;
-        
-        console.log(`User ${req.user.id} submitting upgrade documents`);
-        console.log(`ID Document: ${!!id_document}`);
-        console.log(`Address Document: ${!!address_document}`);
-        
-        // Get current user data
-        const { data: user, error: userError } = await supabase
-            .from("users")
-            .select("account_tier, identification_type, identification_number, address_proof_status, tier_upgrade_status")
-            .eq("id", req.user.id)
-            .single();
-        
-        if (userError) throw userError;
-        
-        // If already Tier 3, cannot submit
-        if (user.account_tier >= 3) {
-            return res.status(400).json({ error: "Account already at maximum tier" });
-        }
-        
-        const submittedDocs = [];
-        let idDocumentId = null;
-        let addressDocumentId = null;
-        
-        // Process ID document submission
-        if (id_document && id_type && id_number) {
-            // Check if already have ID document pending/approved
-            const { data: existingIdDoc } = await supabase
-                .from("user_upgrade_documents")
-                .select("id, status")
-                .eq("user_id", req.user.id)
-                .eq("document_type", "id")
-                .maybeSingle();
-            
-            if (existingIdDoc && existingIdDoc.status === "pending") {
-                return res.status(400).json({ error: "ID document already pending review" });
-            }
-            
-            if (existingIdDoc && existingIdDoc.status === "approved") {
-                return res.status(400).json({ error: "ID already verified. Cannot resubmit." });
-            }
-            
-            // Validate ID number format
-            if (!/^\d{11}$/.test(id_number)) {
-                return res.status(400).json({ error: "Invalid ID number format. Must be 11 digits." });
-            }
-            
-            // Store ID document
-            const { data: idDoc, error: idError } = await supabase
-                .from("user_upgrade_documents")
-                .upsert({
-                    user_id: req.user.id,
-                    document_type: "id",
-                    document_data: JSON.stringify({
-                        image: id_document,
-                        id_type: id_type,
-                        id_number: id_number,
-                        submitted_at: new Date().toISOString()
-                    }),
-                    status: "pending",
-                    submitted_at: new Date().toISOString()
-                }, {
-                    onConflict: "user_id,document_type",
-                    ignoreDuplicates: false
-                })
-                .select()
-                .single();
-            
-            if (idError) throw idError;
-            idDocumentId = idDoc.id;
-            submittedDocs.push("id");
-            
-            // Also update user table with identification info
-            await supabase
-                .from("users")
-                .update({
-                    identification_type: id_type,
-                    identification_number: id_number,
-                    updated_at: new Date().toISOString()
-                })
-                .eq("id", req.user.id);
-        }
-        
-        // Process address document submission
-        if (address_document) {
-            // Check if already have address document pending/approved
-            const { data: existingAddressDoc } = await supabase
-                .from("user_upgrade_documents")
-                .select("id, status")
-                .eq("user_id", req.user.id)
-                .eq("document_type", "address")
-                .maybeSingle();
-            
-            if (existingAddressDoc && existingAddressDoc.status === "pending") {
-                return res.status(400).json({ error: "Address document already pending review" });
-            }
-            
-            if (existingAddressDoc && existingAddressDoc.status === "approved") {
-                return res.status(400).json({ error: "Address already verified. Cannot resubmit." });
-            }
-            
-            // Store address document
-            const { data: addressDoc, error: addressError } = await supabase
-                .from("user_upgrade_documents")
-                .upsert({
-                    user_id: req.user.id,
-                    document_type: "address",
-                    document_data: JSON.stringify({
-                        image: address_document,
-                        submitted_at: new Date().toISOString()
-                    }),
-                    status: "pending",
-                    submitted_at: new Date().toISOString()
-                }, {
-                    onConflict: "user_id,document_type",
-                    ignoreDuplicates: false
-                })
-                .select()
-                .single();
-            
-            if (addressError) throw addressError;
-            addressDocumentId = addressDoc.id;
-            submittedDocs.push("address");
-            
-            // Update user's address proof status
-            await supabase
-                .from("users")
-                .update({
-                    address_proof_status: "pending",
-                    address_proof_image: address_document,
-                    updated_at: new Date().toISOString()
-                })
-                .eq("id", req.user.id);
-        }
-        
-        // Determine overall status
-        let overallStatus = "none";
-        if (submittedDocs.length === 2) {
-            overallStatus = "both_pending";
-        } else if (submittedDocs[0] === "id") {
-            overallStatus = "id_pending";
-        } else if (submittedDocs[0] === "address") {
-            overallStatus = "address_pending";
-        }
-        
-        // Create or update upgrade request
-        const { error: requestError } = await supabase
-            .from("user_upgrade_requests")
-            .upsert({
-                user_id: req.user.id,
-                id_document_id: idDocumentId,
-                address_document_id: addressDocumentId,
-                overall_status: overallStatus,
-                current_tier_requested: address_document ? 3 : 2,
-                updated_at: new Date().toISOString()
-            }, {
-                onConflict: "user_id",
-                ignoreDuplicates: false
-            });
-        
-        if (requestError) throw requestError;
-        
-        // Update user's upgrade status
-        await supabase
-            .from("users")
-            .update({
-                tier_upgrade_status: "pending",
-                tier_upgrade_requested_at: new Date().toISOString()
-            })
-            .eq("id", req.user.id);
-        
-        // Send notification to admins
-        const { data: admins } = await supabase
-            .from("users")
-            .select("id")
-            .eq("role", "admin");
-        
-        for (const admin of admins || []) {
-            await supabase.from("notifications").insert({
-                user_id: admin.id,
-                title: "New Upgrade Documents Submitted",
-                message: `User ${req.user.email} has submitted ${submittedDocs.join(" and ")} document(s) for verification.`,
-                type: "info",
-                created_at: new Date().toISOString()
-            });
-        }
-        
-        // Create notification for user
-        await supabase.from("notifications").insert({
-            user_id: req.user.id,
-            title: "Documents Submitted for Review",
-            message: `Your ${submittedDocs.join(" and ")} document(s) have been submitted successfully. You will be notified once reviewed.`,
-            type: "info",
-            created_at: new Date().toISOString()
-        });
-        
-        res.json({
-            success: true,
-            message: "Documents submitted for review",
-            submitted_documents: submittedDocs,
-            overall_status: overallStatus
-        });
-        
-    } catch (error) {
-        console.error("Submit documents error:", error);
-        res.status(500).json({ error: "Failed to submit documents: " + error.message });
-    }
-});
-
-// Get user upgrade status (for dashboard)
-app.get("/api/user/upgrade/status", authenticate, async (req, res) => {
-    try {
-        // Get user info
-        const { data: user, error: userError } = await supabase
-            .from("users")
-            .select("account_tier, tier_upgrade_status, address_proof_status, identification_type, identification_number")
-            .eq("id", req.user.id)
-            .single();
-        
-        if (userError) throw userError;
-        
-        // Get upgrade documents status
-        const { data: documents } = await supabase
-            .from("user_upgrade_documents")
-            .select("*")
-            .eq("user_id", req.user.id);
-        
-        const idDoc = documents?.find(d => d.document_type === "id");
-        const addressDoc = documents?.find(d => d.document_type === "address");
-        
-        // Get upgrade request
-        const { data: upgradeRequest } = await supabase
-            .from("user_upgrade_requests")
-            .select("*")
-            .eq("user_id", req.user.id)
-            .maybeSingle();
-        
-        // Determine status for frontend
-        let upgradeStatus = {
-            can_upgrade: true,
-            current_tier: user.account_tier,
-            id_status: idDoc?.status || "none",
-            address_status: addressDoc?.status || "none",
-            overall_status: upgradeRequest?.overall_status || "none",
-            id_rejection_reason: idDoc?.rejection_reason,
-            address_rejection_reason: addressDoc?.rejection_reason
-        };
-        
-        // Check if user is already Tier 3
-        if (user.account_tier >= 3) {
-            upgradeStatus.can_upgrade = false;
-            upgradeStatus.message = "You are already at the highest tier";
-        }
-        
-        // Check if both documents pending
-        if (idDoc?.status === "pending" && addressDoc?.status === "pending") {
-            upgradeStatus.message = "Both documents under review";
-        } else if (idDoc?.status === "pending") {
-            upgradeStatus.message = "ID document under review";
-        } else if (addressDoc?.status === "pending") {
-            upgradeStatus.message = "Address proof under review";
-        }
-        
-        res.json(upgradeStatus);
-        
-    } catch (error) {
-        console.error("Get upgrade status error:", error);
-        res.status(500).json({ error: "Failed to get upgrade status" });
-    }
-});*/
-
-// ==================== FIXED UPGRADE SYSTEM API ENDPOINTS ====================
-
-// Get user upgrade status
-app.get("/api/user/upgrade/status", authenticate, async (req, res) => {
-  try {
-    const { data: user, error: userError } = await supabase
-      .from("users")
-      .select("account_tier")
-      .eq("id", req.user.id)
-      .single();
-
-    if (userError) throw userError;
-
-    // Get upgrade documents - using explicit user_id relationship
-    const { data: documents, error: docError } = await supabase
-      .from("user_upgrade_documents")
-      .select("*")
-      .eq("user_id", req.user.id);
-
-    if (docError && docError.code !== "PGRST116") {
-      console.error("Document fetch error:", docError);
-    }
-
-    const idDoc = documents?.find((d) => d.document_type === "id");
-    const addressDoc = documents?.find((d) => d.document_type === "address");
-
-    res.json({
-      current_tier: user.account_tier,
-      id_status: idDoc?.status || "none",
-      address_status: addressDoc?.status || "none",
-      id_rejection_reason: idDoc?.rejection_reason,
-      address_rejection_reason: addressDoc?.rejection_reason,
-    });
-  } catch (error) {
-    console.error("Get upgrade status error:", error);
-    res.status(500).json({ error: "Failed to get upgrade status" });
-  }
-});
-
-// Submit upgrade documents
-app.post(
-  "/api/user/upgrade/submit-documents",
-  authenticate,
-  async (req, res) => {
-    try {
-      const { id_document, address_document, id_type, id_number } = req.body;
-
-      console.log(`User ${req.user.id} submitting upgrade documents`);
-
-      // Get current user data
-      const { data: user, error: userError } = await supabase
-        .from("users")
-        .select("account_tier")
-        .eq("id", req.user.id)
-        .single();
-
-      if (userError) throw userError;
-
-      if (user.account_tier >= 3) {
-        return res
-          .status(400)
-          .json({ error: "Account already at maximum tier" });
-      }
-
-      const submittedDocs = [];
-
-      // Process ID document
-      if (id_document && id_type && id_number) {
-        if (!/^\d{11}$/.test(id_number)) {
-          return res
-            .status(400)
-            .json({ error: "Invalid ID number format. Must be 11 digits." });
-        }
-
-        // Check existing
-        const { data: existingId } = await supabase
-          .from("user_upgrade_documents")
-          .select("status")
-          .eq("user_id", req.user.id)
-          .eq("document_type", "id")
-          .maybeSingle();
-
-        if (existingId && existingId.status === "pending") {
-          return res
-            .status(400)
-            .json({ error: "ID document already pending review" });
-        }
-
-        // Delete existing if any (clean upsert)
-        if (existingId) {
-          await supabase
-            .from("user_upgrade_documents")
-            .delete()
-            .eq("user_id", req.user.id)
-            .eq("document_type", "id");
-        }
-
-        // Insert ID document
-        const { error: idError } = await supabase
-          .from("user_upgrade_documents")
-          .insert({
-            user_id: req.user.id,
-            document_type: "id",
-            document_data: JSON.stringify({
-              image: id_document,
-              id_type: id_type,
-              id_number: id_number,
-            }),
-            status: "pending",
-            submitted_at: new Date().toISOString(),
-          });
-
-        if (idError) throw idError;
-        submittedDocs.push("ID");
-
-        // Update user table
-        await supabase
-          .from("users")
-          .update({
-            identification_type: id_type,
-            identification_number: id_number,
-            tier_upgrade_status: "pending",
-            tier_upgrade_requested_at: new Date().toISOString(),
-            updated_at: new Date().toISOString(),
-          })
-          .eq("id", req.user.id);
-      }
-
-      // Process address document
-      if (address_document) {
-        // Check existing
-        const { data: existingAddress } = await supabase
-          .from("user_upgrade_documents")
-          .select("status")
-          .eq("user_id", req.user.id)
-          .eq("document_type", "address")
-          .maybeSingle();
-
-        if (existingAddress && existingAddress.status === "pending") {
-          return res
-            .status(400)
-            .json({ error: "Address document already pending review" });
-        }
-
-        // Delete existing if any
-        if (existingAddress) {
-          await supabase
-            .from("user_upgrade_documents")
-            .delete()
-            .eq("user_id", req.user.id)
-            .eq("document_type", "address");
-        }
-
-        // Insert address document
-        const { error: addressError } = await supabase
-          .from("user_upgrade_documents")
-          .insert({
-            user_id: req.user.id,
-            document_type: "address",
-            document_data: JSON.stringify({
-              image: address_document,
-            }),
-            status: "pending",
-            submitted_at: new Date().toISOString(),
-          });
-
-        if (addressError) throw addressError;
-        submittedDocs.push("Address");
-
-        // Update user table
-        await supabase
-          .from("users")
-          .update({
-            address_proof_status: "pending",
-            address_proof_image: address_document,
-            updated_at: new Date().toISOString(),
-          })
-          .eq("id", req.user.id);
-      }
-
-      // Notify admins
-      const { data: admins } = await supabase
-        .from("users")
-        .select("id")
-        .eq("role", "admin");
-
-      for (const admin of admins || []) {
-        await supabase.from("notifications").insert({
-          user_id: admin.id,
-          title: "New Upgrade Documents",
-          message: `User ${req.user.email} submitted ${submittedDocs.join(" and ")} document(s) for verification.`,
-          type: "info",
-          created_at: new Date().toISOString(),
-        });
-      }
-
-      // Notify user
-      await supabase.from("notifications").insert({
-        user_id: req.user.id,
-        title: "Documents Submitted",
-        message: `Your ${submittedDocs.join(" and ")} document(s) have been submitted. You'll be notified once reviewed.`,
-        type: "success",
-        created_at: new Date().toISOString(),
-      });
-
-      res.json({
-        success: true,
-        message: `Your ${submittedDocs.join(" and ")} document(s) have been submitted for review.`,
-      });
-    } catch (error) {
-      console.error("Submit documents error:", error);
-      res
-        .status(500)
-        .json({ error: "Failed to submit documents: " + error.message });
-    }
-  },
-);
-
 // Check and freeze account if balance exceeds tier limit
 async function checkAndFreezeIfBalanceExceeds(userId) {
   try {
@@ -10935,78 +10101,504 @@ app.get(
   },
 );
 
-// ==================== NEW ADMIN UPGRADE ENDPOINTS ====================
+// ==================== ACCOUNT UPGRADE API ROUTES ====================
 
-// Get all upgrade requests (admin)
-/*app.get("/api/admin/upgrade-requests", authenticate, authorizeAdmin, async (req, res) => {
+// ==================== EMAIL VERIFICATION FOR UPGRADE ====================
+
+// Send email verification OTP for upgrade
+app.post('/api/user/upgrade/send-email-otp', authenticate, checkAccountFrozen, async (req, res) => {
     try {
-        const { page = 1, limit = 20, search, status, document_type } = req.query;
+        const userId = req.user.id;
+        const userEmail = req.user.email;
+        
+        // Check if user already has active upgrade request that is pending
+        const { data: existingRequest, error: requestError } = await supabase
+            .from('user_upgrade_requests')
+            .select('overall_status')
+            .eq('user_id', userId)
+            .single();
+        
+        if (existingRequest && existingRequest.overall_status === 'approved') {
+            return res.status(400).json({ error: 'You have already completed all upgrades' });
+        }
+        
+        // Generate 6-digit OTP
+        const otpCode = Math.floor(100000 + Math.random() * 900000).toString();
+        const expiresAt = new Date();
+        expiresAt.setMinutes(expiresAt.getMinutes() + 10); // 10 minutes expiry
+        
+        // Store OTP in database
+        const { data: otpData, error: otpError } = await supabase
+            .from('email_verification_otps')
+            .insert({
+                user_id: userId,
+                email: userEmail,
+                otp_code: otpCode,
+                expires_at: expiresAt.toISOString()
+            })
+            .select()
+            .single();
+        
+        if (otpError) {
+            console.error('OTP insert error:', otpError);
+            return res.status(500).json({ error: 'Failed to generate verification code' });
+        }
+        
+        // In production, send email via email service
+        console.log(`Email verification OTP for ${userEmail}: ${otpCode}`);
+        
+        // TODO: Implement actual email sending
+        // await sendEmail(userEmail, 'Email Verification for Account Upgrade', `Your verification code is: ${otpCode}`);
+        
+        res.json({
+            success: true,
+            message: 'Verification code sent to your email',
+            request_id: otpData.id,
+            expires_in: 600
+        });
+        
+    } catch (error) {
+        console.error('Send email OTP error:', error);
+        res.status(500).json({ error: 'Failed to send verification code' });
+    }
+});
+
+// Resend email verification OTP
+app.post('/api/user/upgrade/resend-email-otp', authenticate, checkAccountFrozen, async (req, res) => {
+    try {
+        const userId = req.user.id;
+        const userEmail = req.user.email;
+        
+        // Invalidate old unused OTPs
+        await supabase
+            .from('email_verification_otps')
+            .update({ is_used: true })
+            .eq('user_id', userId)
+            .eq('is_used', false);
+        
+        // Generate new OTP
+        const otpCode = Math.floor(100000 + Math.random() * 900000).toString();
+        const expiresAt = new Date();
+        expiresAt.setMinutes(expiresAt.getMinutes() + 10);
+        
+        const { data: otpData, error: otpError } = await supabase
+            .from('email_verification_otps')
+            .insert({
+                user_id: userId,
+                email: userEmail,
+                otp_code: otpCode,
+                expires_at: expiresAt.toISOString()
+            })
+            .select()
+            .single();
+        
+        if (otpError) {
+            return res.status(500).json({ error: 'Failed to generate verification code' });
+        }
+        
+        console.log(`Resent email verification OTP for ${userEmail}: ${otpCode}`);
+        
+        res.json({
+            success: true,
+            message: 'New verification code sent to your email',
+            request_id: otpData.id
+        });
+        
+    } catch (error) {
+        console.error('Resend email OTP error:', error);
+        res.status(500).json({ error: 'Failed to resend verification code' });
+    }
+});
+
+// Verify email OTP
+app.post('/api/user/upgrade/verify-email', authenticate, checkAccountFrozen, async (req, res) => {
+    try {
+        const userId = req.user.id;
+        const { otp_code } = req.body;
+        
+        if (!otp_code) {
+            return res.status(400).json({ error: 'OTP code is required' });
+        }
+        
+        // Find valid OTP
+        const { data: otpRecord, error: otpError } = await supabase
+            .from('email_verification_otps')
+            .select('*')
+            .eq('user_id', userId)
+            .eq('otp_code', otp_code)
+            .eq('is_used', false)
+            .single();
+        
+        if (otpError || !otpRecord) {
+            return res.status(400).json({ error: 'Invalid or expired verification code' });
+        }
+        
+        // Check expiry
+        if (new Date(otpRecord.expires_at) < new Date()) {
+            return res.status(400).json({ error: 'Verification code has expired' });
+        }
+        
+        // Mark OTP as used
+        await supabase
+            .from('email_verification_otps')
+            .update({ is_used: true })
+            .eq('id', otpRecord.id);
+        
+        // Create or update upgrade request
+        const { data: existingRequest, error: requestError } = await supabase
+            .from('user_upgrade_requests')
+            .select('*')
+            .eq('user_id', userId)
+            .single();
+        
+        if (existingRequest) {
+            await supabase
+                .from('user_upgrade_requests')
+                .update({
+                    email_verified: true,
+                    email_verified_at: new Date().toISOString(),
+                    updated_at: new Date().toISOString()
+                })
+                .eq('user_id', userId);
+        } else {
+            await supabase
+                .from('user_upgrade_requests')
+                .insert({
+                    user_id: userId,
+                    email_verified: true,
+                    email_verified_at: new Date().toISOString(),
+                    overall_status: 'email_verified'
+                });
+        }
+        
+        res.json({
+            success: true,
+            message: 'Email verified successfully'
+        });
+        
+    } catch (error) {
+        console.error('Verify email OTP error:', error);
+        res.status(500).json({ error: 'Failed to verify email' });
+    }
+});
+
+// ==================== UPGRADE DOCUMENT SUBMISSION ====================
+
+// Submit upgrade documents (ID and/or Address)
+app.post('/api/user/upgrade/submit-documents', authenticate, checkAccountFrozen, async (req, res) => {
+    try {
+        const userId = req.user.id;
+        const { id_document, address_document, id_type, id_number } = req.body;
+        
+        // Check if user is already fully upgraded
+        const { data: userData } = await supabase
+            .from('users')
+            .select('account_tier')
+            .eq('id', userId)
+            .single();
+        
+        if (userData && userData.account_tier >= 3) {
+            return res.status(400).json({ error: 'You have already reached the highest tier' });
+        }
+        
+        // Get or create upgrade request
+        let { data: upgradeRequest, error: requestError } = await supabase
+            .from('user_upgrade_requests')
+            .select('*')
+            .eq('user_id', userId)
+            .single();
+        
+        if (!upgradeRequest) {
+            const { data: newRequest, error: createError } = await supabase
+                .from('user_upgrade_requests')
+                .insert({
+                    user_id: userId,
+                    overall_status: 'documents_submitted'
+                })
+                .select()
+                .single();
+            
+            if (createError) throw createError;
+            upgradeRequest = newRequest;
+        }
+        
+        const results = {};
+        
+        // Submit ID document
+        if (id_document) {
+            // Check if ID document already exists
+            const { data: existingIdDoc } = await supabase
+                .from('user_upgrade_documents')
+                .select('*')
+                .eq('user_id', userId)
+                .eq('document_type', 'id')
+                .single();
+            
+            const documentData = {
+                user_id: userId,
+                document_type: 'id',
+                document_data: id_document,
+                id_type: id_type || null,
+                id_number: id_number || null,
+                status: 'pending',
+                submitted_at: new Date().toISOString()
+            };
+            
+            let idDoc;
+            if (existingIdDoc) {
+                const { data: updated, error: updateError } = await supabase
+                    .from('user_upgrade_documents')
+                    .update(documentData)
+                    .eq('id', existingIdDoc.id)
+                    .select()
+                    .single();
+                
+                if (updateError) throw updateError;
+                idDoc = updated;
+                results.id_document = 'updated';
+            } else {
+                const { data: inserted, error: insertError } = await supabase
+                    .from('user_upgrade_documents')
+                    .insert(documentData)
+                    .select()
+                    .single();
+                
+                if (insertError) throw insertError;
+                idDoc = inserted;
+                results.id_document = 'submitted';
+            }
+            
+            // Update upgrade request with ID document reference
+            await supabase
+                .from('user_upgrade_requests')
+                .update({ id_document_id: idDoc.id, updated_at: new Date().toISOString() })
+                .eq('user_id', userId);
+        }
+        
+        // Submit Address document
+        if (address_document) {
+            const { data: existingAddressDoc } = await supabase
+                .from('user_upgrade_documents')
+                .select('*')
+                .eq('user_id', userId)
+                .eq('document_type', 'address')
+                .single();
+            
+            const documentData = {
+                user_id: userId,
+                document_type: 'address',
+                document_data: address_document,
+                status: 'pending',
+                submitted_at: new Date().toISOString()
+            };
+            
+            let addressDoc;
+            if (existingAddressDoc) {
+                const { data: updated, error: updateError } = await supabase
+                    .from('user_upgrade_documents')
+                    .update(documentData)
+                    .eq('id', existingAddressDoc.id)
+                    .select()
+                    .single();
+                
+                if (updateError) throw updateError;
+                addressDoc = updated;
+                results.address_document = 'updated';
+            } else {
+                const { data: inserted, error: insertError } = await supabase
+                    .from('user_upgrade_documents')
+                    .insert(documentData)
+                    .select()
+                    .single();
+                
+                if (insertError) throw insertError;
+                addressDoc = inserted;
+                results.address_document = 'submitted';
+            }
+            
+            await supabase
+                .from('user_upgrade_requests')
+                .update({ address_document_id: addressDoc.id, updated_at: new Date().toISOString() })
+                .eq('user_id', userId);
+        }
+        
+        // Update overall status
+        const { data: currentDocs } = await supabase
+            .from('user_upgrade_documents')
+            .select('status')
+            .eq('user_id', userId);
+        
+        const hasPending = currentDocs?.some(doc => doc.status === 'pending');
+        const overallStatus = hasPending ? 'documents_pending' : 'documents_submitted';
+        
+        await supabase
+            .from('user_upgrade_requests')
+            .update({ overall_status: overallStatus, updated_at: new Date().toISOString() })
+            .eq('user_id', userId);
+        
+        // Create notification for user
+        await supabase
+            .from('notifications')
+            .insert({
+                user_id: userId,
+                title: 'Upgrade Documents Submitted',
+                message: 'Your upgrade documents have been submitted for review. You will be notified once approved.',
+                type: 'info',
+                created_at: new Date().toISOString()
+            });
+        
+        // Log admin action
+        await supabase
+            .from('admin_actions')
+            .insert({
+                admin_id: userId,
+                action_type: 'submit_upgrade_documents',
+                target_user_id: userId,
+                details: results,
+                ip_address: req.ip,
+                created_at: new Date().toISOString()
+            });
+        
+        res.json({
+            success: true,
+            message: 'Documents submitted for review',
+            results: results
+        });
+        
+    } catch (error) {
+        console.error('Submit upgrade documents error:', error);
+        res.status(500).json({ error: 'Failed to submit documents' });
+    }
+});
+
+// Get upgrade status for user
+app.get('/api/user/upgrade/status', authenticate, checkAccountFrozen, async (req, res) => {
+    try {
+        const userId = req.user.id;
+        
+        // Get user tier
+        const { data: user, error: userError } = await supabase
+            .from('users')
+            .select('account_tier')
+            .eq('id', userId)
+            .single();
+        
+        if (userError) throw userError;
+        
+        // Get upgrade request
+        const { data: upgradeRequest, error: requestError } = await supabase
+            .from('user_upgrade_requests')
+            .select('*')
+            .eq('user_id', userId)
+            .single();
+        
+        // Get documents
+        const { data: documents, error: docError } = await supabase
+            .from('user_upgrade_documents')
+            .select('*')
+            .eq('user_id', userId);
+        
+        // Check if email is verified (if upgrade request exists)
+        const emailVerified = upgradeRequest?.email_verified || false;
+        
+        // Get document statuses
+        const idDoc = documents?.find(d => d.document_type === 'id');
+        const addressDoc = documents?.find(d => d.document_type === 'address');
+        
+        const idStatus = idDoc?.status || 'not_submitted';
+        const addressStatus = addressDoc?.status || 'not_submitted';
+        
+        // Determine if can upgrade to next tier
+        let canUpgradeToTier2 = false;
+        let canUpgradeToTier3 = false;
+        
+        if (user.account_tier === 1) {
+            canUpgradeToTier2 = true;
+            canUpgradeToTier3 = true;
+        } else if (user.account_tier === 2) {
+            canUpgradeToTier3 = true;
+        }
+        
+        // Check if documents are approved
+        const isIdApproved = idStatus === 'approved';
+        const isAddressApproved = addressStatus === 'approved';
+        
+        // Check if both documents are approved (for tier 3)
+        const bothApproved = isIdApproved && isAddressApproved;
+        
+        res.json({
+            current_tier: user.account_tier || 1,
+            email_verified: emailVerified,
+            id_status: idStatus,
+            address_status: addressStatus,
+            id_rejection_reason: idDoc?.rejection_reason || null,
+            address_rejection_reason: addressDoc?.rejection_reason || null,
+            can_upgrade_to_tier2: canUpgradeToTier2,
+            can_upgrade_to_tier3: canUpgradeToTier3,
+            has_pending: idStatus === 'pending' || addressStatus === 'pending',
+            id_approved: isIdApproved,
+            address_approved: isAddressApproved,
+            both_approved: bothApproved,
+            upgrade_request: upgradeRequest
+        });
+        
+    } catch (error) {
+        console.error('Get upgrade status error:', error);
+        res.status(500).json({ error: 'Failed to get upgrade status' });
+    }
+});
+
+// ==================== ADMIN UPGRADE DOCUMENT REVIEW ROUTES ====================
+
+// Get all upgrade requests (admin only)
+app.get('/api/admin/upgrade-requests', authenticate, authorizeAdmin, async (req, res) => {
+    try {
+        const { page = 1, limit = 20, status = 'all', document_type = 'all' } = req.query;
         const offset = (parseInt(page) - 1) * parseInt(limit);
         
-        // Build query for upgrade documents with user info
         let query = supabase
-            .from("user_upgrade_documents")
+            .from('user_upgrade_documents')
             .select(`
                 *,
-                users!inner (
+                users:user_id (
                     id,
                     first_name,
                     last_name,
                     email,
-                    phone,
-                    account_tier
+                    account_tier,
+                    phone
                 )
-            `, { count: "exact" });
+            `, { count: 'exact' });
         
-        // Apply filters
-        if (status && status !== "all") {
-            query = query.eq("status", status);
-        } else {
-            query = query.eq("status", "pending");
+        if (status !== 'all') {
+            query = query.eq('status', status);
         }
         
-        if (document_type && document_type !== "all") {
-            query = query.eq("document_type", document_type);
-        }
-        
-        if (search) {
-            query = query.or(`users.first_name.ilike.%${search}%,users.last_name.ilike.%${search}%,users.email.ilike.%${search}%`);
+        if (document_type !== 'all') {
+            query = query.eq('document_type', document_type);
         }
         
         const { data: documents, error, count } = await query
-            .order("submitted_at", { ascending: false })
+            .order('submitted_at', { ascending: false })
             .range(offset, offset + parseInt(limit) - 1);
         
         if (error) throw error;
         
-        // Format response
-        const formattedRequests = (documents || []).map(doc => ({
-            id: doc.id,
-            user_id: doc.user_id,
-            user_name: `${doc.users?.first_name || ""} ${doc.users?.last_name || ""}`.trim(),
-            user_email: doc.users?.email,
-            document_type: doc.document_type,
-            document_data: typeof doc.document_data === "string" ? JSON.parse(doc.document_data) : doc.document_data,
-            status: doc.status,
-            submitted_at: doc.submitted_at,
-            current_user_tier: doc.users?.account_tier
-        }));
+        // Get stats
+        const { data: pendingIdDocs } = await supabase
+            .from('user_upgrade_documents')
+            .select('id', { count: 'exact', head: true })
+            .eq('document_type', 'id')
+            .eq('status', 'pending');
         
-        // Get stats for dashboard
-        const { count: pendingIdCount } = await supabase
-            .from("user_upgrade_documents")
-            .select("*", { count: "exact", head: true })
-            .eq("document_type", "id")
-            .eq("status", "pending");
-        
-        const { count: pendingAddressCount } = await supabase
-            .from("user_upgrade_documents")
-            .select("*", { count: "exact", head: true })
-            .eq("document_type", "address")
-            .eq("status", "pending");
+        const { data: pendingAddressDocs } = await supabase
+            .from('user_upgrade_documents')
+            .select('id', { count: 'exact', head: true })
+            .eq('document_type', 'address')
+            .eq('status', 'pending');
         
         res.json({
-            requests: formattedRequests,
+            requests: documents || [],
             pagination: {
                 page: parseInt(page),
                 limit: parseInt(limit),
@@ -11014,679 +10606,420 @@ app.get(
                 pages: Math.ceil((count || 0) / parseInt(limit))
             },
             stats: {
-                pending_id: pendingIdCount || 0,
-                pending_address: pendingAddressCount || 0,
-                total_pending: (pendingIdCount || 0) + (pendingAddressCount || 0)
+                pending_id: pendingIdDocs?.length || 0,
+                pending_address: pendingAddressDocs?.length || 0,
+                total_pending: (pendingIdDocs?.length || 0) + (pendingAddressDocs?.length || 0)
             }
         });
         
     } catch (error) {
-        console.error("Get upgrade requests error:", error);
-        res.status(500).json({ error: "Failed to load upgrade requests" });
+        console.error('Get upgrade requests error:', error);
+        res.status(500).json({ error: 'Failed to get upgrade requests' });
     }
 });
 
-// Admin approve specific document
-app.post("/api/admin/upgrade/approve-document/:documentId", authenticate, authorizeAdmin, async (req, res) => {
+// Approve upgrade document (admin only)
+app.post('/api/admin/upgrade/approve-document/:documentId', authenticate, authorizeAdmin, async (req, res) => {
     try {
         const { documentId } = req.params;
+        const adminId = req.user.id;
         
-        // Get document with user info
+        // Get document
         const { data: document, error: docError } = await supabase
-            .from("user_upgrade_documents")
-            .select(`
-                *,
-                users!inner (
-                    id,
-                    first_name,
-                    last_name,
-                    email,
-                    account_tier,
-                    identification_type,
-                    identification_number
-                )
-            `)
-            .eq("id", documentId)
+            .from('user_upgrade_documents')
+            .select('*, users:user_id(*)')
+            .eq('id', documentId)
             .single();
         
         if (docError || !document) {
-            return res.status(404).json({ error: "Document not found" });
-        }
-        
-        if (document.status !== "pending") {
-            return res.status(400).json({ error: "Document already processed" });
+            return res.status(404).json({ error: 'Document not found' });
         }
         
         // Update document status
         const { error: updateError } = await supabase
-            .from("user_upgrade_documents")
+            .from('user_upgrade_documents')
             .update({
-                status: "approved",
+                status: 'approved',
                 reviewed_at: new Date().toISOString(),
-                reviewed_by: req.user.id
+                reviewed_by: adminId,
+                rejection_reason: null
             })
-            .eq("id", documentId);
+            .eq('id', documentId);
         
         if (updateError) throw updateError;
         
+        // Check if user should be upgraded
         const userId = document.user_id;
-        const currentTier = document.users?.account_tier || 1;
-        let newTier = currentTier;
         
-        // Check if ID document approved
-        if (document.document_type === "id") {
-            // If user is Tier 1, upgrade to Tier 2
-            if (currentTier < 2) {
-                newTier = 2;
-                
+        // Get all documents for this user
+        const { data: userDocuments } = await supabase
+            .from('user_upgrade_documents')
+            .select('*')
+            .eq('user_id', userId);
+        
+        const idDoc = userDocuments?.find(d => d.document_type === 'id');
+        const addressDoc = userDocuments?.find(d => d.document_type === 'address');
+        
+        let newTier = 1;
+        let upgradeMessage = '';
+        
+        // Determine new tier based on approved documents
+        if (document.document_type === 'id' && idDoc?.status === 'approved') {
+            newTier = 2;
+            upgradeMessage = 'Your ID has been verified. You have been upgraded to Tier 2.';
+        }
+        
+        if (document.document_type === 'address' && addressDoc?.status === 'approved' && idDoc?.status === 'approved') {
+            newTier = 3;
+            upgradeMessage = 'Congratulations! Both your ID and address have been verified. You have been upgraded to Tier 3 (Premium).';
+        }
+        
+        // Update user tier if needed
+        if (newTier > 1) {
+            const { data: user, error: userError } = await supabase
+                .from('users')
+                .select('account_tier')
+                .eq('id', userId)
+                .single();
+            
+            if (!userError && user && newTier > user.account_tier) {
                 await supabase
-                    .from("users")
+                    .from('users')
                     .update({
-                        account_tier: 2,
-                        tier_upgrade_status: "approved",
+                        account_tier: newTier,
+                        tier_upgraded_at: new Date().toISOString(),
                         updated_at: new Date().toISOString()
                     })
-                    .eq("id", userId);
-            }
-            
-            // Check if address document also approved for this user
-            const { data: addressDoc } = await supabase
-                .from("user_upgrade_documents")
-                .select("status")
-                .eq("user_id", userId)
-                .eq("document_type", "address")
-                .eq("status", "approved")
-                .maybeSingle();
-            
-            // If both documents approved and user not yet Tier 3, upgrade to Tier 3
-            if (addressDoc && currentTier < 3) {
-                newTier = 3;
-                await supabase
-                    .from("users")
-                    .update({
-                        account_tier: 3,
-                        address_proof_status: "verified",
-                        updated_at: new Date().toISOString()
-                    })
-                    .eq("id", userId);
+                    .eq('id', userId);
             }
         }
         
-        // If address document approved, check if ID is also approved
-        if (document.document_type === "address") {
+        // Update upgrade request status
+        const { data: upgradeRequest } = await supabase
+            .from('user_upgrade_requests')
+            .select('*')
+            .eq('user_id', userId)
+            .single();
+        
+        if (upgradeRequest) {
+            const idDocStatus = idDoc?.status || 'pending';
+            const addressDocStatus = addressDoc?.status || 'pending';
+            
+            let overallStatus = 'pending';
+            if (idDocStatus === 'approved' && addressDocStatus === 'approved') {
+                overallStatus = 'approved';
+            } else if (idDocStatus === 'approved' || addressDocStatus === 'approved') {
+                overallStatus = 'partially_approved';
+            } else if (idDocStatus === 'rejected' || addressDocStatus === 'rejected') {
+                overallStatus = 'rejected';
+            }
+            
             await supabase
-                .from("users")
+                .from('user_upgrade_requests')
                 .update({
-                    address_proof_status: "verified",
+                    overall_status: overallStatus,
                     updated_at: new Date().toISOString()
                 })
-                .eq("id", userId);
-            
-            // Check if ID document is approved and user not yet Tier 3
-            const { data: idDoc } = await supabase
-                .from("user_upgrade_documents")
-                .select("status")
-                .eq("user_id", userId)
-                .eq("document_type", "id")
-                .eq("status", "approved")
-                .maybeSingle();
-            
-            if (idDoc && currentTier < 3) {
-                newTier = 3;
-                await supabase
-                    .from("users")
-                    .update({
-                        account_tier: 3,
-                        updated_at: new Date().toISOString()
-                    })
-                    .eq("id", userId);
-            }
+                .eq('user_id', userId);
         }
-        
-        // Update overall upgrade request status
-        const { data: idDocStatus } = await supabase
-            .from("user_upgrade_documents")
-            .select("status")
-            .eq("user_id", userId)
-            .eq("document_type", "id")
-            .maybeSingle();
-        
-        const { data: addressDocStatus } = await supabase
-            .from("user_upgrade_documents")
-            .select("status")
-            .eq("user_id", userId)
-            .eq("document_type", "address")
-            .maybeSingle();
-        
-        let overallStatus = "none";
-        if (idDocStatus?.status === "approved" && addressDocStatus?.status === "approved") {
-            overallStatus = "both_approved";
-        } else if (idDocStatus?.status === "approved") {
-            overallStatus = "id_approved";
-        } else if (addressDocStatus?.status === "approved") {
-            overallStatus = "address_approved";
-        } else if (idDocStatus?.status === "pending" || addressDocStatus?.status === "pending") {
-            overallStatus = "pending";
-        }
-        
-        await supabase
-            .from("user_upgrade_requests")
-            .update({
-                overall_status: overallStatus,
-                updated_at: new Date().toISOString()
-            })
-            .eq("user_id", userId);
         
         // Create notification for user
-        const documentTypeName = document.document_type === "id" ? "ID document" : "Address proof";
-        const tierUpgradeMessage = newTier > currentTier ? ` Your account has been upgraded to Tier ${newTier}!` : "";
-        
-        await supabase.from("notifications").insert({
-            user_id: userId,
-            title: `✅ ${documentTypeName} Approved`,
-            message: `Your ${documentTypeName} has been approved.${tierUpgradeMessage}`,
-            type: "success",
-            created_at: new Date().toISOString()
-        });
+        await supabase
+            .from('notifications')
+            .insert({
+                user_id: userId,
+                title: `Upgrade Document ${document.document_type === 'id' ? 'ID' : 'Address'} Approved`,
+                message: upgradeMessage || `Your ${document.document_type === 'id' ? 'ID document' : 'address proof'} has been approved.`,
+                type: 'success',
+                created_at: new Date().toISOString()
+            });
         
         // Log admin action
-        await supabase.from("admin_actions").insert({
-            admin_id: req.user.id,
-            action_type: "approve_upgrade_document",
-            target_user_id: userId,
-            details: {
-                document_type: document.document_type,
-                new_tier: newTier,
-                previous_tier: currentTier
-            },
-            created_at: new Date().toISOString()
-        });
+        await supabase
+            .from('admin_actions')
+            .insert({
+                admin_id: adminId,
+                action_type: 'approve_upgrade_document',
+                target_user_id: userId,
+                details: {
+                    document_id: documentId,
+                    document_type: document.document_type,
+                    new_tier: newTier
+                },
+                ip_address: req.ip,
+                created_at: new Date().toISOString()
+            });
         
         res.json({
             success: true,
-            message: `Document approved. User tier: ${newTier}`,
+            message: `Document approved successfully. User upgraded to Tier ${newTier}.`,
             new_tier: newTier
         });
         
     } catch (error) {
-        console.error("Approve document error:", error);
-        res.status(500).json({ error: "Failed to approve document" });
+        console.error('Approve document error:', error);
+        res.status(500).json({ error: 'Failed to approve document' });
     }
 });
 
-// Admin reject specific document
-app.post("/api/admin/upgrade/reject-document/:documentId", authenticate, authorizeAdmin, async (req, res) => {
+// Reject upgrade document (admin only)
+app.post('/api/admin/upgrade/reject-document/:documentId', authenticate, authorizeAdmin, async (req, res) => {
     try {
         const { documentId } = req.params;
         const { reason } = req.body;
+        const adminId = req.user.id;
         
-        if (!reason) {
-            return res.status(400).json({ error: "Rejection reason required" });
+        if (!reason || reason.trim() === '') {
+            return res.status(400).json({ error: 'Rejection reason is required' });
         }
         
-        // Get document with user info
+        // Get document
         const { data: document, error: docError } = await supabase
-            .from("user_upgrade_documents")
-            .select(`
-                *,
-                users!inner (
-                    id,
-                    first_name,
-                    last_name,
-                    email
-                )
-            `)
-            .eq("id", documentId)
+            .from('user_upgrade_documents')
+            .select('*, users:user_id(*)')
+            .eq('id', documentId)
             .single();
         
         if (docError || !document) {
-            return res.status(404).json({ error: "Document not found" });
-        }
-        
-        if (document.status !== "pending") {
-            return res.status(400).json({ error: "Document already processed" });
+            return res.status(404).json({ error: 'Document not found' });
         }
         
         // Update document status
         const { error: updateError } = await supabase
-            .from("user_upgrade_documents")
+            .from('user_upgrade_documents')
             .update({
-                status: "rejected",
-                rejection_reason: reason,
+                status: 'rejected',
                 reviewed_at: new Date().toISOString(),
-                reviewed_by: req.user.id
+                reviewed_by: adminId,
+                rejection_reason: reason
             })
-            .eq("id", documentId);
+            .eq('id', documentId);
         
         if (updateError) throw updateError;
         
         const userId = document.user_id;
         
-        // Create rejection notification for user
-        const documentTypeName = document.document_type === "id" ? "ID document" : "Address proof";
+        // Update upgrade request status
+        const { data: upgradeRequest } = await supabase
+            .from('user_upgrade_requests')
+            .select('*')
+            .eq('user_id', userId)
+            .single();
         
-        await supabase.from("notifications").insert({
-            user_id: userId,
-            title: `❌ ${documentTypeName} Rejected`,
-            message: `Your ${documentTypeName} was rejected. Reason: ${reason}. Please submit a valid document.`,
-            type: "error",
-            created_at: new Date().toISOString()
-        });
+        if (upgradeRequest) {
+            await supabase
+                .from('user_upgrade_requests')
+                .update({
+                    overall_status: 'rejected',
+                    updated_at: new Date().toISOString()
+                })
+                .eq('user_id', userId);
+        }
         
-        // Update user's upgrade status if needed
+        // Create notification for user
         await supabase
-            .from("users")
-            .update({
-                tier_upgrade_status: "rejected",
-                updated_at: new Date().toISOString()
-            })
-            .eq("id", userId);
+            .from('notifications')
+            .insert({
+                user_id: userId,
+                title: `Upgrade Document ${document.document_type === 'id' ? 'ID' : 'Address'} Rejected`,
+                message: `Your ${document.document_type === 'id' ? 'ID document' : 'address proof'} was rejected. Reason: ${reason}. Please resubmit with correct documents.`,
+                type: 'error',
+                created_at: new Date().toISOString()
+            });
         
         // Log admin action
-        await supabase.from("admin_actions").insert({
-            admin_id: req.user.id,
-            action_type: "reject_upgrade_document",
-            target_user_id: userId,
-            details: {
-                document_type: document.document_type,
-                reason: reason
-            },
-            created_at: new Date().toISOString()
-        });
+        await supabase
+            .from('admin_actions')
+            .insert({
+                admin_id: adminId,
+                action_type: 'reject_upgrade_document',
+                target_user_id: userId,
+                details: {
+                    document_id: documentId,
+                    document_type: document.document_type,
+                    reason: reason
+                },
+                ip_address: req.ip,
+                created_at: new Date().toISOString()
+            });
         
         res.json({
             success: true,
-            message: "Document rejected"
+            message: 'Document rejected successfully'
         });
         
     } catch (error) {
-        console.error("Reject document error:", error);
-        res.status(500).json({ error: "Failed to reject document" });
+        console.error('Reject document error:', error);
+        res.status(500).json({ error: 'Failed to reject document' });
     }
-});*/
+});
 
-// Admin: Get upgrade requests - FIXED with proper joins
-app.get(
-  "/api/admin/upgrade-requests",
-  authenticate,
-  authorizeAdmin,
-  async (req, res) => {
+// ==================== GET USER ACCOUNT LIMITS BASED ON TIER ====================
+
+app.get('/api/user/account-limits', authenticate, checkAccountFrozen, async (req, res) => {
     try {
-      const {
-        page = 1,
-        limit = 20,
-        status = "pending",
-        document_type = "all",
-        search = "",
-      } = req.query;
-      const offset = (parseInt(page) - 1) * parseInt(limit);
-
-      // Build query - use explicit table names to avoid ambiguity
-      let query = supabase.from("user_upgrade_documents").select(`
-                id,
-                user_id,
-                document_type,
-                document_data,
-                status,
-                rejection_reason,
-                submitted_at,
-                reviewed_at,
-                users!user_upgrade_documents_user_id_fkey (
-                    id,
-                    first_name,
-                    last_name,
-                    email,
-                    account_tier
-                )
-            `);
-
-      // Apply filters
-      if (status !== "all") {
-        query = query.eq("status", status);
-      } else {
-        query = query.eq("status", "pending");
-      }
-
-      if (document_type !== "all") {
-        query = query.eq("document_type", document_type);
-      }
-
-      if (search) {
-        query = query.or(
-          `users.first_name.ilike.%${search}%,users.last_name.ilike.%${search}%,users.email.ilike.%${search}%`,
-        );
-      }
-
-      const {
-        data: documents,
-        error,
-        count,
-      } = await query.order("submitted_at", { ascending: false });
-
-      if (error) {
-        console.error("Query error:", error);
-        throw error;
-      }
-
-      // Format response
-      const formattedRequests = (documents || []).map((doc) => ({
-        id: doc.id,
-        user_id: doc.user_id,
-        user_name:
-          `${doc.users?.first_name || ""} ${doc.users?.last_name || ""}`.trim(),
-        user_email: doc.users?.email,
-        document_type: doc.document_type,
-        document_data:
-          typeof doc.document_data === "string"
-            ? JSON.parse(doc.document_data)
-            : doc.document_data,
-        status: doc.status,
-        submitted_at: doc.submitted_at,
-        current_user_tier: doc.users?.account_tier,
-        reviewed_at: doc.reviewed_at,
-        rejection_reason: doc.rejection_reason,
-      }));
-
-      // Apply pagination manually
-      const paginatedRequests = formattedRequests.slice(
-        offset,
-        offset + parseInt(limit),
-      );
-
-      // Get counts for stats - using separate queries
-      const { count: pendingIdCount } = await supabase
-        .from("user_upgrade_documents")
-        .select("*", { count: "exact", head: true })
-        .eq("document_type", "id")
-        .eq("status", "pending");
-
-      const { count: pendingAddressCount } = await supabase
-        .from("user_upgrade_documents")
-        .select("*", { count: "exact", head: true })
-        .eq("document_type", "address")
-        .eq("status", "pending");
-
-      res.json({
-        requests: paginatedRequests,
-        pagination: {
-          page: parseInt(page),
-          limit: parseInt(limit),
-          total: formattedRequests.length,
-          pages: Math.ceil(formattedRequests.length / parseInt(limit)),
-        },
-        stats: {
-          pending_id: pendingIdCount || 0,
-          pending_address: pendingAddressCount || 0,
-          total_pending: (pendingIdCount || 0) + (pendingAddressCount || 0),
-        },
-      });
+        const userId = req.user.id;
+        
+        // Get user tier
+        const { data: user, error: userError } = await supabase
+            .from('users')
+            .select('account_tier, is_frozen')
+            .eq('id', userId)
+            .single();
+        
+        if (userError) throw userError;
+        
+        // Define tier limits
+        const tierLimits = {
+            1: {
+                max_balance: 500000,
+                daily_limit: 150000,
+                single_transfer_limit: 150000,
+                monthly_limit: 3000000,
+                name: 'Basic'
+            },
+            2: {
+                max_balance: 800000,
+                daily_limit: 250000,
+                single_transfer_limit: 250000,
+                monthly_limit: 5000000,
+                name: 'Verified'
+            },
+            3: {
+                max_balance: 999999999,
+                daily_limit: 999999999,
+                single_transfer_limit: 999999999,
+                monthly_limit: 999999999,
+                name: 'Premium'
+            }
+        };
+        
+        const limits = tierLimits[user.account_tier] || tierLimits[1];
+        
+        // Get user's total balance
+        const { data: accounts } = await supabase
+            .from('accounts')
+            .select('balance')
+            .eq('user_id', userId);
+        
+        const totalBalance = accounts?.reduce((sum, acc) => sum + (acc.balance || 0), 0) || 0;
+        
+        // Get today's transactions total
+        const today = new Date();
+        today.setHours(0, 0, 0, 0);
+        
+        const { data: todayTransactions } = await supabase
+            .from('transactions')
+            .select('amount')
+            .eq('from_user_id', userId)
+            .eq('status', 'completed')
+            .gte('created_at', today.toISOString());
+        
+        const dailyUsed = todayTransactions?.reduce((sum, t) => sum + (t.amount || 0), 0) || 0;
+        
+        // Get this month's transactions total
+        const firstDayOfMonth = new Date(today.getFullYear(), today.getMonth(), 1);
+        
+        const { data: monthTransactions } = await supabase
+            .from('transactions')
+            .select('amount')
+            .eq('from_user_id', userId)
+            .eq('status', 'completed')
+            .gte('created_at', firstDayOfMonth.toISOString());
+        
+        const monthlyUsed = monthTransactions?.reduce((sum, t) => sum + (t.amount || 0), 0) || 0;
+        
+        res.json({
+            account_tier: user.account_tier,
+            tier_name: limits.name,
+            max_balance: limits.max_balance,
+            daily_limit: limits.daily_limit,
+            single_transfer_limit: limits.single_transfer_limit,
+            monthly_limit: limits.monthly_limit,
+            daily_used: dailyUsed,
+            monthly_used: monthlyUsed,
+            total_balance: totalBalance,
+            is_frozen: user.is_frozen
+        });
+        
     } catch (error) {
-      console.error("Get upgrade requests error:", error);
-      res
-        .status(500)
-        .json({ error: "Failed to load upgrade requests: " + error.message });
+        console.error('Get account limits error:', error);
+        res.status(500).json({ error: 'Failed to get account limits' });
     }
-  },
-);
+});
 
-// Admin: Approve document - FIXED
-app.post(
-  "/api/admin/upgrade/approve-document/:documentId",
-  authenticate,
-  authorizeAdmin,
-  async (req, res) => {
+// ==================== GET ACCOUNT TIER INFO ====================
+
+app.get('/api/user/tier-info', authenticate, async (req, res) => {
     try {
-      const { documentId } = req.params;
-
-      // Get document with user info - use explicit join
-      const { data: document, error: docError } = await supabase
-        .from("user_upgrade_documents")
-        .select(
-          `
-                id,
-                user_id,
-                document_type,
-                document_data,
-                status,
-                users!user_upgrade_documents_user_id_fkey (
-                    id,
-                    first_name,
-                    last_name,
-                    email,
-                    account_tier
-                )
-            `,
-        )
-        .eq("id", documentId)
-        .single();
-
-      if (docError || !document) {
-        return res.status(404).json({ error: "Document not found" });
-      }
-
-      if (document.status !== "pending") {
-        return res.status(400).json({ error: "Document already processed" });
-      }
-
-      const userId = document.user_id;
-      const currentTier = document.users?.account_tier || 1;
-
-      // Update document status
-      const { error: updateError } = await supabase
-        .from("user_upgrade_documents")
-        .update({
-          status: "approved",
-          reviewed_at: new Date().toISOString(),
-          reviewed_by: req.user.id,
-        })
-        .eq("id", documentId);
-
-      if (updateError) throw updateError;
-
-      let newTier = currentTier;
-
-      // Check if ID document was approved
-      if (document.document_type === "id") {
-        if (currentTier < 2) {
-          newTier = 2;
-          await supabase
-            .from("users")
-            .update({
-              account_tier: 2,
-              tier_upgrade_status: "approved",
-              updated_at: new Date().toISOString(),
-            })
-            .eq("id", userId);
-        }
-
-        // Check if address document also approved for this user
-        const { data: addressDoc } = await supabase
-          .from("user_upgrade_documents")
-          .select("status")
-          .eq("user_id", userId)
-          .eq("document_type", "address")
-          .eq("status", "approved")
-          .maybeSingle();
-
-        if (addressDoc && currentTier < 3) {
-          newTier = 3;
-          await supabase
-            .from("users")
-            .update({
-              account_tier: 3,
-              address_proof_status: "verified",
-              updated_at: new Date().toISOString(),
-            })
-            .eq("id", userId);
-        }
-      }
-
-      // If address document approved, check if ID also approved
-      if (document.document_type === "address") {
-        await supabase
-          .from("users")
-          .update({
-            address_proof_status: "verified",
-            updated_at: new Date().toISOString(),
-          })
-          .eq("id", userId);
-
-        const { data: idDoc } = await supabase
-          .from("user_upgrade_documents")
-          .select("status")
-          .eq("user_id", userId)
-          .eq("document_type", "id")
-          .eq("status", "approved")
-          .maybeSingle();
-
-        if (idDoc && currentTier < 3) {
-          newTier = 3;
-          await supabase
-            .from("users")
-            .update({
-              account_tier: 3,
-              updated_at: new Date().toISOString(),
-            })
-            .eq("id", userId);
-        }
-      }
-
-      // Create notification
-      const docTypeName =
-        document.document_type === "id" ? "ID document" : "Address proof";
-      await supabase.from("notifications").insert({
-        user_id: userId,
-        title: "Document Approved ✅",
-        message: `Your ${docTypeName} has been approved.${newTier > currentTier ? ` Your account has been upgraded to Tier ${newTier}!` : ""}`,
-        type: "success",
-        created_at: new Date().toISOString(),
-      });
-
-      // Log admin action
-      await supabase.from("admin_actions").insert({
-        admin_id: req.user.id,
-        action_type: "approve_upgrade_document",
-        target_user_id: userId,
-        details: {
-          document_type: document.document_type,
-          new_tier: newTier,
-          previous_tier: currentTier,
-        },
-        created_at: new Date().toISOString(),
-      });
-
-      res.json({
-        success: true,
-        message: `Document approved. User is now Tier ${newTier}`,
-        new_tier: newTier,
-      });
+        const userId = req.user.id;
+        
+        const { data: user, error: userError } = await supabase
+            .from('users')
+            .select('account_tier, is_frozen, freeze_reason, frozen_reason_type')
+            .eq('id', userId)
+            .single();
+        
+        if (userError) throw userError;
+        
+        // Get upgrade request status
+        const { data: upgradeRequest } = await supabase
+            .from('user_upgrade_requests')
+            .select('*')
+            .eq('user_id', userId)
+            .single();
+        
+        // Get documents
+        const { data: documents } = await supabase
+            .from('user_upgrade_documents')
+            .select('*')
+            .eq('user_id', userId);
+        
+        const idDoc = documents?.find(d => d.document_type === 'id');
+        const addressDoc = documents?.find(d => d.document_type === 'address');
+        
+        const tierLimits = {
+            1: { max_balance: 500000, daily_limit: 150000, name: 'Basic' },
+            2: { max_balance: 800000, daily_limit: 250000, name: 'Verified' },
+            3: { max_balance: 999999999, daily_limit: 999999999, name: 'Premium' }
+        };
+        
+        // Get total balance to check if exceeds limit
+        const { data: accounts } = await supabase
+            .from('accounts')
+            .select('balance')
+            .eq('user_id', userId);
+        
+        const totalBalance = accounts?.reduce((sum, acc) => sum + (acc.balance || 0), 0) || 0;
+        const exceedsBalanceLimit = totalBalance > tierLimits[user.account_tier].max_balance;
+        
+        res.json({
+            current_tier: user.account_tier,
+            tier_name: tierLimits[user.account_tier].name,
+            max_balance: tierLimits[user.account_tier].max_balance,
+            daily_limit: tierLimits[user.account_tier].daily_limit,
+            current_balance: totalBalance,
+            exceeds_balance_limit: exceedsBalanceLimit,
+            is_frozen: user.is_frozen,
+            frozen_reason: user.freeze_reason,
+            frozen_reason_type: user.frozen_reason_type,
+            upgrade_status: {
+                email_verified: upgradeRequest?.email_verified || false,
+                id_status: idDoc?.status || 'not_submitted',
+                address_status: addressDoc?.status || 'not_submitted',
+                id_rejection_reason: idDoc?.rejection_reason,
+                address_rejection_reason: addressDoc?.rejection_reason,
+                overall_status: upgradeRequest?.overall_status || 'none'
+            }
+        });
+        
     } catch (error) {
-      console.error("Approve document error:", error);
-      res
-        .status(500)
-        .json({ error: "Failed to approve document: " + error.message });
+        console.error('Get tier info error:', error);
+        res.status(500).json({ error: 'Failed to get tier information' });
     }
-  },
-);
+});
 
-// Admin: Reject document - FIXED
-app.post(
-  "/api/admin/upgrade/reject-document/:documentId",
-  authenticate,
-  authorizeAdmin,
-  async (req, res) => {
-    try {
-      const { documentId } = req.params;
-      const { reason } = req.body;
 
-      if (!reason) {
-        return res.status(400).json({ error: "Rejection reason required" });
-      }
-
-      // Get document with user info
-      const { data: document, error: docError } = await supabase
-        .from("user_upgrade_documents")
-        .select(
-          `
-                id,
-                user_id,
-                document_type,
-                users!user_upgrade_documents_user_id_fkey (
-                    id,
-                    first_name,
-                    last_name,
-                    email
-                )
-            `,
-        )
-        .eq("id", documentId)
-        .single();
-
-      if (docError || !document) {
-        return res.status(404).json({ error: "Document not found" });
-      }
-
-      if (document.status !== "pending") {
-        return res.status(400).json({ error: "Document already processed" });
-      }
-
-      // Update document status
-      const { error: updateError } = await supabase
-        .from("user_upgrade_documents")
-        .update({
-          status: "rejected",
-          rejection_reason: reason,
-          reviewed_at: new Date().toISOString(),
-          reviewed_by: req.user.id,
-        })
-        .eq("id", documentId);
-
-      if (updateError) throw updateError;
-
-      // Update user's upgrade status
-      await supabase
-        .from("users")
-        .update({
-          tier_upgrade_status: "rejected",
-          updated_at: new Date().toISOString(),
-        })
-        .eq("id", document.user_id);
-
-      // Create notification
-      const docTypeName =
-        document.document_type === "id" ? "ID document" : "Address proof";
-      await supabase.from("notifications").insert({
-        user_id: document.user_id,
-        title: "Document Rejected ❌",
-        message: `Your ${docTypeName} was rejected. Reason: ${reason}. Please submit a valid document.`,
-        type: "error",
-        created_at: new Date().toISOString(),
-      });
-
-      // Log admin action
-      await supabase.from("admin_actions").insert({
-        admin_id: req.user.id,
-        action_type: "reject_upgrade_document",
-        target_user_id: document.user_id,
-        details: {
-          document_type: document.document_type,
-          reason: reason,
-        },
-        created_at: new Date().toISOString(),
-      });
-
-      res.json({
-        success: true,
-        message: "Document rejected",
-      });
-    } catch (error) {
-      console.error("Reject document error:", error);
-      res
-        .status(500)
-        .json({ error: "Failed to reject document: " + error.message });
-    }
-  },
-);
 
 // ==================== ADMIN RESET USER PASSWORD ====================
 
@@ -11912,272 +11245,6 @@ app.post(
   },
 );
 
-// Get account limits
-/*app.get("/api/user/account-limits", authenticate, async (req, res) => {
-  try {
-    const userId = req.user.id;
-
-    // Get user's account
-    const { data: account } = await supabase
-      .from("accounts")
-      .select("*")
-      .eq("user_id", userId)
-      .eq("account_type", "checking")
-      .single();
-
-    // Get today's transactions sum
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
-    const { data: todayTxs } = await supabase
-      .from("transactions")
-      .select("amount")
-      .eq("from_user_id", userId)
-      .eq("status", "completed")
-      .gte("created_at", today.toISOString());
-
-    const dailyUsed = todayTxs?.reduce((sum, t) => sum + t.amount, 0) || 0;
-
-    // Get this week's transactions sum
-    const weekStart = new Date();
-    weekStart.setDate(weekStart.getDate() - weekStart.getDay());
-    weekStart.setHours(0, 0, 0, 0);
-    const { data: weekTxs } = await supabase
-      .from("transactions")
-      .select("amount")
-      .eq("from_user_id", userId)
-      .eq("status", "completed")
-      .gte("created_at", weekStart.toISOString());
-
-    const weeklyUsed = weekTxs?.reduce((sum, t) => sum + t.amount, 0) || 0;
-
-    // Get this month's transactions sum
-    const monthStart = new Date();
-    monthStart.setDate(1);
-    monthStart.setHours(0, 0, 0, 0);
-    const { data: monthTxs } = await supabase
-      .from("transactions")
-      .select("amount")
-      .eq("from_user_id", userId)
-      .eq("status", "completed")
-      .gte("created_at", monthStart.toISOString());
-
-    const monthlyUsed = monthTxs?.reduce((sum, t) => sum + t.amount, 0) || 0;
-
-    res.json({
-      daily_limit: 1000000, // ₦1,000,000 (was $1,000)
-      weekly_limit: 5000000, // ₦5,000,000 (was $5,000)
-      monthly_limit: 20000000, // ₦20,000,000 (was $20,000)
-      single_transaction_limit: 1000000, // ₦1,000,000
-      daily_used: dailyUsed,
-      weekly_used: weeklyUsed,
-      monthly_used: monthlyUsed,
-    });
-  } catch (error) {
-    console.error("Limits error:", error);
-    res.status(500).json({ error: "Failed to fetch limits" });
-  }
-});*/
-
-// Get account limits with tier information - SAFE VERSION
-/*app.get("/api/user/account-limits", authenticate, async (req, res) => {
-  try {
-    const userId = req.user.id;
-
-    // Get user's tier (with fallback)
-    const { data: user, error: userError } = await supabase
-      .from("users")
-      .select("account_tier")
-      .eq("id", userId)
-      .single();
-
-    if (userError) {
-      console.error("User fetch error:", userError);
-      // Return default limits if user not found
-      return res.json({
-        max_balance: 500000,
-        daily_limit: 150000,
-        single_transfer_limit: 150000,
-        monthly_limit: 3000000,
-        daily_used: 0,
-        monthly_used: 0,
-        current_tier: 1,
-        current_balance: 0,
-        balance_percentage: 0,
-      });
-    }
-
-    const userTier = user?.account_tier || 1;
-
-    // Get tier limits (with fallback)
-    let tierLimits;
-    const { data: limits, error: limitsError } = await supabase
-      .from("account_tier_limits")
-      .select("*")
-      .eq("tier", userTier)
-      .single();
-
-    if (limitsError || !limits) {
-      // Fallback limits if table doesn't exist
-      const fallbackLimits = {
-        1: {
-          max_balance: 500000,
-          daily_transfer_limit: 150000,
-          single_transfer_limit: 150000,
-          monthly_transfer_limit: 3000000,
-        },
-        2: {
-          max_balance: 800000,
-          daily_transfer_limit: 250000,
-          single_transfer_limit: 250000,
-          monthly_transfer_limit: 5000000,
-        },
-        3: {
-          max_balance: 999999999,
-          daily_transfer_limit: 999999999,
-          single_transfer_limit: 999999999,
-          monthly_transfer_limit: 999999999,
-        },
-      };
-      tierLimits = fallbackLimits[userTier] || fallbackLimits[1];
-    } else {
-      tierLimits = limits;
-    }
-
-    // Get user's total balance
-    const { data: accounts } = await supabase
-      .from("accounts")
-      .select("balance")
-      .eq("user_id", userId);
-
-    const totalBalance =
-      accounts?.reduce((sum, acc) => sum + (acc.balance || 0), 0) || 0;
-
-    // Get today's transactions sum
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
-    const { data: todayTxs } = await supabase
-      .from("transactions")
-      .select("amount")
-      .eq("from_user_id", userId)
-      .eq("status", "completed")
-      .gte("created_at", today.toISOString());
-
-    const dailyUsed = todayTxs?.reduce((sum, t) => sum + t.amount, 0) || 0;
-
-    // Get this month's transactions sum
-    const monthStart = new Date();
-    monthStart.setDate(1);
-    monthStart.setHours(0, 0, 0, 0);
-    const { data: monthTxs } = await supabase
-      .from("transactions")
-      .select("amount")
-      .eq("from_user_id", userId)
-      .eq("status", "completed")
-      .gte("created_at", monthStart.toISOString());
-
-    const monthlyUsed = monthTxs?.reduce((sum, t) => sum + t.amount, 0) || 0;
-
-    res.json({
-      max_balance: tierLimits.max_balance,
-      daily_limit: tierLimits.daily_transfer_limit,
-      single_transfer_limit: tierLimits.single_transfer_limit,
-      monthly_limit: tierLimits.monthly_transfer_limit,
-      daily_used: dailyUsed,
-      monthly_used: monthlyUsed,
-      current_tier: userTier,
-      current_balance: totalBalance,
-      balance_percentage: (totalBalance / tierLimits.max_balance) * 100,
-    });
-  } catch (error) {
-    console.error("Account limits error:", error);
-    // Return safe default limits
-    res.json({
-      max_balance: 500000,
-      daily_limit: 150000,
-      single_transfer_limit: 150000,
-      monthly_limit: 3000000,
-      daily_used: 0,
-      monthly_used: 0,
-      current_tier: 1,
-      current_balance: 0,
-      balance_percentage: 0,
-    });
-  }
-});*/
-
-// Get account limits with tier information
-app.get("/api/user/account-limits", authenticate, async (req, res) => {
-  try {
-    const userId = req.user.id;
-
-    // Get user's tier
-    const { data: user, error: userError } = await supabase
-      .from("users")
-      .select("account_tier")
-      .eq("id", userId)
-      .single();
-
-    if (userError) throw userError;
-
-    // Get tier limits
-    const { data: tierLimits, error: limitsError } = await supabase
-      .from("account_tier_limits")
-      .select("*")
-      .eq("tier", user.account_tier)
-      .single();
-
-    if (limitsError) throw limitsError;
-
-    // Get user's total balance
-    const { data: accounts } = await supabase
-      .from("accounts")
-      .select("balance")
-      .eq("user_id", userId);
-
-    const totalBalance =
-      accounts?.reduce((sum, acc) => sum + (acc.balance || 0), 0) || 0;
-
-    // Get today's transactions sum
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
-    const { data: todayTxs } = await supabase
-      .from("transactions")
-      .select("amount")
-      .eq("from_user_id", userId)
-      .eq("status", "completed")
-      .gte("created_at", today.toISOString());
-
-    const dailyUsed = todayTxs?.reduce((sum, t) => sum + t.amount, 0) || 0;
-
-    // Get this month's transactions sum
-    const monthStart = new Date();
-    monthStart.setDate(1);
-    monthStart.setHours(0, 0, 0, 0);
-    const { data: monthTxs } = await supabase
-      .from("transactions")
-      .select("amount")
-      .eq("from_user_id", userId)
-      .eq("status", "completed")
-      .gte("created_at", monthStart.toISOString());
-
-    const monthlyUsed = monthTxs?.reduce((sum, t) => sum + t.amount, 0) || 0;
-
-    res.json({
-      max_balance: tierLimits.max_balance,
-      daily_limit: tierLimits.daily_transfer_limit,
-      single_transfer_limit: tierLimits.single_transfer_limit,
-      monthly_limit: tierLimits.monthly_transfer_limit,
-      daily_used: dailyUsed,
-      monthly_used: monthlyUsed,
-      current_tier: user.account_tier,
-      current_balance: totalBalance,
-      balance_percentage: (totalBalance / tierLimits.max_balance) * 100,
-    });
-  } catch (error) {
-    console.error("Account limits error:", error);
-    res.status(500).json({ error: "Failed to fetch limits" });
-  }
-});
 
 // Export transactions as CSV
 app.get("/api/user/transactions/export", authenticate, async (req, res) => {
