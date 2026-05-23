@@ -1,13 +1,11 @@
-// Update the tier-info response to include pending statuses
-// Find this section in your index.js and update it:
-
+// Update the tier-info response to properly separate Tier 2 and Tier 3 pending statuses
 app.get("/api/user/tier-info", authenticate, async (req, res) => {
   try {
     // Get user's current tier
     const { data: user, error: userError } = await supabase
       .from("users")
       .select(
-        "account_tier, email_verified, phone_verified, identification_type, identification_number, tier_upgrade_status, address_proof_status"
+        "account_tier, email_verified, phone_verified, identification_type, identification_number, tier_upgrade_status, address_proof_status, address_proof_image"
       )
       .eq("id", req.user.id)
       .single();
@@ -62,14 +60,9 @@ app.get("/api/user/tier-info", authenticate, async (req, res) => {
         }
 
         if (nextLimits.requires_address_proof) {
-          const { data: addressProof } = await supabase
-            .from("users")
-            .select("address_proof_status")
-            .eq("id", req.user.id)
-            .single();
           upgradeRequirements.push({
             requirement: "Proof of Address",
-            met: addressProof?.address_proof_status === "verified",
+            met: user.address_proof_status === "verified",
             action: "upload_address",
           });
         }
@@ -107,13 +100,19 @@ app.get("/api/user/tier-info", authenticate, async (req, res) => {
       limits.daily_transfer_limit - todayTransferred,
     );
 
-    // ========== IMPROVED: Return pending statuses for frontend ==========
-    // Check if user has pending verification
+    // ========== CRITICAL FIX: Separate Tier 2 and Tier 3 pending statuses ==========
     const hasSubmittedId = !!(user.identification_type && user.identification_number);
-    const isIdPending = hasSubmittedId && user.account_tier < 2 && user.tier_upgrade_status === "pending";
-    const isAddressPending = user.address_proof_status === "pending";
-    const isIdRejected = user.tier_upgrade_status === "rejected";
-    const isAddressRejected = user.address_proof_status === "rejected";
+    const hasSubmittedAddress = !!user.address_proof_image;
+    
+    // Tier 2 pending: Has submitted ID but not yet approved and still Tier 1
+    const isTier2Pending = hasSubmittedId && user.account_tier === 1 && user.tier_upgrade_status === "pending";
+    
+    // Tier 3 pending: Has submitted address proof but not yet approved, and is Tier 2
+    const isTier3Pending = hasSubmittedAddress && user.account_tier === 2 && user.address_proof_status === "pending";
+    
+    // Rejection statuses
+    const isTier2Rejected = user.tier_upgrade_status === "rejected" && user.account_tier === 1;
+    const isTier3Rejected = user.address_proof_status === "rejected" && user.account_tier === 2;
 
     res.json({
       success: true,
@@ -144,13 +143,18 @@ app.get("/api/user/tier-info", authenticate, async (req, res) => {
         email_verified: user.email_verified || false,
         phone_verified: user.phone_verified || false,
         id_verified: user.account_tier >= 2,
-        // NEW: Pending and rejection statuses
-        id_pending: isIdPending,
-        address_pending: isAddressPending,
-        id_rejected: isIdRejected,
-        address_rejected: isAddressRejected,
+        // CRITICAL: Separate pending statuses by tier
+        tier2_pending: isTier2Pending,
+        tier3_pending: isTier3Pending,
+        tier2_rejected: isTier2Rejected,
+        tier3_rejected: isTier3Rejected,
+        // Legacy fields (keep for backward compatibility)
+        id_pending: isTier2Pending,
+        address_pending: isTier3Pending,
+        id_rejected: isTier2Rejected,
+        address_rejected: isTier3Rejected,
         id_submitted: hasSubmittedId,
-        address_submitted: !!user.address_proof_image,
+        address_submitted: hasSubmittedAddress,
         rejection_reason: user.upgrade_rejection_reason || null,
       },
     });
