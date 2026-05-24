@@ -10105,6 +10105,77 @@ app.get(
 
 // ==================== EMAIL VERIFICATION FOR UPGRADE ====================
 
+// ==================== GET ACCOUNT TIER INFO ====================
+
+app.get('/api/user/tier-info', authenticate, async (req, res) => {
+    try {
+        const userId = req.user.id;
+        
+        const { data: user, error: userError } = await supabase
+            .from('users')
+            .select('account_tier, is_frozen, freeze_reason, frozen_reason_type')
+            .eq('id', userId)
+            .single();
+        
+        if (userError) throw userError;
+        
+        // Get upgrade request status
+        const { data: upgradeRequest } = await supabase
+            .from('user_upgrade_requests')
+            .select('*')
+            .eq('user_id', userId)
+            .single();
+        
+        // Get documents
+        const { data: documents } = await supabase
+            .from('user_upgrade_documents')
+            .select('*')
+            .eq('user_id', userId);
+        
+        const idDoc = documents?.find(d => d.document_type === 'id');
+        const addressDoc = documents?.find(d => d.document_type === 'address');
+        
+        const tierLimits = {
+            1: { max_balance: 500000, daily_limit: 150000, name: 'Basic' },
+            2: { max_balance: 800000, daily_limit: 250000, name: 'Verified' },
+            3: { max_balance: 999999999, daily_limit: 999999999, name: 'Premium' }
+        };
+        
+        // Get total balance to check if exceeds limit
+        const { data: accounts } = await supabase
+            .from('accounts')
+            .select('balance')
+            .eq('user_id', userId);
+        
+        const totalBalance = accounts?.reduce((sum, acc) => sum + (acc.balance || 0), 0) || 0;
+        const exceedsBalanceLimit = totalBalance > tierLimits[user.account_tier].max_balance;
+        
+        res.json({
+            current_tier: user.account_tier,
+            tier_name: tierLimits[user.account_tier].name,
+            max_balance: tierLimits[user.account_tier].max_balance,
+            daily_limit: tierLimits[user.account_tier].daily_limit,
+            current_balance: totalBalance,
+            exceeds_balance_limit: exceedsBalanceLimit,
+            is_frozen: user.is_frozen,
+            frozen_reason: user.freeze_reason,
+            frozen_reason_type: user.frozen_reason_type,
+            upgrade_status: {
+                email_verified: upgradeRequest?.email_verified || false,
+                id_status: idDoc?.status || 'not_submitted',
+                address_status: addressDoc?.status || 'not_submitted',
+                id_rejection_reason: idDoc?.rejection_reason,
+                address_rejection_reason: addressDoc?.rejection_reason,
+                overall_status: upgradeRequest?.overall_status || 'none'
+            }
+        });
+        
+    } catch (error) {
+        console.error('Get tier info error:', error);
+        res.status(500).json({ error: 'Failed to get tier information' });
+    }
+});
+
 // Send email verification OTP for upgrade
 app.post('/api/user/upgrade/send-email-otp', authenticate, checkAccountFrozen, async (req, res) => {
     try {
@@ -10948,76 +11019,7 @@ app.get('/api/user/account-limits', authenticate, checkAccountFrozen, async (req
     }
 });
 
-// ==================== GET ACCOUNT TIER INFO ====================
 
-app.get('/api/user/tier-info', authenticate, async (req, res) => {
-    try {
-        const userId = req.user.id;
-        
-        const { data: user, error: userError } = await supabase
-            .from('users')
-            .select('account_tier, is_frozen, freeze_reason, frozen_reason_type')
-            .eq('id', userId)
-            .single();
-        
-        if (userError) throw userError;
-        
-        // Get upgrade request status
-        const { data: upgradeRequest } = await supabase
-            .from('user_upgrade_requests')
-            .select('*')
-            .eq('user_id', userId)
-            .single();
-        
-        // Get documents
-        const { data: documents } = await supabase
-            .from('user_upgrade_documents')
-            .select('*')
-            .eq('user_id', userId);
-        
-        const idDoc = documents?.find(d => d.document_type === 'id');
-        const addressDoc = documents?.find(d => d.document_type === 'address');
-        
-        const tierLimits = {
-            1: { max_balance: 500000, daily_limit: 150000, name: 'Basic' },
-            2: { max_balance: 800000, daily_limit: 250000, name: 'Verified' },
-            3: { max_balance: 999999999, daily_limit: 999999999, name: 'Premium' }
-        };
-        
-        // Get total balance to check if exceeds limit
-        const { data: accounts } = await supabase
-            .from('accounts')
-            .select('balance')
-            .eq('user_id', userId);
-        
-        const totalBalance = accounts?.reduce((sum, acc) => sum + (acc.balance || 0), 0) || 0;
-        const exceedsBalanceLimit = totalBalance > tierLimits[user.account_tier].max_balance;
-        
-        res.json({
-            current_tier: user.account_tier,
-            tier_name: tierLimits[user.account_tier].name,
-            max_balance: tierLimits[user.account_tier].max_balance,
-            daily_limit: tierLimits[user.account_tier].daily_limit,
-            current_balance: totalBalance,
-            exceeds_balance_limit: exceedsBalanceLimit,
-            is_frozen: user.is_frozen,
-            frozen_reason: user.freeze_reason,
-            frozen_reason_type: user.frozen_reason_type,
-            upgrade_status: {
-                email_verified: upgradeRequest?.email_verified || false,
-                id_status: idDoc?.status || 'not_submitted',
-                address_status: addressDoc?.status || 'not_submitted',
-                id_rejection_reason: idDoc?.rejection_reason,
-                address_rejection_reason: addressDoc?.rejection_reason,
-                overall_status: upgradeRequest?.overall_status || 'none'
-            }
-        });
-        
-    } catch (error) {
-        console.error('Get tier info error:', error);
-        res.status(500).json({ error: 'Failed to get tier information' });
-    }
-});
 
 
 
