@@ -1332,204 +1332,6 @@ app.post("/api/auth/register", async (req, res) => {
 });
 
 // LOGIN - COMPLETE REPLACEMENT with proper session handling
-/*app.post("/api/auth/login", authLimiter, async (req, res) => {
-  try {
-    const { email, password, fingerprint } = req.body;
-    const ip = req.ip;
-
-    // Check failed attempts
-    const attemptsKey = `${ip}:${email}`;
-    const attempts = failedAttempts.get(attemptsKey) || {
-      count: 0,
-      firstAttempt: Date.now(),
-    };
-
-    if (Date.now() - attempts.firstAttempt > 15 * 60 * 1000) {
-      attempts.count = 0;
-      attempts.firstAttempt = Date.now();
-    }
-
-    if (attempts.count >= 5) {
-      return res.status(429).json({
-        error: "Too many failed attempts. Account temporarily locked.",
-      });
-    }
-
-    // Get user
-    const { data: user, error } = await supabase
-      .from("users")
-      .select("*")
-      .eq("email", email)
-      .single();
-
-    if (error || !user) {
-      attempts.count++;
-      failedAttempts.set(attemptsKey, attempts);
-      return res.status(401).json({ error: "Invalid credentials" });
-    }
-
-    // Check password
-    const validPassword = await bcrypt.compare(password, user.password_hash);
-    if (!validPassword) {
-      attempts.count++;
-      failedAttempts.set(attemptsKey, attempts);
-      await logSecurityEvent(user.id, "failed_login", { ip, fingerprint });
-      return res.status(401).json({ error: "Invalid credentials" });
-    }
-
-    // Check if account is active
-    if (!user.is_active) {
-      return res.status(403).json({ error: "Account is deactivated" });
-    }
-
-    // Check if account is frozen
-    if (user.is_frozen) {
-      return res.status(403).json({
-        error: "Account frozen",
-        freeze_reason: user.freeze_reason,
-        unfreeze_method: user.unfreeze_method,
-      });
-    }
-
-    // Clear failed attempts on successful login
-    failedAttempts.delete(attemptsKey);
-
-    // Check 2FA
-    if (user.two_factor_enabled) {
-      const otp = Math.floor(100000 + Math.random() * 900000).toString();
-      const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
-
-      await supabase.from("otps").insert({
-        user_id: user.id,
-        otp_code: otp,
-        otp_type: "login",
-        expires_at: expiresAt,
-      });
-
-      await sendOTPEmail(user.email, otp);
-      return res.json({
-        requiresTwoFactor: true,
-        userId: user.id,
-        message: "OTP sent to your email",
-      });
-    }
-
-    // ========== SESSION MANAGEMENT ==========
-
-    // Get device info
-    const deviceInfo = getDeviceInfo(req);
-
-    // Get current session version
-    const sessionVersion = Date.now();
-
-    // Generate token with session ID
-    const sessionId = generateSessionId(user.id);
-
-    // Create JWT with session info
-    const token = jwt.sign(
-      {
-        userId: user.id,
-        email: user.email,
-        role: user.role,
-        sessionId: sessionId,
-        sessionVersion: sessionVersion,
-        issuedAt: Date.now(),
-      },
-      process.env.JWT_SECRET,
-      { expiresIn: process.env.JWT_EXPIRE || "7d" },
-    );
-
-    // FIRST: Invalidate ALL existing sessions for this user
-    const invalidatedCount = await invalidateAllUserSessions(
-      user.id,
-      "New login from another device",
-    );
-    console.log(
-      `Invalidated ${invalidatedCount} old sessions for user ${user.id}`,
-    );
-
-    // THEN: Create new session
-    const expiresAt = new Date();
-    expiresAt.setDate(expiresAt.getDate() + 7);
-
-    // Insert new session
-    const { error: sessionError } = await supabase
-      .from("user_sessions")
-      .insert({
-        user_id: user.id,
-        session_token: token,
-        session_id: sessionId,
-        device_fingerprint: deviceInfo.device_name,
-        device_name: deviceInfo.device_name,
-        ip_address: deviceInfo.ip_address,
-        user_agent: deviceInfo.user_agent,
-        expires_at: expiresAt.toISOString(),
-        is_active: true,
-        is_current: true,
-        session_version: sessionVersion,
-      });
-
-    if (sessionError) {
-      console.error("Session insert error:", sessionError);
-    }
-
-    // Update user's active session
-    await supabase
-      .from("users")
-      .update({
-        active_session_id: sessionId,
-        last_active_device: deviceInfo.device_name,
-        active_session_started_at: new Date().toISOString(),
-        last_login: new Date().toISOString(),
-        session_version: sessionVersion,
-      })
-      .eq("id", user.id);
-
-      await new Promise(resolve => setTimeout(resolve, 100));
-
-    // Log successful login
-    await logSecurityEvent(user.id, "successful_login", {
-      ip,
-      fingerprint,
-      device: deviceInfo.device_name,
-      session_id: sessionId,
-    });
-
-    // Create notification about new device login if there was a previous session
-    if (invalidatedCount > 0) {
-      await supabase.from("notifications").insert({
-        user_id: user.id,
-        title: "New Device Login",
-        message: `Your account was accessed from a new device: ${deviceInfo.device_name} at ${new Date().toLocaleString()}. If this wasn't you, please log in immediately and change your password.`,
-        type: "security",
-        created_at: new Date().toISOString(),
-      });
-    }
-
-    // Return success with session info
-    res.json({
-      token,
-      user: {
-        id: user.id,
-        email: user.email,
-        first_name: user.first_name,
-        last_name: user.last_name,
-        role: user.role,
-        is_frozen: user.is_frozen,
-        kyc_status: user.kyc_status,
-      },
-      session: {
-        id: sessionId,
-        device: deviceInfo.device_name,
-        logged_in_at: new Date().toISOString(),
-      },
-    });
-  } catch (error) {
-    console.error("Login error:", error);
-    res.status(500).json({ error: "Login failed: " + error.message });
-  }
-});*/
-
 app.post("/api/auth/login", authLimiter, async (req, res) => {
   try {
     const { email, password, fingerprint } = req.body;
@@ -1781,42 +1583,6 @@ app.post("/api/user/logout", authenticate, async (req, res) => {
 });
 
 // ==================== SESSION MANAGEMENT ENDPOINTS ====================
-
-// Check session validity endpoint
-/*app.get("/api/auth/check-session", authenticate, async (req, res) => {
-  try {
-    const token = req.headers.authorization?.split(" ")[1];
-    const decoded = jwt.verify(token, process.env.JWT_SECRET);
-
-    if (!decoded.sessionId) {
-      return res.json({
-        valid: false,
-        reason: "Old session format",
-        code: "SESSION_EXPIRED",
-      });
-    }
-
-    const { valid, reason, code, device_name } = await checkSessionValidity(
-      req.user.id,
-      decoded.sessionId,
-      token,
-    );
-
-    if (!valid) {
-      return res.json({
-        valid: false,
-        reason: reason,
-        code: code,
-        device_name: device_name,
-      });
-    }
-
-    res.json({ valid: true });
-  } catch (error) {
-    console.error("Session check error:", error);
-    res.json({ valid: true });
-  }
-});*/
 
 app.get("/api/auth/check-session", authenticate, async (req, res) => {
   try {
@@ -2260,322 +2026,80 @@ app.post("/api/user/change-passcode", authenticate, async (req, res) => {
   }
 });
 
-// ==================== FACE VERIFICATION ROUTES ====================
-
-// Store face descriptor during registration
-app.post("/api/auth/register-face", authenticate, async (req, res) => {
+// ── 1. GET /api/user/face-descriptor ──────────────────────────────────────────
+app.get('/api/user/face-descriptor', authenticateToken, async (req, res) => {
   try {
-    const { face_descriptor } = req.body;
+    const userId = req.user.id || req.user.userId;
 
-    if (!face_descriptor || !Array.isArray(face_descriptor)) {
-      return res.status(400).json({ error: "Invalid face descriptor" });
+    // Fetch the stored descriptor from your users table.
+    // Adjust the column/table name to match your schema.
+    // Registration should store it in a column called `face_descriptor`
+    // as a JSON array  (e.g. JSON.stringify(Array.from(descriptor))).
+    const result = await pool.query(
+      'SELECT face_descriptor FROM users WHERE id = $1',
+      [userId]
+    );
+
+    const user = result.rows[0];
+
+    if (!user) {
+      return res.status(404).json({ error: 'User not found' });
     }
 
-    // Store face descriptor
-    const { error } = await supabase.from("face_descriptors").insert({
-      user_id: req.user.id,
-      descriptor: face_descriptor,
-      is_active: true,
-    });
+    if (!user.face_descriptor) {
+      return res.status(400).json({
+        error: 'No face registered on this account. Please complete face registration first.',
+      });
+    }
 
-    if (error) throw error;
+    // Parse if stored as a JSON string, pass through if already an array
+    let descriptor = user.face_descriptor;
+    if (typeof descriptor === 'string') {
+      descriptor = JSON.parse(descriptor);
+    }
 
-    res.json({ success: true, message: "Face registered successfully" });
-  } catch (error) {
-    console.error("Face registration error:", error);
-    res.status(500).json({ error: "Failed to register face" });
+    return res.json({ face_descriptor: descriptor });
+  } catch (err) {
+    console.error('[face-descriptor] Error:', err);
+    return res.status(500).json({ error: 'Internal server error' });
   }
 });
 
-// Register face during user registration (add to existing registration route)
-async function registerFaceWithAI(userId, faceImages) {
+
+// ── 2. POST /api/auth/face/audit ──────────────────────────────────────────────
+app.post('/api/auth/face/audit', authenticateToken, async (req, res) => {
   try {
-    const response = await axios.post(
-      `${AI_SERVICE_URL}/v1/face/register`,
-      {
-        images: faceImages,
-        user_id: userId,
-      },
-      {
-        headers: {
-          Authorization: `Bearer ${AI_SERVICE_API_KEY}`,
-          "Content-Type": "application/json",
-        },
-        timeout: 30000,
-      },
-    );
+    const { matched, distance, similarity } = req.body;
+    const userId = req.user.id || req.user.userId;
 
-    if (response.data && response.data.success) {
-      // Store encrypted embedding in database
-      const { error } = await supabase
-        .from("users")
-        .update({
-          face_embedding: response.data.embedding,
-          face_verified: true,
-          face_verification_date: new Date().toISOString(),
-          face_quality_score: response.data.average_quality,
-        })
-        .eq("id", userId);
+    // Optional: log to a face_audit_log table
+    // CREATE TABLE face_audit_log (
+    //   id         SERIAL PRIMARY KEY,
+    //   user_id    INTEGER REFERENCES users(id),
+    //   matched    BOOLEAN,
+    //   distance   NUMERIC(6,4),
+    //   similarity NUMERIC(6,4),
+    //   ip_address TEXT,
+    //   created_at TIMESTAMPTZ DEFAULT NOW()
+    // );
 
-      if (error) {
-        console.error("Failed to save face embedding:", error);
-        return false;
-      }
+    await pool.query(
+      `INSERT INTO face_audit_log (user_id, matched, distance, similarity, ip_address)
+       VALUES ($1, $2, $3, $4, $5)
+       ON CONFLICT DO NOTHING`,
+      [
+        userId,
+        matched,
+        distance,
+        similarity,
+        req.headers['x-forwarded-for'] || req.socket?.remoteAddress || null,
+      ]
+    ).catch(() => {}); // Non-fatal — table may not exist yet
 
-      return true;
-    }
-
-    return false;
-  } catch (error) {
-    console.error("AI service registration error:", error);
-    return false;
-  }
-}
-
-// Verify face with AI
-async function verifyFaceWithAI(userId, faceImage, sessionId) {
-  try {
-    // Get stored embedding
-    const { data: user, error } = await supabase
-      .from("users")
-      .select("face_embedding")
-      .eq("id", userId)
-      .single();
-
-    if (error || !user || !user.face_embedding) {
-      return { success: false, error: "No face registered for this user" };
-    }
-
-    const response = await axios.post(
-      `${AI_SERVICE_URL}/v1/face/verify`,
-      {
-        image: faceImage,
-        stored_embedding: user.face_embedding,
-        user_id: userId,
-      },
-      {
-        headers: {
-          Authorization: `Bearer ${AI_SERVICE_API_KEY}`,
-          "Content-Type": "application/json",
-        },
-        timeout: 15000,
-      },
-    );
-
-    return response.data;
-  } catch (error) {
-    console.error("AI service verification error:", error);
-    return { success: false, error: "Face verification failed" };
-  }
-}
-
-// Verify liveness with AI
-async function verifyLivenessWithAI(frames) {
-  try {
-    const response = await axios.post(
-      `${AI_SERVICE_URL}/v1/face/liveness`,
-      {
-        frames: frames,
-      },
-      {
-        headers: {
-          Authorization: `Bearer ${AI_SERVICE_API_KEY}`,
-          "Content-Type": "application/json",
-        },
-        timeout: 20000,
-      },
-    );
-
-    return response.data;
-  } catch (error) {
-    console.error("AI service liveness error:", error);
-    return {
-      success: false,
-      is_live: false,
-      error: "Liveness detection failed",
-    };
-  }
-}
-
-// Generate secure session ID for face verification
-function generateFaceSessionId() {
-  return crypto.randomBytes(32).toString("hex");
-}
-
-// New endpoint: Start face verification session
-app.post("/api/auth/face/start-session", async (req, res) => {
-  try {
-    const { identifier } = req.body;
-
-    if (!identifier) {
-      return res.status(400).json({ error: "Identifier required" });
-    }
-
-    // Find user
-    let query = supabase.from("users").select("id, email, face_embedding");
-    if (identifier.includes("@")) {
-      query = query.eq("email", identifier);
-    } else {
-      query = query.eq("phone", identifier);
-    }
-
-    const { data: user, error } = await query.single();
-
-    if (error || !user) {
-      return res.status(404).json({ error: "User not found" });
-    }
-
-    if (!user.face_embedding) {
-      return res
-        .status(400)
-        .json({ error: "Face not registered for this user" });
-    }
-
-    //const sessionId = generateFaceSessionId();
-
-    faceVerificationStates.set(sessionId, {
-      user_id: user.id,
-      timestamp: Date.now(),
-      attempts: 0,
-    });
-
-    // Clean up old sessions periodically
-    setTimeout(() => {
-      faceVerificationStates.delete(sessionId);
-    }, 300000); // 5 minutes
-
-    res.json({
-      success: true,
-      session_id: sessionId,
-      message: "Face verification session started",
-    });
-  } catch (error) {
-    console.error("Start face session error:", error);
-    res.status(500).json({ error: "Failed to start session" });
-  }
-});
-
-// Enhanced face login endpoint with multi-frame liveness
-app.post("/api/auth/face/login", async (req, res) => {
-  try {
-    const { session_id, frames, final_image } = req.body;
-
-    if (!session_id || !frames || !final_image) {
-      return res.status(400).json({ error: "Missing required data" });
-    }
-
-    // Get session
-    const session = faceVerificationStates.get(session_id);
-    if (!session) {
-      return res.status(401).json({ error: "Invalid or expired session" });
-    }
-
-    // Check attempts
-    if (session.attempts >= 3) {
-      faceVerificationStates.delete(session_id);
-      return res
-        .status(429)
-        .json({ error: "Too many attempts. Please try again." });
-    }
-
-    // Update attempts
-    session.attempts++;
-    faceVerificationStates.set(session_id, session);
-
-    // Step 1: Verify liveness with multiple frames
-    const livenessResult = await verifyLivenessWithAI(frames);
-
-    if (!livenessResult.success || !livenessResult.is_live) {
-      return res.status(401).json({
-        error: "Liveness verification failed",
-        details:
-          "Please look directly at the camera and complete the verification steps",
-      });
-    }
-
-    // Step 2: Verify face match
-    const verificationResult = await verifyFaceWithAI(
-      session.user_id,
-      final_image,
-      session_id,
-    );
-
-    if (!verificationResult.success) {
-      return res.status(401).json({
-        error: verificationResult.error || "Face verification failed",
-      });
-    }
-
-    if (!verificationResult.matched) {
-      return res.status(401).json({
-        error: "Face not recognized",
-        similarity_score: verificationResult.similarity_score,
-      });
-    }
-
-    // Get user data
-    const { data: user, error: userError } = await supabase
-      .from("users")
-      .select("id, email, first_name, last_name, role")
-      .eq("id", session.user_id)
-      .single();
-
-    if (userError || !user) {
-      return res.status(404).json({ error: "User not found" });
-    }
-
-    // Check account status
-    if (user.is_frozen) {
-      return res
-        .status(403)
-        .json({ error: "Account frozen", freeze_reason: user.freeze_reason });
-    }
-
-    if (!user.is_active) {
-      return res.status(403).json({ error: "Account deactivated" });
-    }
-
-    // Generate JWT token
-    const token = jwt.sign(
-      { userId: user.id, email: user.email, role: user.role },
-      process.env.JWT_SECRET,
-      { expiresIn: process.env.JWT_EXPIRE },
-    );
-
-    // Update last login
-    await supabase
-      .from("users")
-      .update({ last_login: new Date() })
-      .eq("id", user.id);
-
-    // Log successful face login
-    await supabase.from("security_logs").insert({
-      user_id: user.id,
-      event_type: "face_login_success",
-      details: {
-        similarity_score: verificationResult.similarity_score,
-        quality_score: verificationResult.quality_score,
-      },
-      ip_address: req.ip,
-    });
-
-    // Clean up session
-    faceVerificationStates.delete(session_id);
-
-    res.json({
-      success: true,
-      token,
-      user: {
-        id: user.id,
-        email: user.email,
-        first_name: user.first_name,
-        last_name: user.last_name,
-        role: user.role,
-      },
-    });
-  } catch (error) {
-    console.error("Face login error:", error);
-    res.status(500).json({ error: "Face login failed" });
+    return res.json({ ok: true });
+  } catch (err) {
+    // Audit failure must never break the client
+    return res.json({ ok: false });
   }
 });
 
@@ -3940,168 +3464,6 @@ app.get("/api/user/accounts", authenticate, async (req, res) => {
   }
 });
 
-// Get transactions with user details
-/*app.get(
-  "/api/user/transactions",
-  authenticate,
-  checkAccountFrozen,
-  async (req, res) => {
-    try {
-      const { page = 1, limit = 20, start_date, end_date, type } = req.query;
-      const offset = (parseInt(page) - 1) * parseInt(limit);
-
-      // Get user's account IDs first (lighter query)
-      const { data: accounts, error: accountsError } = await supabase
-        .from("accounts")
-        .select("id")
-        .eq("user_id", req.user.id);
-
-      if (accountsError) throw accountsError;
-
-      const accountIds = accounts.map((a) => a.id);
-
-      if (accountIds.length === 0) {
-        return res.json({
-          transactions: [],
-          pagination: { page: 1, limit: 20, total: 0, pages: 0 },
-        });
-      }
-
-      // Build query - use OR condition properly
-      let query = supabase
-        .from("transactions")
-        .select(
-          "id, transaction_id, amount, description, transaction_type, status, created_at, completed_at, from_account_id, to_account_id, from_user_id, to_user_id",
-          { count: "exact" },
-        )
-        .or(
-          `from_account_id.in.(${accountIds.join(",")}),to_account_id.in.(${accountIds.join(",")})`,
-        )
-        .order("created_at", { ascending: false });
-
-      // Apply filters
-      if (start_date) {
-        query = query.gte("created_at", start_date);
-      }
-      if (end_date) {
-        query = query.lte("created_at", `${end_date}T23:59:59`);
-      }
-      if (type && type !== "all") {
-        query = query.eq("transaction_type", type);
-      }
-
-      const {
-        data: transactions,
-        error,
-        count,
-      } = await query.range(offset, offset + parseInt(limit) - 1);
-
-      if (error) throw error;
-
-      // Get user details separately (only for displayed transactions)
-      const userIds = new Set();
-      transactions.forEach((t) => {
-        if (t.from_user_id) userIds.add(t.from_user_id);
-        if (t.to_user_id) userIds.add(t.to_user_id);
-      });
-
-      let userDetails = {};
-      if (userIds.size > 0) {
-        const { data: users } = await supabase
-          .from("users")
-          .select("id, first_name, last_name, email")
-          .in("id", [...userIds]);
-
-        userDetails = (users || []).reduce((acc, u) => {
-          acc[u.id] = u;
-          return acc;
-        }, {});
-      }
-
-      // Get account details
-      const accountIdsSet = new Set();
-      transactions.forEach((t) => {
-        if (t.from_account_id) accountIdsSet.add(t.from_account_id);
-        if (t.to_account_id) accountIdsSet.add(t.to_account_id);
-      });
-
-      let accountDetails = {};
-      if (accountIdsSet.size > 0) {
-        const { data: accountsData } = await supabase
-          .from("accounts")
-          .select("id, account_number, account_type")
-          .in("id", [...accountIdsSet]);
-
-        accountDetails = (accountsData || []).reduce((acc, a) => {
-          acc[a.id] = a;
-          return acc;
-        }, {});
-      }
-
-      // Combine data
-      const enrichedTransactions = transactions.map((t) => ({
-        ...t,
-        from_user: userDetails[t.from_user_id] || null,
-        to_user: userDetails[t.to_user_id] || null,
-        from_account: accountDetails[t.from_account_id] || null,
-        to_account: accountDetails[t.to_account_id] || null,
-      }));
-
-      res.json({
-        transactions: enrichedTransactions,
-        pagination: {
-          page: parseInt(page),
-          limit: parseInt(limit),
-          total: count || 0,
-          pages: Math.ceil((count || 0) / parseInt(limit)),
-        },
-      });
-    } catch (error) {
-      console.error("Transactions fetch error:", error);
-      res.status(500).json({ error: "Failed to fetch transactions" });
-    }
-  },
-);
-
-// Get single transaction details for receipt viewing
-app.get(
-  "/api/user/transactions/:transactionId",
-  authenticate,
-  async (req, res) => {
-    try {
-      const { transactionId } = req.params;
-
-      const { data: transaction, error } = await supabase
-        .from("transactions")
-        .select(
-          `
-          *,
-          from_account:accounts!transactions_from_account_id_fkey(id, account_number),
-          to_account:accounts!transactions_to_account_id_fkey(id, account_number),
-          from_user:users!transactions_from_user_id_fkey(id, first_name, last_name, email),
-          to_user:users!transactions_to_user_id_fkey(id, first_name, last_name, email)
-        `,
-        )
-        .eq("id", transactionId)
-        .single();
-
-      if (error) throw error;
-
-      // Verify user owns this transaction
-      if (
-        transaction.from_user_id !== req.user.id &&
-        transaction.to_user_id !== req.user.id
-      ) {
-        return res.status(403).json({ error: "Access denied" });
-      }
-
-      res.json(transaction);
-    } catch (error) {
-      console.error("Transaction fetch error:", error);
-      res.status(500).json({ error: "Failed to fetch transaction" });
-    }
-  },
-);*/
 
 // Get user transactions - FIXED VERSION
 app.get(
@@ -5251,76 +4613,7 @@ async function updateFailedTransactionRecord(
   }
 }
 
-// In index.js - Completely rewrite the updateFailedTransactionRecord function
-/*async function updateFailedTransactionRecord(
-  transactionRecordId,
-  reason,
-  failureType,
-  details = {},
-) {
-  if (!transactionRecordId) {
-    console.error(
-      "No transactionRecordId provided to updateFailedTransactionRecord",
-    );
-    return false;
-  }
 
-  try {
-    console.log(
-      `🔄 Updating failed record ${transactionRecordId}: ${reason} (${failureType})`,
-    );
-
-    let finalReason = reason;
-    let finalDescription = `Failed transfer - ${reason}`;
-
-    // Build proper messages based on failure type
-    if (failureType === "balance_error") {
-      finalReason = `Insufficient balance. Available: ₦${details.available_balance?.toLocaleString() || "N/A"}, Required: ₦${details.amount?.toLocaleString() || "N/A"}`;
-      finalDescription = `Failed transfer - Insufficient funds. Available: ₦${details.available_balance?.toLocaleString() || "N/A"}, Required: ₦${details.amount?.toLocaleString() || "N/A"}`;
-    } else if (failureType === "validation_error") {
-      finalReason = reason;
-      finalDescription = `Failed transfer - ${reason}`;
-    } else if (failureType === "account_error") {
-      finalReason = reason;
-      finalDescription = `Failed transfer - ${reason}`;
-    } else if (failureType === "security_new_device") {
-      finalReason = reason;
-      finalDescription = `Failed transfer - ${reason}`;
-    } else if (failureType === "account_frozen") {
-      finalReason = reason;
-      finalDescription = `Failed transfer - ${reason}`;
-    } else if (failureType === "pin_error") {
-      finalReason = reason;
-      finalDescription = `Failed transfer - ${reason}`;
-    }
-
-    const updates = {
-      failed_reason: finalReason,
-      failure_type: failureType,
-      description: finalDescription,
-      status: "failed",
-      completed_at: new Date().toISOString(),
-      updated_at: new Date().toISOString(),
-    };
-
-    const { error } = await supabase
-      .from("transactions")
-      .update(updates)
-      .eq("id", transactionRecordId);
-
-    if (error) {
-      console.error("Failed to update failed record:", error);
-      return false;
-    }
-
-    console.log(`✅ Successfully updated failed record ${transactionRecordId}`);
-    console.log(`   New failure_reason: ${finalReason}`);
-    return true;
-  } catch (error) {
-    console.error("Error updating failed record:", error);
-    return false;
-  }
-}*/
 
 // Process fee income for admin (called by transfer route)
 async function processFeeIncome(
@@ -10832,74 +10125,6 @@ app.get(
 );
 
 // ==================== ADMIN UPGRADE DOCUMENT REVIEW ROUTES ====================
-
-// Get all upgrade requests (admin only)
-/*app.get('/api/admin/upgrade-requests', authenticate, authorizeAdmin, async (req, res) => {
-    try {
-        const { page = 1, limit = 20, status = 'all', document_type = 'all' } = req.query;
-        const offset = (parseInt(page) - 1) * parseInt(limit);
-        
-        let query = supabase
-            .from('user_upgrade_documents')
-            .select(`
-                *,
-                users:user_id (
-                    id,
-                    first_name,
-                    last_name,
-                    email,
-                    account_tier,
-                    phone
-                )
-            `, { count: 'exact' });
-        
-        if (status !== 'all') {
-            query = query.eq('status', status);
-        }
-        
-        if (document_type !== 'all') {
-            query = query.eq('document_type', document_type);
-        }
-        
-        const { data: documents, error, count } = await query
-            .order('submitted_at', { ascending: false })
-            .range(offset, offset + parseInt(limit) - 1);
-        
-        if (error) throw error;
-        
-        // Get stats
-        const { data: pendingIdDocs } = await supabase
-            .from('user_upgrade_documents')
-            .select('id', { count: 'exact', head: true })
-            .eq('document_type', 'id')
-            .eq('status', 'pending');
-        
-        const { data: pendingAddressDocs } = await supabase
-            .from('user_upgrade_documents')
-            .select('id', { count: 'exact', head: true })
-            .eq('document_type', 'address')
-            .eq('status', 'pending');
-        
-        res.json({
-            requests: documents || [],
-            pagination: {
-                page: parseInt(page),
-                limit: parseInt(limit),
-                total: count || 0,
-                pages: Math.ceil((count || 0) / parseInt(limit))
-            },
-            stats: {
-                pending_id: pendingIdDocs?.length || 0,
-                pending_address: pendingAddressDocs?.length || 0,
-                total_pending: (pendingIdDocs?.length || 0) + (pendingAddressDocs?.length || 0)
-            }
-        });
-        
-    } catch (error) {
-        console.error('Get upgrade requests error:', error);
-        res.status(500).json({ error: 'Failed to get upgrade requests' });
-    }
-});*/
 
 // GET all upgrade requests (admin only) - FIXED
 app.get(

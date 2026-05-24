@@ -1,113 +1,285 @@
-// Enhanced sendOTPEmail function that supports different email types
-async function sendOTPEmail(email, otp, type = 'reset') {
-    console.log(`📧 Attempting to send ${type} email to ${email}${otp ? ` with OTP: ${otp}` : ''}`);
+// ==================== PRODUCTION FACE VERIFICATION API ====================
+// Uses face-api.js for reliable face matching without external AI services
 
-    // Check SMTP configuration
-    if (!process.env.SMTP_HOST || !process.env.SMTP_USER || !process.env.SMTP_PASS) {
-        console.error("❌ SMTP credentials missing. Email not sent.");
-        return false;
-    }
+const { createCanvas, loadImage } = require('canvas');
+const tf = require('@tensorflow/tfjs-node');
 
+// Lazy load face-api.js to avoid blocking startup
+let faceapi = null;
+let modelsLoaded = false;
+
+async function loadFaceModels() {
+    if (modelsLoaded) return true;
+    
     try {
-        let subject = '';
-        let htmlContent = '';
+        // Dynamic import for face-api.js
+        faceapi = require('face-api.js');
         
-        if (type === 'upgrade') {
-            subject = 'FEECENT - Account Upgrade Verification';
-            htmlContent = `
-                <!DOCTYPE html>
-                <html>
-                <head>
-                    <meta charset="UTF-8">
-                    <title>FEECENT Account Upgrade Verification</title>
-                </head>
-                <body style="font-family: Arial, sans-serif; margin: 0; padding: 20px; background: #f5f5f5;">
-                    <div style="max-width: 500px; margin: 0 auto; background: white; border-radius: 12px; overflow: hidden;">
-                        <div style="background: #6b21a8; padding: 20px; text-align: center;">
-                            <h1 style="color: white; margin: 0;">FEECENT</h1>
-                            <p style="color: #d8b4fe; margin: 5px 0 0;">Account Upgrade Verification</p>
-                        </div>
-                        <div style="padding: 30px 20px;">
-                            <h2 style="color: #333; margin-top: 0;">Verify Your Email</h2>
-                            <p style="color: #666;">You requested to upgrade your FEECENT account. Please use the verification code below to continue:</p>
-                            <div style="background: #f8fafc; padding: 20px; text-align: center; margin: 20px 0; border-radius: 8px;">
-                                <span style="font-size: 42px; font-weight: bold; letter-spacing: 8px; color: #6b21a8; font-family: monospace;">${otp}</span>
-                            </div>
-                            <p style="color: #666; font-size: 14px;">This code expires in <strong>10 minutes</strong>.</p>
-                            <p style="color: #999; font-size: 12px; margin-top: 20px;">If you didn't request this, please ignore this email.</p>
-                        </div>
-                    </div>
-                </body>
-                </html>
-            `;
-        } else if (type === 'verified') {
-            subject = 'FEECENT - Email Verified Successfully';
-            htmlContent = `
-                <!DOCTYPE html>
-                <html>
-                <head>
-                    <meta charset="UTF-8">
-                    <title>Email Verified - FEECENT</title>
-                </head>
-                <body style="font-family: Arial, sans-serif; margin: 0; padding: 20px; background: #f5f5f5;">
-                    <div style="max-width: 500px; margin: 0 auto; background: white; border-radius: 12px; overflow: hidden;">
-                        <div style="background: #10b981; padding: 20px; text-align: center;">
-                            <i class="fas fa-check-circle" style="font-size: 48px; color: white;"></i>
-                            <h1 style="color: white; margin: 10px 0 0;">Email Verified!</h1>
-                        </div>
-                        <div style="padding: 30px 20px;">
-                            <p style="color: #333; font-size: 16px;">Your email has been successfully verified.</p>
-                            <p style="color: #666;">You can now proceed with your account upgrade by submitting your identification documents.</p>
-                            <p style="color: #999; font-size: 12px; margin-top: 20px;">Thank you for choosing FEECENT.</p>
-                        </div>
-                    </div>
-                </body>
-                </html>
-            `;
-        } else {
-            // Default password reset email
-            subject = "FEECENT Password Reset Code";
-            htmlContent = `
-                <!DOCTYPE html>
-                <html>
-                <head>
-                    <meta charset="UTF-8">
-                    <title>FEECENT Verification</title>
-                </head>
-                <body style="font-family: Arial, sans-serif; margin: 0; padding: 20px; background: #f5f5f5;">
-                    <div style="max-width: 500px; margin: 0 auto; background: white; border-radius: 12px; overflow: hidden;">
-                        <div style="background: #6b21a8; padding: 20px; text-align: center;">
-                            <h1 style="color: white; margin: 0;">FEECENT</h1>
-                            <p style="color: #d8b4fe; margin: 5px 0 0;">Password Reset</p>
-                        </div>
-                        <div style="padding: 30px 20px;">
-                            <h2 style="color: #333; margin-top: 0;">Password Reset</h2>
-                            <p style="color: #666;">Your verification code is:</p>
-                            <div style="background: #f8fafc; padding: 20px; text-align: center; margin: 20px 0; border-radius: 8px;">
-                                <span style="font-size: 42px; font-weight: bold; letter-spacing: 8px; color: #6b21a8; font-family: monospace;">${otp}</span>
-                            </div>
-                            <p style="color: #666; font-size: 14px;">This code expires in <strong>10 minutes</strong>.</p>
-                            <p style="color: #999; font-size: 12px; margin-top: 20px;">If you didn't request this, please ignore this email.</p>
-                        </div>
-                    </div>
-                </body>
-                </html>
-            `;
+        // Configure canvas for Node.js
+        const { Canvas, Image, ImageData } = require('canvas');
+        faceapi.env.monkeyPatch({ Canvas, Image, ImageData });
+        
+        // Load models from local path (you need to download these files)
+        const modelPath = './models/face-api'; // Create this folder
+        
+        // Check if models exist, if not download them
+        const fs = require('fs');
+        if (!fs.existsSync(modelPath)) {
+            fs.mkdirSync(modelPath, { recursive: true });
+            console.log('⚠️ Face models not found. Please download them from:');
+            console.log('https://github.com/justadudewhohacks/face-api.js/tree/master/weights');
+            console.log(`Place them in: ${modelPath}`);
+            return false;
         }
-
-        const mailOptions = {
-            from: `"FEECENT" <${process.env.SMTP_FROM || process.env.SMTP_USER}>`,
-            to: email,
-            subject: subject,
-            html: htmlContent,
-            text: type === 'upgrade' ? `Your FEECENT account upgrade verification code is: ${otp}. Valid for 10 minutes.` : `Your FEECENT password reset code is: ${otp}. Valid for 10 minutes.`
-        };
-
-        const info = await transporter.sendMail(mailOptions);
-        console.log(`✅ ${type} email sent to ${email}, Message ID: ${info.messageId}`);
+        
+        await faceapi.nets.ssdMobilenetv1.loadFromDisk(modelPath);
+        await faceapi.nets.faceLandmark68Net.loadFromDisk(modelPath);
+        await faceapi.nets.faceRecognitionNet.loadFromDisk(modelPath);
+        
+        modelsLoaded = true;
+        console.log('✅ Face recognition models loaded successfully');
         return true;
     } catch (error) {
-        console.error(`❌ Email error (${type}):`, error.message);
+        console.error('Failed to load face models:', error);
         return false;
     }
 }
+
+// Helper: Convert base64 to tensor
+async function base64ToTensor(base64String) {
+    const base64Data = base64String.replace(/^data:image\/\w+;base64,/, '');
+    const buffer = Buffer.from(base64Data, 'base64');
+    const image = await loadImage(buffer);
+    const canvas = createCanvas(image.width, image.height);
+    const ctx = canvas.getContext('2d');
+    ctx.drawImage(image, 0, 0);
+    return faceapi?.tf?.browser?.fromPixels(canvas);
+}
+
+// Helper: Extract face descriptor from image
+async function extractFaceDescriptor(imageBase64) {
+    if (!faceapi || !modelsLoaded) {
+        await loadFaceModels();
+        if (!faceapi || !modelsLoaded) {
+            throw new Error('Face recognition not available');
+        }
+    }
+    
+    const base64Data = imageBase64.replace(/^data:image\/\w+;base64,/, '');
+    const buffer = Buffer.from(base64Data, 'base64');
+    const image = await loadImage(buffer);
+    const canvas = createCanvas(image.width, image.height);
+    const ctx = canvas.getContext('2d');
+    ctx.drawImage(image, 0, 0);
+    
+    const detection = await faceapi.detectSingleFace(canvas)
+        .withFaceLandmarks()
+        .withFaceDescriptor();
+    
+    if (!detection) {
+        throw new Error('No face detected in image');
+    }
+    
+    return {
+        descriptor: Array.from(detection.descriptor),
+        landmarks: detection.landmarks,
+        detection: detection.detection
+    };
+}
+
+// Compare two face descriptors using cosine similarity
+function compareFaceDescriptors(descriptor1, descriptor2, threshold = 0.6) {
+    // Cosine similarity
+    let dotProduct = 0;
+    let mag1 = 0;
+    let mag2 = 0;
+    
+    for (let i = 0; i < descriptor1.length; i++) {
+        dotProduct += descriptor1[i] * descriptor2[i];
+        mag1 += descriptor1[i] * descriptor1[i];
+        mag2 += descriptor2[i] * descriptor2[i];
+    }
+    
+    mag1 = Math.sqrt(mag1);
+    mag2 = Math.sqrt(mag2);
+    
+    const similarity = dotProduct / (mag1 * mag2);
+    const distance = 1 - similarity;
+    
+    return {
+        matched: distance < threshold,
+        similarity: similarity,
+        distance: distance,
+        threshold: threshold
+    };
+}
+
+// Store face descriptor during registration (already handled in your register route)
+// Just ensure the descriptor is stored properly
+
+// === NEW: Simple face verification endpoint ===
+app.post("/api/auth/verify-face", authenticate, async (req, res) => {
+    try {
+        const { face_image, action_type = "verify" } = req.body;
+        
+        if (!face_image) {
+            return res.status(400).json({ error: "Face image required" });
+        }
+        
+        // Load models if not already loaded
+        await loadFaceModels();
+        
+        if (!faceapi || !modelsLoaded) {
+            return res.status(503).json({ error: "Face recognition service unavailable" });
+        }
+        
+        // Extract descriptor from submitted image
+        const submittedDescriptor = await extractFaceDescriptor(face_image);
+        
+        // Get stored face descriptors for this user
+        const { data: storedFaces, error: faceError } = await supabase
+            .from("face_descriptors")
+            .select("descriptor, id")
+            .eq("user_id", req.user.id)
+            .eq("is_active", true);
+        
+        if (faceError || !storedFaces || storedFaces.length === 0) {
+            return res.status(404).json({ 
+                error: "No face registered for this account",
+                code: "NO_FACE_REGISTERED"
+            });
+        }
+        
+        // Compare with stored descriptors
+        let bestMatch = null;
+        let bestSimilarity = -1;
+        
+        for (const stored of storedFaces) {
+            let storedDescriptor = stored.descriptor;
+            
+            // Handle different storage formats
+            if (storedDescriptor && typeof storedDescriptor === 'object') {
+                if (storedDescriptor.descriptor && Array.isArray(storedDescriptor.descriptor)) {
+                    storedDescriptor = storedDescriptor.descriptor;
+                } else if (storedDescriptor.image && storedDescriptor.descriptor) {
+                    storedDescriptor = storedDescriptor.descriptor;
+                }
+            }
+            
+            if (storedDescriptor && Array.isArray(storedDescriptor) && storedDescriptor.length > 0) {
+                const result = compareFaceDescriptors(
+                    submittedDescriptor.descriptor,
+                    storedDescriptor,
+                    0.6
+                );
+                
+                if (result.similarity > bestSimilarity) {
+                    bestSimilarity = result.similarity;
+                    bestMatch = result;
+                }
+            }
+        }
+        
+        if (!bestMatch || !bestMatch.matched) {
+            // Log failed attempt
+            await supabase.from("security_logs").insert({
+                user_id: req.user.id,
+                event_type: "face_verification_failed",
+                details: { 
+                    similarity: bestMatch?.similarity || 0,
+                    action_type 
+                },
+                ip_address: req.ip
+            });
+            
+            return res.status(401).json({
+                success: false,
+                matched: false,
+                error: "Face verification failed",
+                similarity: bestMatch?.similarity || 0
+            });
+        }
+        
+        // Log successful verification
+        await supabase.from("security_logs").insert({
+            user_id: req.user.id,
+            event_type: "face_verification_success",
+            details: { 
+                similarity: bestMatch.similarity,
+                action_type 
+            },
+            ip_address: req.ip
+        });
+        
+        res.json({
+            success: true,
+            matched: true,
+            similarity: bestMatch.similarity,
+            message: "Face verified successfully"
+        });
+        
+    } catch (error) {
+        console.error("Face verification error:", error);
+        res.status(500).json({ 
+            error: "Face verification failed: " + error.message,
+            code: "VERIFICATION_ERROR"
+        });
+    }
+});
+
+// === NEW: Endpoint to check if user has face registered ===
+app.get("/api/user/has-face", authenticate, async (req, res) => {
+    try {
+        const { count, error } = await supabase
+            .from("face_descriptors")
+            .select("*", { count: "exact", head: true })
+            .eq("user_id", req.user.id)
+            .eq("is_active", true);
+        
+        res.json({ 
+            has_face: (count || 0) > 0,
+            face_count: count || 0
+        });
+    } catch (error) {
+        console.error("Check face error:", error);
+        res.json({ has_face: false, face_count: 0 });
+    }
+});
+
+// === NEW: Endpoint to get face image for user (for admin) ===
+app.get("/api/admin/users/:userId/face-image", authenticate, authorizeAdmin, async (req, res) => {
+    try {
+        const { userId } = req.params;
+        
+        const { data: faces, error } = await supabase
+            .from("face_descriptors")
+            .select("descriptor")
+            .eq("user_id", userId)
+            .eq("is_active", true)
+            .limit(1);
+        
+        if (error || !faces || faces.length === 0) {
+            return res.status(404).json({ error: "No face image found" });
+        }
+        
+        let imageData = null;
+        const descriptor = faces[0].descriptor;
+        
+        if (descriptor && typeof descriptor === 'object') {
+            if (descriptor.image) {
+                imageData = descriptor.image;
+            } else if (descriptor.descriptor && descriptor.descriptor.image) {
+                imageData = descriptor.descriptor.image;
+            }
+        }
+        
+        if (!imageData) {
+            return res.status(404).json({ error: "Face image data not found" });
+        }
+        
+        res.json({ face_image: imageData });
+    } catch (error) {
+        console.error("Get face image error:", error);
+        res.status(500).json({ error: "Failed to get face image" });
+    }
+});
