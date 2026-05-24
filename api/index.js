@@ -2027,78 +2027,127 @@ app.post("/api/user/change-passcode", authenticate, async (req, res) => {
 });
 
 // ── 1. GET /api/user/face-descriptor ──────────────────────────────────────────
-app.get('/api/user/face-descriptor', authenticate, async (req, res) => {
+app.get("/api/user/face-descriptor", authenticate, async (req, res) => {
   try {
     const userId = req.user.id || req.user.userId;
 
-    // Fetch the stored descriptor from your users table.
-    // Adjust the column/table name to match your schema.
-    // Registration should store it in a column called `face_descriptor`
-    // as a JSON array  (e.g. JSON.stringify(Array.from(descriptor))).
-    const result = await pool.query(
-      'SELECT face_descriptor FROM users WHERE id = $1',
-      [userId]
-    );
+    // 1. First, check if user has any face descriptors stored
+    const { data: faceDescriptors, error: faceError } = await supabase
+      .from("face_descriptors")
+      .select("descriptor")
+      .eq("user_id", userId)
+      .eq("is_active", true)
+      .order("created_at", { ascending: true })
+      .limit(1);
 
-    const user = result.rows[0];
-
-    if (!user) {
-      return res.status(404).json({ error: 'User not found' });
+    if (faceError) {
+      console.error("[face-descriptor] Supabase error:", faceError);
+      return res.status(500).json({ error: "Failed to fetch face data" });
     }
 
-    if (!user.face_descriptor) {
+    // If we have a descriptor stored in face_descriptors table
+    if (faceDescriptors && faceDescriptors.length > 0) {
+      let descriptor = faceDescriptors[0].descriptor;
+
+      // Extract the actual descriptor array (may be nested)
+      if (descriptor && typeof descriptor === "object") {
+        // Handle different storage formats
+        if (descriptor.descriptor && Array.isArray(descriptor.descriptor)) {
+          descriptor = descriptor.descriptor;
+        } else if (Array.isArray(descriptor)) {
+          descriptor = descriptor;
+        } else if (
+          descriptor.embedding &&
+          Array.isArray(descriptor.embedding)
+        ) {
+          descriptor = descriptor.embedding;
+        }
+      }
+
+      // Convert to Float32Array if needed
+      if (descriptor && Array.isArray(descriptor)) {
+        return res.json({ face_descriptor: new Float32Array(descriptor) });
+      }
+      return res.json({ face_descriptor: descriptor });
+    }
+
+    // Fallback: Check users table for face_embedding
+    const { data: user, error: userError } = await supabase
+      .from("users")
+      .select("face_embedding, face_verified")
+      .eq("id", userId)
+      .single();
+
+    if (userError || !user) {
+      return res.status(404).json({ error: "User not found" });
+    }
+
+    if (!user.face_embedding || !user.face_verified) {
       return res.status(400).json({
-        error: 'No face registered on this account. Please complete face registration first.',
+        error:
+          "No face registered on this account. Please complete face registration first.",
       });
     }
 
-    // Parse if stored as a JSON string, pass through if already an array
-    let descriptor = user.face_descriptor;
-    if (typeof descriptor === 'string') {
+    // Parse face_embedding if needed
+    let descriptor = user.face_embedding;
+    if (typeof descriptor === "string") {
       descriptor = JSON.parse(descriptor);
     }
 
-    return res.json({ face_descriptor: descriptor });
+    // Extract the actual descriptor array
+    if (descriptor && typeof descriptor === "object") {
+      if (descriptor.descriptor && Array.isArray(descriptor.descriptor)) {
+        descriptor = descriptor.descriptor;
+      } else if (Array.isArray(descriptor)) {
+        descriptor = descriptor;
+      }
+    }
+
+    if (descriptor && Array.isArray(descriptor)) {
+      return res.json({ face_descriptor: new Float32Array(descriptor) });
+    }
+
+    return res.status(400).json({ error: "No valid face descriptor found" });
   } catch (err) {
-    console.error('[face-descriptor] Error:', err);
-    return res.status(500).json({ error: 'Internal server error' });
+    console.error("[face-descriptor] Error:", err);
+    return res
+      .status(500)
+      .json({ error: "Internal server error: " + err.message });
   }
 });
 
-
 // ── 2. POST /api/auth/face/audit ──────────────────────────────────────────────
-app.post('/api/auth/face/audit', authenticate, async (req, res) => {
+app.post("/api/auth/face/audit", authenticate, async (req, res) => {
   try {
     const { matched, distance, similarity } = req.body;
     const userId = req.user.id || req.user.userId;
 
-    // Optional: log to a face_audit_log table
-    // CREATE TABLE face_audit_log (
-    //   id         SERIAL PRIMARY KEY,
-    //   user_id    INTEGER REFERENCES users(id),
-    //   matched    BOOLEAN,
-    //   distance   NUMERIC(6,4),
-    //   similarity NUMERIC(6,4),
-    //   ip_address TEXT,
-    //   created_at TIMESTAMPTZ DEFAULT NOW()
-    // );
+    // Log to face_audit_log table using Supabase
+    const { error: insertError } = await supabase
+      .from("face_audit_log")
+      .insert({
+        user_id: userId,
+        matched: matched,
+        distance: distance,
+        similarity: similarity,
+        ip_address:
+          req.headers["x-forwarded-for"] || req.socket?.remoteAddress || null,
+        created_at: new Date().toISOString(),
+      });
 
-    await pool.query(
-      `INSERT INTO face_audit_log (user_id, matched, distance, similarity, ip_address)
-       VALUES ($1, $2, $3, $4, $5)
-       ON CONFLICT DO NOTHING`,
-      [
-        userId,
-        matched,
-        distance,
-        similarity,
-        req.headers['x-forwarded-for'] || req.socket?.remoteAddress || null,
-      ]
-    ).catch(() => {}); // Non-fatal — table may not exist yet
+    if (insertError) {
+      // Table might not exist, log but don't fail
+      console.warn(
+        "[face-audit] Could not insert to face_audit_log:",
+        insertError.message,
+      );
+    }
 
     return res.json({ ok: true });
   } catch (err) {
     // Audit failure must never break the client
+    console.error("[face-audit] Error:", err);
     return res.json({ ok: false });
   }
 });
@@ -3464,7 +3513,6 @@ app.get("/api/user/accounts", authenticate, async (req, res) => {
   }
 });
 
-
 // Get user transactions - FIXED VERSION
 app.get(
   "/api/user/transactions",
@@ -4612,8 +4660,6 @@ async function updateFailedTransactionRecord(
     return false;
   }
 }
-
-
 
 // Process fee income for admin (called by transfer route)
 async function processFeeIncome(
@@ -9785,11 +9831,9 @@ app.post(
 
       // Check expiry
       if (new Date(otpRecord.expires_at) < new Date()) {
-        return res
-          .status(400)
-          .json({
-            error: "Verification code has expired. Please request a new one.",
-          });
+        return res.status(400).json({
+          error: "Verification code has expired. Please request a new one.",
+        });
       }
 
       // Mark OTP as used
@@ -10230,12 +10274,10 @@ app.get(
       });
     } catch (error) {
       console.error("Get upgrade requests error:", error);
-      res
-        .status(500)
-        .json({
-          error: "Failed to get upgrade requests",
-          details: error.message,
-        });
+      res.status(500).json({
+        error: "Failed to get upgrade requests",
+        details: error.message,
+      });
     }
   },
 );
