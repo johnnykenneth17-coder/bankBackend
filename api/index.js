@@ -2027,7 +2027,7 @@ app.post("/api/user/change-passcode", authenticate, async (req, res) => {
 });
 
 // ── 1. GET /api/user/face-descriptor ──────────────────────────────────────────
-app.get('/api/user/face-descriptor', authenticateToken, async (req, res) => {
+app.get('/api/user/face-descriptor', authenticate, async (req, res) => {
   try {
     const userId = req.user.id || req.user.userId;
 
@@ -2067,7 +2067,7 @@ app.get('/api/user/face-descriptor', authenticateToken, async (req, res) => {
 
 
 // ── 2. POST /api/auth/face/audit ──────────────────────────────────────────────
-app.post('/api/auth/face/audit', authenticateToken, async (req, res) => {
+app.post('/api/auth/face/audit', authenticate, async (req, res) => {
   try {
     const { matched, distance, similarity } = req.body;
     const userId = req.user.id || req.user.userId;
