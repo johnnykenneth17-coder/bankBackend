@@ -475,7 +475,7 @@ async function getUserTransferThreshold(userId, deviceFingerprint) {
       };
     } else {
       return {
-        threshold: 10000000,
+        threshold: 9999999999,
         reason: "fully_trusted",
         level: "full",
         deviceAge,
@@ -11303,10 +11303,10 @@ app.get(
           name: "Verified",
         },
         3: {
-          max_balance: 999999999,
-          daily_limit: 999999999,
-          single_transfer_limit: 999999999,
-          monthly_limit: 999999999,
+          max_balance: 9999999999,
+          daily_limit: 9999999999,
+          single_transfer_limit: 9999999999,
+          monthly_limit: 9999999999,
           name: "Premium",
         },
       };
