@@ -1220,8 +1220,6 @@ app.post("/api/auth/register", async (req, res) => {
             vector: vector,
             angle: i,
             timestamp: new Date().toISOString(),
-            compressed: true,
-            format: "jpeg",
           },
           version: 1,
           is_primary: false,
