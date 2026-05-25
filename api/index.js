@@ -2262,6 +2262,295 @@ app.post("/api/auth/face/audit", authenticate, async (req, res) => {
   }
 });
 
+// ==================== FACE DATA DEBUG ENDPOINT ====================
+// This will show you EXACTLY what's stored for any user
+
+app.get("/api/admin/debug/face-data/:userId", authenticate, authorizeAdmin, async (req, res) => {
+  try {
+    const { userId } = req.params;
+    
+    console.log(`[DEBUG] Fetching face data for user: ${userId}`);
+    
+    // 1. Get user basic info
+    const { data: user, error: userError } = await supabase
+      .from("users")
+      .select(`
+        id,
+        email,
+        first_name,
+        last_name,
+        face_verified,
+        face_embedding,
+        face_quality_score,
+        face_verification_date,
+        face_embedding_version,
+        created_at
+      `)
+      .eq("id", userId)
+      .single();
+    
+    if (userError) {
+      console.error("User fetch error:", userError);
+      return res.status(404).json({ error: "User not found", details: userError });
+    }
+    
+    // 2. Get all face descriptors
+    const { data: descriptors, error: descError } = await supabase
+      .from("face_descriptors")
+      .select(`
+        id,
+        descriptor,
+        is_primary,
+        is_active,
+        quality_score,
+        version,
+        created_at,
+        updated_at
+      `)
+      .eq("user_id", userId)
+      .order("is_primary", { ascending: false })
+      .order("created_at", { ascending: true });
+    
+    if (descError) {
+      console.error("Descriptors fetch error:", descError);
+    }
+    
+    // 3. Get verification history
+    const { data: auditLog, error: auditError } = await supabase
+      .from("face_audit_log")
+      .select("*")
+      .eq("user_id", userId)
+      .order("created_at", { ascending: false })
+      .limit(20);
+    
+    // 4. Analyze each descriptor format
+    const analyzeDescriptor = (desc, index) => {
+      if (!desc) return { exists: false };
+      
+      const result = {
+        type: typeof desc,
+        is_null: desc === null,
+        has_data: false,
+        is_128_array: false,
+        array_length: 0,
+        first_few_values: null,
+        structure: null,
+        can_be_parsed: false
+      };
+      
+      // Handle different types
+      if (typeof desc === 'string') {
+        result.is_string = true;
+        result.string_length = desc.length;
+        result.string_preview = desc.substring(0, 100);
+        
+        // Try to parse as JSON
+        try {
+          const parsed = JSON.parse(desc);
+          result.can_be_parsed = true;
+          result.parsed_type = typeof parsed;
+          result.parsed_is_array = Array.isArray(parsed);
+          
+          if (Array.isArray(parsed)) {
+            result.has_data = true;
+            result.array_length = parsed.length;
+            result.is_128_array = parsed.length === 128;
+            result.first_few_values = parsed.slice(0, 5);
+          } else if (parsed && typeof parsed === 'object') {
+            result.structure = Object.keys(parsed);
+            if (parsed.vector && Array.isArray(parsed.vector)) {
+              result.has_vector = true;
+              result.vector_length = parsed.vector.length;
+              result.is_128_array = parsed.vector.length === 128;
+              result.first_few_values = parsed.vector.slice(0, 5);
+            }
+            if (parsed.descriptor && Array.isArray(parsed.descriptor)) {
+              result.has_descriptor = true;
+              result.descriptor_length = parsed.descriptor.length;
+              if (!result.is_128_array && parsed.descriptor.length === 128) {
+                result.is_128_array = true;
+                result.first_few_values = parsed.descriptor.slice(0, 5);
+              }
+            }
+          }
+        } catch (e) {
+          result.parse_error = e.message;
+        }
+      }
+      
+      if (typeof desc === 'object' && desc !== null) {
+        result.is_object = true;
+        result.structure = Object.keys(desc);
+        result.has_data = true;
+        
+        // Check for vector property
+        if (desc.vector && Array.isArray(desc.vector)) {
+          result.has_vector = true;
+          result.vector_length = desc.vector.length;
+          result.is_128_array = desc.vector.length === 128;
+          result.first_few_values = desc.vector.slice(0, 5);
+        }
+        // Check for descriptor property
+        else if (desc.descriptor && Array.isArray(desc.descriptor)) {
+          result.has_descriptor = true;
+          result.descriptor_length = desc.descriptor.length;
+          result.is_128_array = desc.descriptor.length === 128;
+          result.first_few_values = desc.descriptor.slice(0, 5);
+        }
+        // Check if object itself is array-like
+        else if (Array.isArray(desc)) {
+          result.is_array = true;
+          result.array_length = desc.length;
+          result.is_128_array = desc.length === 128;
+          result.first_few_values = desc.slice(0, 5);
+        }
+      }
+      
+      return result;
+    };
+    
+    // Analyze user's face_embedding
+    const userEmbeddingAnalysis = analyzeDescriptor(user.face_embedding, 'user');
+    
+    // Analyze each descriptor
+    const descriptorsAnalysis = (descriptors || []).map(desc => ({
+      id: desc.id,
+      is_primary: desc.is_primary,
+      is_active: desc.is_active,
+      quality_score: desc.quality_score,
+      version: desc.version,
+      created_at: desc.created_at,
+      analysis: analyzeDescriptor(desc.descriptor, desc.id)
+    }));
+    
+    // Build recommendation
+    let recommendation = "";
+    let canVerify = false;
+    
+    if (userEmbeddingAnalysis.is_128_array) {
+      recommendation = "✅ User has valid face descriptor in users table. Face verification should work.";
+      canVerify = true;
+    } else if (descriptorsAnalysis.some(d => d.analysis.is_128_array)) {
+      recommendation = "⚠️ User has valid face descriptor in face_descriptors table but NOT in users table. Run sync to fix.";
+      canVerify = true;
+    } else if (descriptorsAnalysis.length > 0) {
+      recommendation = "❌ User has face descriptors but none are valid 128-length arrays. Data format is incorrect.";
+      canVerify = false;
+    } else {
+      recommendation = "❌ No face data found for this user. User needs to complete face registration.";
+      canVerify = false;
+    }
+    
+    res.json({
+      user: {
+        id: user.id,
+        email: user.email,
+        name: `${user.first_name} ${user.last_name}`,
+        face_verified: user.face_verified,
+        face_quality_score: user.face_quality_score,
+        face_verification_date: user.face_verification_date,
+        face_embedding_version: user.face_embedding_version
+      },
+      user_face_embedding: {
+        exists: !!user.face_embedding,
+        analysis: userEmbeddingAnalysis,
+        raw_preview: user.face_embedding ? JSON.stringify(user.face_embedding).substring(0, 200) : null
+      },
+      descriptors_count: descriptors?.length || 0,
+      descriptors: descriptorsAnalysis,
+      audit_log: auditLog?.slice(0, 10) || [],
+      verification_status: {
+        can_verify: canVerify,
+        recommendation: recommendation,
+        needs_sync: userEmbeddingAnalysis.is_128_array === false && descriptorsAnalysis.some(d => d.analysis.is_128_array),
+        needs_registration: descriptorsAnalysis.length === 0
+      },
+      fix_suggestions: []
+    });
+    
+  } catch (error) {
+    console.error("Debug face data error:", error);
+    res.status(500).json({ error: error.message, stack: error.stack });
+  }
+});
+
+// Helper endpoint to sync face data from descriptors to users table
+app.post("/api/admin/debug/sync-face-data/:userId", authenticate, authorizeAdmin, async (req, res) => {
+  try {
+    const { userId } = req.params;
+    
+    // Find the best descriptor
+    const { data: descriptors } = await supabase
+      .from("face_descriptors")
+      .select("descriptor, is_primary, quality_score")
+      .eq("user_id", userId)
+      .eq("is_active", true)
+      .order("is_primary", { ascending: false })
+      .order("quality_score", { ascending: false });
+    
+    if (!descriptors || descriptors.length === 0) {
+      return res.status(404).json({ error: "No face descriptors found" });
+    }
+    
+    let bestVector = null;
+    
+    for (const desc of descriptors) {
+      // Try to extract vector
+      if (desc.descriptor) {
+        if (desc.descriptor.vector && Array.isArray(desc.descriptor.vector) && desc.descriptor.vector.length === 128) {
+          bestVector = desc.descriptor.vector;
+          break;
+        }
+        if (desc.descriptor.descriptor && Array.isArray(desc.descriptor.descriptor) && desc.descriptor.descriptor.length === 128) {
+          bestVector = desc.descriptor.descriptor;
+          break;
+        }
+        if (Array.isArray(desc.descriptor) && desc.descriptor.length === 128) {
+          bestVector = desc.descriptor;
+          break;
+        }
+      }
+    }
+    
+    if (!bestVector) {
+      return res.status(400).json({ error: "No valid 128-length vector found in descriptors" });
+    }
+    
+    // Update users table
+    const { error: updateError } = await supabase
+      .from("users")
+      .update({
+        face_embedding: bestVector,
+        face_verified: true,
+        face_embedding_version: (await getCurrentVersion(userId)) + 1,
+        updated_at: new Date().toISOString()
+      })
+      .eq("id", userId);
+    
+    if (updateError) throw updateError;
+    
+    res.json({
+      success: true,
+      message: "Face data synced successfully",
+      vector_length: bestVector.length,
+      vector_preview: bestVector.slice(0, 10)
+    });
+    
+  } catch (error) {
+    console.error("Sync face data error:", error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+async function getCurrentVersion(userId) {
+  const { data: user } = await supabase
+    .from("users")
+    .select("face_embedding_version")
+    .eq("id", userId)
+    .single();
+  return user?.face_embedding_version || 0;
+}
+
 // Resend OTP
 app.post("/api/auth/resend-otp", async (req, res) => {
   try {
