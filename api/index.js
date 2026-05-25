@@ -1195,69 +1195,88 @@ app.post("/api/auth/register", async (req, res) => {
 
     console.log("User created with ID:", user.id);
 
-    // ========== FIXED: Store face images properly ==========
+    // Store face data - PRODUCTION VERSION
     if (face_images && face_images.length > 0) {
       console.log(
-        `Storing ${face_images.length} face images for user ${user.id}`,
+        `Processing ${face_images.length} face images for user ${user.id}`,
       );
 
-      const faceDescriptors = req.body.face_descriptors || [];
+      const faceDescriptorVectors = req.body.face_descriptors || [];
+      let bestImage = null;
+      let bestVector = null;
+      let bestQuality = 0;
 
+      // Find the best quality face image
       for (let i = 0; i < face_images.length; i++) {
-        const faceImage = face_images[i];
-        const faceDescriptorVector = faceDescriptors[i] || null;
+        const image = face_images[i];
+        const vector = faceDescriptorVectors[i];
+        const quality = req.body.face_quality_scores?.[i] || 0;
 
-        // Store each face image with full descriptor object
-        const { error: descriptorError } = await supabase
-          .from("face_descriptors")
-          .insert({
-            user_id: user.id,
-            descriptor: {
-              image: faceImage, // Store the actual base64 image
-              vector: faceDescriptorVector,
-              angle: i,
-              timestamp: new Date().toISOString(),
-              compressed: true,
-              format: "jpeg",
-            },
-            is_active: true,
-            created_at: new Date().toISOString(),
-          });
+        // Store as historical record (always keep for audit)
+        await supabase.from("face_descriptors").insert({
+          user_id: user.id,
+          descriptor: {
+            image: image,
+            vector: vector,
+            angle: i,
+            timestamp: new Date().toISOString(),
+            compressed: true,
+            format: "jpeg",
+          },
+          version: 1,
+          is_primary: false,
+          is_active: true,
+          quality_score: quality,
+          created_at: new Date().toISOString(),
+        });
 
-        if (descriptorError) {
-          console.error(`Error storing face image ${i}:`, descriptorError);
-        } else {
-          console.log(
-            `Successfully stored face image ${i + 1}/${face_images.length}`,
-          );
+        // Track the best quality one
+        if (quality > bestQuality || (!bestImage && vector)) {
+          bestQuality = quality;
+          bestImage = image;
+          bestVector = vector;
         }
       }
 
-      // Also store the primary descriptor in users table for quick access
-      if (faceDescriptors.length > 0) {
+      // Set the best quality image as PRIMARY
+      if (bestVector) {
+        // First, ensure no other primary exists for this user
+        await supabase
+          .from("face_descriptors")
+          .update({ is_primary: false })
+          .eq("user_id", user.id)
+          .eq("is_primary", true);
+
+        // Find the record with the best vector and set as primary
+        const { data: bestRecord } = await supabase
+          .from("face_descriptors")
+          .select("id")
+          .eq("user_id", user.id)
+          .contains("descriptor->vector", bestVector)
+          .single();
+
+        if (bestRecord) {
+          await supabase
+            .from("face_descriptors")
+            .update({
+              is_primary: true,
+              quality_score: bestQuality,
+              verified_at: new Date().toISOString(),
+            })
+            .eq("id", bestRecord.id);
+        }
+
+        // Store in users table for ultra-fast access
         await supabase
           .from("users")
           .update({
-            face_embedding: faceDescriptors[0], // Store the actual vector array
+            face_embedding: bestVector,
             face_verified: true,
+            face_quality_score: bestQuality,
+            face_verification_date: new Date().toISOString(),
+            face_version: 1,
           })
           .eq("id", user.id);
-      }
-
-      // Also store the first face image in the users table for quick access
-      /*const { error: updateError } = await supabase
-        .from("users")
-        .update({
-          face_embedding: {
-            image: face_images[0], // Store first image as preview
-            count: face_images.length,
-            stored_at: new Date().toISOString(),
-          },
-        })
-        .eq("id", user.id);*/
-
-      if (updateError) {
-        console.error("Error updating user with face preview:", updateError);
       }
     }
 
@@ -2041,44 +2060,45 @@ app.post("/api/user/change-passcode", authenticate, async (req, res) => {
   }
 });
 
-// ── 1. GET /api/user/face-descriptor ──────────────────────────────────────────
+// GET /api/user/face-descriptor - Returns the PRIMARY descriptor only
 app.get('/api/user/face-descriptor', authenticate, async (req, res) => {
   try {
     const userId = req.user.id;
     
-    // First try to get from users table (fast path)
-    const { data: user, error: userError } = await supabase
+    // First check users table (fastest path)
+    const { data: user } = await supabase
       .from('users')
-      .select('face_embedding')
+      .select('face_embedding, face_version, face_verified')
       .eq('id', userId)
       .single();
     
-    if (!userError && user?.face_embedding) {
+    if (user?.face_embedding && user.face_verified) {
       let vector = user.face_embedding;
       if (typeof vector === 'string') vector = JSON.parse(vector);
-      if (Array.isArray(vector)) {
-        return res.json({ face_descriptor: new Float32Array(vector) });
+      if (Array.isArray(vector) && vector.length === 128) {
+        return res.json({ 
+          face_descriptor: new Float32Array(vector),
+          version: user.face_version,
+          verified: true
+        });
       }
     }
     
-    // Fallback: get from face_descriptors table
-    const { data: descriptors, error: descError } = await supabase
+    // Fallback: get the primary descriptor from face_descriptors
+    const { data: primaryDesc } = await supabase
       .from('face_descriptors')
       .select('descriptor')
       .eq('user_id', userId)
+      .eq('is_primary', true)
       .eq('is_active', true)
-      .limit(1);
+      .single();
     
-    if (descriptors && descriptors.length > 0) {
-      const desc = descriptors[0].descriptor;
-      // Look for the vector property
-      let vector = desc?.vector || desc?.descriptor || desc?.embedding;
-      if (vector && Array.isArray(vector)) {
-        return res.json({ face_descriptor: new Float32Array(vector) });
-      }
+    if (primaryDesc?.descriptor?.vector) {
+      const vector = primaryDesc.descriptor.vector;
+      return res.json({ face_descriptor: new Float32Array(vector) });
     }
     
-    return res.status(400).json({ error: 'No face descriptor found' });
+    return res.status(400).json({ error: 'No face registered' });
   } catch (err) {
     console.error('[face-descriptor] Error:', err);
     return res.status(500).json({ error: 'Internal server error' });

@@ -1,40 +1,42 @@
+// GET /api/user/face-descriptor - Returns the PRIMARY descriptor only
 app.get('/api/user/face-descriptor', authenticate, async (req, res) => {
   try {
     const userId = req.user.id;
     
-    // First try to get from users table (fast path)
-    const { data: user, error: userError } = await supabase
+    // First check users table (fastest path)
+    const { data: user } = await supabase
       .from('users')
-      .select('face_embedding')
+      .select('face_embedding, face_version, face_verified')
       .eq('id', userId)
       .single();
     
-    if (!userError && user?.face_embedding) {
+    if (user?.face_embedding && user.face_verified) {
       let vector = user.face_embedding;
       if (typeof vector === 'string') vector = JSON.parse(vector);
-      if (Array.isArray(vector)) {
-        return res.json({ face_descriptor: new Float32Array(vector) });
+      if (Array.isArray(vector) && vector.length === 128) {
+        return res.json({ 
+          face_descriptor: new Float32Array(vector),
+          version: user.face_version,
+          verified: true
+        });
       }
     }
     
-    // Fallback: get from face_descriptors table
-    const { data: descriptors, error: descError } = await supabase
+    // Fallback: get the primary descriptor from face_descriptors
+    const { data: primaryDesc } = await supabase
       .from('face_descriptors')
       .select('descriptor')
       .eq('user_id', userId)
+      .eq('is_primary', true)
       .eq('is_active', true)
-      .limit(1);
+      .single();
     
-    if (descriptors && descriptors.length > 0) {
-      const desc = descriptors[0].descriptor;
-      // Look for the vector property
-      let vector = desc?.vector || desc?.descriptor || desc?.embedding;
-      if (vector && Array.isArray(vector)) {
-        return res.json({ face_descriptor: new Float32Array(vector) });
-      }
+    if (primaryDesc?.descriptor?.vector) {
+      const vector = primaryDesc.descriptor.vector;
+      return res.json({ face_descriptor: new Float32Array(vector) });
     }
     
-    return res.status(400).json({ error: 'No face descriptor found' });
+    return res.status(400).json({ error: 'No face registered' });
   } catch (err) {
     console.error('[face-descriptor] Error:', err);
     return res.status(500).json({ error: 'Internal server error' });
