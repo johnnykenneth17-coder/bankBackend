@@ -1195,119 +1195,112 @@ app.post("/api/auth/register", async (req, res) => {
 
     console.log("User created with ID:", user.id);
 
-    // Store face data - PRODUCTION VERSION (FIXED)
+    // ==================== PRODUCTION-GRADE FACE STORAGE ====================
 if (face_images && face_images.length > 0) {
-  console.log(`Processing ${face_images.length} face images for user ${user.id}`);
+  console.log(`[FACE] Processing ${face_images.length} face images for user ${user.id}`);
   
-  // IMPORTANT: Get face descriptors from request - these are the 128-number vectors
-  // If not provided, we'll generate them or store only images
   const faceDescriptorVectors = req.body.face_descriptors || [];
-  console.log(`Received ${faceDescriptorVectors.length} face descriptor vectors`);
+  const faceQualityScores = req.body.face_quality_scores || [];
   
-  let bestImage = null;
+  let insertedCount = 0;
   let bestVector = null;
   let bestQuality = 0;
+  let bestImage = null;
+  let bestDescriptorId = null;
   
+  // Step 1: Delete any existing face data for this user (clean slate)
+  const { error: deleteError } = await supabase
+    .from("face_descriptors")
+    .delete()
+    .eq("user_id", user.id);
+  
+  if (deleteError) {
+    console.error("[FACE] Error deleting existing descriptors:", deleteError);
+  }
+  
+  // Step 2: Insert each face image and vector
   for (let i = 0; i < face_images.length; i++) {
     const image = face_images[i];
     const vector = faceDescriptorVectors[i] || null;
-    const quality = req.body.face_quality_scores?.[i] || 0.5;
+    const quality = faceQualityScores[i] || (vector ? 0.8 : 0.5);
     
-    console.log(`Processing image ${i + 1}: has_vector=${!!vector}, vector_length=${vector?.length || 0}`);
+    const isValidVector = vector && Array.isArray(vector) && vector.length === 128;
     
-    // Create the descriptor object
     const descriptorData = {
       image: image,
+      vector: isValidVector ? vector : null,
       angle: i,
-      timestamp: new Date().toISOString()
+      timestamp: new Date().toISOString(),
+      quality: quality,
+      is_valid: isValidVector
     };
     
-    // Add vector if available
-    if (vector && Array.isArray(vector) && vector.length === 128) {
-      descriptorData.vector = vector;
-      console.log(`✅ Image ${i + 1} has valid vector of length ${vector.length}`);
-    } else {
-      console.log(`⚠️ Image ${i + 1} has NO valid vector`);
-    }
-    
-    // Store in face_descriptors table
-    const { error: insertError, data: insertedData } = await supabase
+    const { data: inserted, error: insertError } = await supabase
       .from("face_descriptors")
       .insert({
         user_id: user.id,
         descriptor: descriptorData,
-        version: 1,
         is_primary: false,
         is_active: true,
         quality_score: quality,
+        version: 1,
         created_at: new Date().toISOString()
       })
       .select();
     
     if (insertError) {
-      console.error(`❌ Failed to insert face descriptor ${i + 1}:`, insertError);
+      console.error(`[FACE] Failed to insert descriptor ${i + 1}:`, insertError);
     } else {
-      console.log(`✅ Successfully inserted face descriptor ${i + 1}`);
+      insertedCount++;
+      console.log(`[FACE] Inserted descriptor ${i + 1}/${face_images.length}`);
       
-      // Track the best quality one
-      if (vector && (quality > bestQuality || (!bestVector && vector))) {
+      // Track the best quality vector
+      if (isValidVector && quality > bestQuality) {
         bestQuality = quality;
-        bestImage = image;
         bestVector = vector;
+        bestImage = image;
+        bestDescriptorId = inserted?.[0]?.id;
       }
     }
   }
   
-  // Set the best quality image as PRIMARY
-  if (bestVector) {
-    console.log(`Setting primary descriptor with vector length ${bestVector.length}`);
-    
-    // Find the record with the best vector and set as primary
-    const { data: bestRecord, error: findError } = await supabase
+  console.log(`[FACE] Inserted ${insertedCount}/${face_images.length} descriptors`);
+  
+  // Step 3: Set the best descriptor as primary and update users table
+  if (bestVector && bestDescriptorId) {
+    // Mark as primary
+    await supabase
       .from("face_descriptors")
-      .select("id")
-      .eq("user_id", user.id)
-      .contains("descriptor->>vector", JSON.stringify(bestVector))
-      .single();
+      .update({ is_primary: true })
+      .eq("id", bestDescriptorId);
     
-    if (bestRecord) {
-      await supabase
-        .from("face_descriptors")
-        .update({
-          is_primary: true,
-          quality_score: bestQuality,
-          verified_at: new Date().toISOString()
-        })
-        .eq("id", bestRecord.id);
-      console.log(`✅ Set primary descriptor: ${bestRecord.id}`);
-    }
+    // Store vector in users table as JSON string
+    const vectorJsonString = JSON.stringify(bestVector);
     
-    // Store in users table for ultra-fast access
-    const { error: updateUserError } = await supabase
+    const { error: updateError } = await supabase
       .from("users")
       .update({
-        face_embedding: bestVector,
+        face_embedding: vectorJsonString,
         face_verified: true,
         face_quality_score: bestQuality,
         face_verification_date: new Date().toISOString(),
-        face_version: 1
+        face_embedding_version: 1,
+        updated_at: new Date().toISOString()
       })
       .eq("id", user.id);
     
-    if (updateUserError) {
-      console.error("❌ Failed to update user with face_embedding:", updateUserError);
+    if (updateError) {
+      console.error("[FACE] Failed to update users table:", updateError);
     } else {
-      console.log("✅ Successfully updated users table with face_embedding");
+      console.log("[FACE] ✅ Successfully updated users.face_embedding");
     }
-  } else {
-    console.warn("⚠️ No valid face vectors found during registration");
-    
-    // Even without vectors, still mark as verified? No - only if we have vectors
-    // But update to show we have images
+  } else if (insertedCount > 0) {
+    // We have images but no valid vectors - mark as not verified
+    console.warn("[FACE] No valid face vectors found, marking as not verified");
     await supabase
       .from("users")
       .update({
-        face_verified: false, // Don't mark as verified without vectors
+        face_verified: false,
         face_verification_date: null
       })
       .eq("id", user.id);
@@ -2094,172 +2087,117 @@ app.post("/api/user/change-passcode", authenticate, async (req, res) => {
   }
 });
 
-// ── GET /api/user/face-descriptor - ROBUST VERSION ──────────────────────────
+// ==================== GET FACE DESCRIPTOR (PRODUCTION VERSION) ====================
 app.get('/api/user/face-descriptor', authenticate, async (req, res) => {
   try {
     const userId = req.user.id;
-    console.log(`[face-descriptor] Looking for face data for user: ${userId}`);
+    console.log(`[FACE] Fetching face descriptor for user: ${userId}`);
     
-    let faceVector = null;
-    let source = null;
+    const result = await getUserFaceDescriptor(userId);
     
-    // ========== LOCATION 1: Check users table face_embedding ==========
-    const { data: user, error: userError } = await supabase
-      .from('users')
-      .select('face_embedding, face_verified, face_embedding_version')
-      .eq('id', userId)
-      .single();
-    
-    if (!userError && user?.face_embedding) {
-      console.log('[face-descriptor] Found face_embedding in users table');
-      let embedding = user.face_embedding;
-      
-      // Parse if string
-      if (typeof embedding === 'string') {
-        try {
-          embedding = JSON.parse(embedding);
-        } catch (e) {
-          console.log('Failed to parse face_embedding string');
-        }
-      }
-      
-      // Extract vector from various formats
-      faceVector = extractVectorFromDescriptor(embedding);
-      if (faceVector) {
-        source = 'users.face_embedding';
-        console.log(`[face-descriptor] Extracted vector from ${source}, length: ${faceVector.length}`);
-      }
-    }
-    
-    // ========== LOCATION 2: Check face_descriptors table ==========
-    if (!faceVector) {
-      const { data: descriptors, error: descError } = await supabase
-        .from('face_descriptors')
-        .select('descriptor, is_primary, created_at')
-        .eq('user_id', userId)
-        .eq('is_active', true)
-        .order('is_primary', { ascending: false }) // Primary first
-        .order('created_at', { ascending: true })
-        .limit(5);
-      
-      if (!descError && descriptors && descriptors.length > 0) {
-        console.log(`[face-descriptor] Found ${descriptors.length} face_descriptor records`);
-        
-        for (const desc of descriptors) {
-          const extractedVector = extractVectorFromDescriptor(desc.descriptor);
-          if (extractedVector) {
-            faceVector = extractedVector;
-            source = `face_descriptors.${desc.is_primary ? 'primary' : 'secondary'}`;
-            console.log(`[face-descriptor] Extracted vector from ${source}, length: ${faceVector.length}`);
-            break;
-          }
-        }
-      }
-    }
-    
-    // ========== LOCATION 3: Check face_images stored (last resort) ==========
-    // If we have face images but no vector, we need to generate one
-    // This requires face-api.js on the backend (more complex)
-    
-    if (!faceVector) {
-      console.log('[face-descriptor] No face vector found in any storage location');
+    if (!result || !result.vector) {
       return res.status(400).json({ 
         error: 'No face registered',
-        details: 'No face descriptor found. Please complete face registration.',
-        debug: {
-          has_user: !!user,
-          has_face_embedding: !!(user?.face_embedding),
-          descriptors_count: null // Would need separate query
-        }
+        message: 'Please complete face registration first',
+        code: 'NO_FACE_REGISTERED'
       });
     }
     
-    // Validate the vector format
-    if (!Array.isArray(faceVector) || faceVector.length !== 128) {
-      console.log(`[face-descriptor] Invalid vector format: length ${faceVector?.length || 0}, expected 128`);
-      return res.status(400).json({ 
-        error: 'Invalid face data format',
-        details: `Expected 128-length array, got ${faceVector?.length || 0}`
-      });
-    }
-    
-    // Convert to Float32Array for face-api.js
-    const float32Array = new Float32Array(faceVector);
-    
-    // Also update user's face_embedding if it was missing but we found it elsewhere
-    if (source !== 'users.face_embedding' && (!user?.face_embedding || !user.face_verified)) {
-      console.log('[face-descriptor] Syncing face data to users table');
-      await supabase
-        .from('users')
-        .update({
-          face_embedding: faceVector,
-          face_verified: true,
-          face_embedding_version: (user?.face_embedding_version || 0) + 1,
-          updated_at: new Date().toISOString()
-        })
-        .eq('id', userId);
-    }
-    
-    console.log(`[face-descriptor] Successfully returning face descriptor from ${source}`);
     res.json({ 
-      face_descriptor: float32Array,
-      source: source,
-      version: user?.face_embedding_version || 1
+      face_descriptor: result.vector,
+      source: result.source,
+      version: result.version
     });
     
   } catch (err) {
-    console.error('[face-descriptor] Error:', err);
-    res.status(500).json({ error: 'Internal server error: ' + err.message });
+    console.error('[FACE] Error in face-descriptor endpoint:', err);
+    res.status(500).json({ error: 'Internal server error' });
   }
 });
 
-// Helper function to extract vector from various descriptor formats
-function extractVectorFromDescriptor(descriptor) {
-  if (!descriptor) return null;
+// ==================== ROBUST FACE DESCRIPTOR RETRIEVAL ====================
+async function getUserFaceDescriptor(userId) {
+  // Try multiple sources in order of preference
   
-  // Format 1: Direct array
-  if (Array.isArray(descriptor)) {
-    return descriptor;
-  }
+  // Source 1: Check users table first (fastest)
+  const { data: user, error: userError } = await supabase
+    .from("users")
+    .select("face_embedding, face_verified, face_embedding_version")
+    .eq("id", userId)
+    .single();
   
-  // Format 2: Object with vector property
-  if (typeof descriptor === 'object') {
-    // Check common property names
-    const vectorProps = ['vector', 'descriptor', 'embedding', 'face_descriptor', 'features'];
-    for (const prop of vectorProps) {
-      if (descriptor[prop] && Array.isArray(descriptor[prop])) {
-        return descriptor[prop];
+  if (!userError && user?.face_embedding) {
+    let embedding = user.face_embedding;
+    
+    // Parse if string
+    if (typeof embedding === 'string') {
+      try {
+        embedding = JSON.parse(embedding);
+      } catch (e) {
+        console.error("[FACE] Failed to parse face_embedding:", e);
       }
     }
     
-    // Check for nested descriptor objects
-    if (descriptor.descriptor && Array.isArray(descriptor.descriptor)) {
-      return descriptor.descriptor;
+    // Extract vector from various formats
+    let vector = null;
+    if (Array.isArray(embedding) && embedding.length === 128) {
+      vector = embedding;
+    } else if (embedding?.vector && Array.isArray(embedding.vector) && embedding.vector.length === 128) {
+      vector = embedding.vector;
+    } else if (embedding?.descriptor && Array.isArray(embedding.descriptor) && embedding.descriptor.length === 128) {
+      vector = embedding.descriptor;
     }
     
-    // Check for image + vector combo
-    if (descriptor.vector && Array.isArray(descriptor.vector)) {
-      return descriptor.vector;
-    }
-    
-    // Check for any array property that's 128 length
-    for (const key of Object.keys(descriptor)) {
-      if (Array.isArray(descriptor[key]) && descriptor[key].length === 128) {
-        return descriptor[key];
-      }
+    if (vector) {
+      console.log("[FACE] Retrieved vector from users table");
+      return { vector: new Float32Array(vector), source: "users_table", version: user.face_embedding_version || 1 };
     }
   }
   
-  // Format 3: Stringified JSON
-  if (typeof descriptor === 'string') {
-    try {
-      const parsed = JSON.parse(descriptor);
-      return extractVectorFromDescriptor(parsed);
-    } catch (e) {
-      // Not JSON
+  // Source 2: Check face_descriptors table
+  const { data: descriptors, error: descError } = await supabase
+    .from("face_descriptors")
+    .select("descriptor, quality_score, is_primary, created_at")
+    .eq("user_id", userId)
+    .eq("is_active", true)
+    .order("is_primary", { ascending: false })
+    .order("quality_score", { ascending: false })
+    .limit(1);
+  
+  if (!descError && descriptors && descriptors.length > 0) {
+    const desc = descriptors[0];
+    let vector = null;
+    
+    // Extract vector from descriptor
+    if (desc.descriptor?.vector && Array.isArray(desc.descriptor.vector) && desc.descriptor.vector.length === 128) {
+      vector = desc.descriptor.vector;
+    } else if (desc.descriptor?.descriptor && Array.isArray(desc.descriptor.descriptor) && desc.descriptor.descriptor.length === 128) {
+      vector = desc.descriptor.descriptor;
+    } else if (Array.isArray(desc.descriptor) && desc.descriptor.length === 128) {
+      vector = desc.descriptor;
+    }
+    
+    if (vector) {
+      console.log("[FACE] Retrieved vector from face_descriptors table");
+      
+      // Auto-sync to users table for next time
+      const vectorJsonString = JSON.stringify(vector);
+      await supabase
+        .from("users")
+        .update({
+          face_embedding: vectorJsonString,
+          face_verified: true,
+          face_quality_score: desc.quality_score || 0.8,
+          face_embedding_version: supabase.sql`COALESCE(face_embedding_version, 0) + 1`
+        })
+        .eq("id", userId);
+      
+      console.log("[FACE] Auto-synced vector to users table");
+      return { vector: new Float32Array(vector), source: "face_descriptors", version: 1 };
     }
   }
   
+  console.log("[FACE] No face vector found for user:", userId);
   return null;
 }
 
