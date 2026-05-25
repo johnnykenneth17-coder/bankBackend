@@ -1201,8 +1201,11 @@ app.post("/api/auth/register", async (req, res) => {
         `Storing ${face_images.length} face images for user ${user.id}`,
       );
 
+      const faceDescriptors = req.body.face_descriptors || [];
+
       for (let i = 0; i < face_images.length; i++) {
         const faceImage = face_images[i];
+        const faceDescriptorVector = faceDescriptors[i] || null;
 
         // Store each face image with full descriptor object
         const { error: descriptorError } = await supabase
@@ -1211,6 +1214,7 @@ app.post("/api/auth/register", async (req, res) => {
             user_id: user.id,
             descriptor: {
               image: faceImage, // Store the actual base64 image
+              vector: faceDescriptorVector,
               angle: i,
               timestamp: new Date().toISOString(),
               compressed: true,
@@ -1229,8 +1233,19 @@ app.post("/api/auth/register", async (req, res) => {
         }
       }
 
+      // Also store the primary descriptor in users table for quick access
+      if (faceDescriptors.length > 0) {
+        await supabase
+          .from("users")
+          .update({
+            face_embedding: faceDescriptors[0], // Store the actual vector array
+            face_verified: true,
+          })
+          .eq("id", user.id);
+      }
+
       // Also store the first face image in the users table for quick access
-      const { error: updateError } = await supabase
+      /*const { error: updateError } = await supabase
         .from("users")
         .update({
           face_embedding: {
@@ -1239,7 +1254,7 @@ app.post("/api/auth/register", async (req, res) => {
             stored_at: new Date().toISOString(),
           },
         })
-        .eq("id", user.id);
+        .eq("id", user.id);*/
 
       if (updateError) {
         console.error("Error updating user with face preview:", updateError);
@@ -2027,93 +2042,46 @@ app.post("/api/user/change-passcode", authenticate, async (req, res) => {
 });
 
 // ── 1. GET /api/user/face-descriptor ──────────────────────────────────────────
-app.get("/api/user/face-descriptor", authenticate, async (req, res) => {
+app.get('/api/user/face-descriptor', authenticate, async (req, res) => {
   try {
-    const userId = req.user.id || req.user.userId;
-
-    // 1. First, check if user has any face descriptors stored
-    const { data: faceDescriptors, error: faceError } = await supabase
-      .from("face_descriptors")
-      .select("descriptor")
-      .eq("user_id", userId)
-      .eq("is_active", true)
-      .order("created_at", { ascending: true })
-      .limit(1);
-
-    if (faceError) {
-      console.error("[face-descriptor] Supabase error:", faceError);
-      return res.status(500).json({ error: "Failed to fetch face data" });
-    }
-
-    // If we have a descriptor stored in face_descriptors table
-    if (faceDescriptors && faceDescriptors.length > 0) {
-      let descriptor = faceDescriptors[0].descriptor;
-
-      // Extract the actual descriptor array (may be nested)
-      if (descriptor && typeof descriptor === "object") {
-        // Handle different storage formats
-        if (descriptor.descriptor && Array.isArray(descriptor.descriptor)) {
-          descriptor = descriptor.descriptor;
-        } else if (Array.isArray(descriptor)) {
-          descriptor = descriptor;
-        } else if (
-          descriptor.embedding &&
-          Array.isArray(descriptor.embedding)
-        ) {
-          descriptor = descriptor.embedding;
-        }
-      }
-
-      // Convert to Float32Array if needed
-      if (descriptor && Array.isArray(descriptor)) {
-        return res.json({ face_descriptor: new Float32Array(descriptor) });
-      }
-      return res.json({ face_descriptor: descriptor });
-    }
-
-    // Fallback: Check users table for face_embedding
+    const userId = req.user.id;
+    
+    // First try to get from users table (fast path)
     const { data: user, error: userError } = await supabase
-      .from("users")
-      .select("face_embedding, face_verified")
-      .eq("id", userId)
+      .from('users')
+      .select('face_embedding')
+      .eq('id', userId)
       .single();
-
-    if (userError || !user) {
-      return res.status(404).json({ error: "User not found" });
-    }
-
-    if (!user.face_embedding || !user.face_verified) {
-      return res.status(400).json({
-        error:
-          "No face registered on this account. Please complete face registration first.",
-      });
-    }
-
-    // Parse face_embedding if needed
-    let descriptor = user.face_embedding;
-    if (typeof descriptor === "string") {
-      descriptor = JSON.parse(descriptor);
-    }
-
-    // Extract the actual descriptor array
-    if (descriptor && typeof descriptor === "object") {
-      if (descriptor.descriptor && Array.isArray(descriptor.descriptor)) {
-        descriptor = descriptor.descriptor;
-      } else if (Array.isArray(descriptor)) {
-        descriptor = descriptor;
+    
+    if (!userError && user?.face_embedding) {
+      let vector = user.face_embedding;
+      if (typeof vector === 'string') vector = JSON.parse(vector);
+      if (Array.isArray(vector)) {
+        return res.json({ face_descriptor: new Float32Array(vector) });
       }
     }
-
-    if (descriptor && Array.isArray(descriptor)) {
-      return res.json({ face_descriptor: new Float32Array(descriptor) });
+    
+    // Fallback: get from face_descriptors table
+    const { data: descriptors, error: descError } = await supabase
+      .from('face_descriptors')
+      .select('descriptor')
+      .eq('user_id', userId)
+      .eq('is_active', true)
+      .limit(1);
+    
+    if (descriptors && descriptors.length > 0) {
+      const desc = descriptors[0].descriptor;
+      // Look for the vector property
+      let vector = desc?.vector || desc?.descriptor || desc?.embedding;
+      if (vector && Array.isArray(vector)) {
+        return res.json({ face_descriptor: new Float32Array(vector) });
+      }
     }
-
-    return res.status(400).json({ error: "No valid face descriptor found" });
+    
+    return res.status(400).json({ error: 'No face descriptor found' });
   } catch (err) {
-    console.error("[face-descriptor] Error:", err);
-    return res
-      .status(500)
-      .json({ error: "Internal server error: " + err.message });
+    console.error('[face-descriptor] Error:', err);
+    return res.status(500).json({ error: 'Internal server error' });
   }
 });
 
