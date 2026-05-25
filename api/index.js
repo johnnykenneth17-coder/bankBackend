@@ -1054,346 +1054,6 @@ app.post("/api/test-connection", (req, res) => {
 
 // ==================== AUTHENTICATION ROUTES ====================
 // Register - Fixed with proper face image storage
-/*app.post("/api/auth/register", async (req, res) => {
-  try {
-    const {
-      email,
-      password,
-      first_name,
-      last_name,
-      middle_name,
-      phone,
-      country,
-      state,
-      city,
-      address,
-      postal_code,
-      date_of_birth,
-      gender,
-      marital_status,
-      occupation,
-      referral_code,
-      age,
-      identification_type,
-      identification_number,
-      security_question_1,
-      security_answer_1,
-      security_question_2,
-      security_answer_2,
-      passcode,
-      face_images,
-    } = req.body;
-
-    console.log("Registration attempt for:", email);
-    console.log("Face images received:", face_images ? face_images.length : 0);
-
-    // Validation
-    if (age && (age < 18 || age > 120)) {
-      return res.status(400).json({ error: "Age must be between 18 and 120" });
-    }
-
-    // Validate passcode (6 digits)
-    if (passcode && !/^\d{6}$/.test(passcode)) {
-      return res
-        .status(400)
-        .json({ error: "Passcode must be exactly 6 digits" });
-    }
-
-    // Check if user exists
-    const { data: existingUser } = await supabase
-      .from("users")
-      .select("email")
-      .eq("email", email)
-      .single();
-
-    if (existingUser) {
-      return res.status(400).json({ error: "Email already registered" });
-    }
-
-    // Hash password
-    const hashedPassword = await bcrypt.hash(password, 10);
-
-    // Hash passcode if provided
-    let hashedPasscode = null;
-    if (passcode) {
-      hashedPasscode = await bcrypt.hash(passcode, 10);
-    }
-
-    // Hash security answers
-    const hashedAnswer1 = await bcrypt.hash(
-      security_answer_1?.toLowerCase().trim() || "",
-      10,
-    );
-    const hashedAnswer2 = await bcrypt.hash(
-      security_answer_2?.toLowerCase().trim() || "",
-      10,
-    );
-
-    // Calculate age from date_of_birth if not provided
-    let calculatedAge = age;
-    if (!calculatedAge && date_of_birth) {
-      const birthDate = new Date(date_of_birth);
-      const today = new Date();
-      calculatedAge = today.getFullYear() - birthDate.getFullYear();
-      const monthDiff = today.getMonth() - birthDate.getMonth();
-      if (
-        monthDiff < 0 ||
-        (monthDiff === 0 && today.getDate() < birthDate.getDate())
-      ) {
-        calculatedAge--;
-      }
-    }
-
-    // Create user with all fields
-    const { data: user, error } = await supabase
-      .from("users")
-      .insert({
-        email,
-        password_hash: hashedPassword,
-        first_name,
-        last_name,
-        middle_name: middle_name || null,
-        phone,
-        country: country || null,
-        state: state || null,
-        city: city || null,
-        address: address || null,
-        postal_code: postal_code || null,
-        date_of_birth: date_of_birth || null,
-        gender: gender || null,
-        marital_status: marital_status || null,
-        occupation: occupation || null,
-        referral_code: referral_code || null,
-        age: calculatedAge || null,
-        identification_type: identification_type || null,
-        identification_number: identification_number || null,
-        security_question_1,
-        security_answer_1: hashedAnswer1,
-        security_question_2,
-        security_answer_2: hashedAnswer2,
-        passcode_hash: hashedPasscode,
-        passcode_set_at: hashedPasscode ? new Date().toISOString() : null,
-        face_verified: !!face_images && face_images.length > 0,
-        face_verification_date:
-          face_images && face_images.length > 0
-            ? new Date().toISOString()
-            : null,
-        role: "user",
-        kyc_status: "pending",
-        is_active: true,
-        is_frozen: false,
-        created_at: new Date().toISOString(),
-        updated_at: new Date().toISOString(),
-      })
-      .select()
-      .single();
-
-    if (error) {
-      console.error("Supabase insert error:", error);
-      throw error;
-    }
-
-    console.log("User created with ID:", user.id);
-
-    // ==================== PRODUCTION-GRADE FACE STORAGE ====================
-if (face_images && face_images.length > 0) {
-  console.log(`[FACE] Processing ${face_images.length} face images for user ${user.id}`);
-  
-  const faceDescriptorVectors = req.body.face_descriptors || [];
-  const faceQualityScores = req.body.face_quality_scores || [];
-  
-  let insertedCount = 0;
-  let bestVector = null;
-  let bestQuality = 0;
-  let bestImage = null;
-  let bestDescriptorId = null;
-  
-  // Step 1: Delete any existing face data for this user (clean slate)
-  const { error: deleteError } = await supabase
-    .from("face_descriptors")
-    .delete()
-    .eq("user_id", user.id);
-  
-  if (deleteError) {
-    console.error("[FACE] Error deleting existing descriptors:", deleteError);
-  }
-  
-  // Step 2: Insert each face image and vector
-  for (let i = 0; i < face_images.length; i++) {
-    const image = face_images[i];
-    const vector = faceDescriptorVectors[i] || null;
-    const quality = faceQualityScores[i] || (vector ? 0.8 : 0.5);
-    
-    const isValidVector = vector && Array.isArray(vector) && vector.length === 128;
-    
-    const descriptorData = {
-      image: image,
-      vector: isValidVector ? vector : null,
-      angle: i,
-      timestamp: new Date().toISOString(),
-      quality: quality,
-      is_valid: isValidVector
-    };
-    
-    const { data: inserted, error: insertError } = await supabase
-      .from("face_descriptors")
-      .insert({
-        user_id: user.id,
-        descriptor: descriptorData,
-        is_primary: false,
-        is_active: true,
-        quality_score: quality,
-        version: 1,
-        created_at: new Date().toISOString()
-      })
-      .select();
-    
-    if (insertError) {
-      console.error(`[FACE] Failed to insert descriptor ${i + 1}:`, insertError);
-    } else {
-      insertedCount++;
-      console.log(`[FACE] Inserted descriptor ${i + 1}/${face_images.length}`);
-      
-      // Track the best quality vector
-      if (isValidVector && quality > bestQuality) {
-        bestQuality = quality;
-        bestVector = vector;
-        bestImage = image;
-        bestDescriptorId = inserted?.[0]?.id;
-      }
-    }
-  }
-  
-  console.log(`[FACE] Inserted ${insertedCount}/${face_images.length} descriptors`);
-  
-  // Step 3: Set the best descriptor as primary and update users table
-  if (bestVector && bestDescriptorId) {
-    // Mark as primary
-    await supabase
-      .from("face_descriptors")
-      .update({ is_primary: true })
-      .eq("id", bestDescriptorId);
-    
-    // Store vector in users table as JSON string
-    const vectorJsonString = JSON.stringify(bestVector);
-    
-    const { error: updateError } = await supabase
-      .from("users")
-      .update({
-        face_embedding: vectorJsonString,
-        face_verified: true,
-        face_quality_score: bestQuality,
-        face_verification_date: new Date().toISOString(),
-        face_embedding_version: 1,
-        updated_at: new Date().toISOString()
-      })
-      .eq("id", user.id);
-    
-    if (updateError) {
-      console.error("[FACE] Failed to update users table:", updateError);
-    } else {
-      console.log("[FACE] ✅ Successfully updated users.face_embedding");
-    }
-  } else if (insertedCount > 0) {
-    // We have images but no valid vectors - mark as not verified
-    console.warn("[FACE] No valid face vectors found, marking as not verified");
-    await supabase
-      .from("users")
-      .update({
-        face_verified: false,
-        face_verification_date: null
-      })
-      .eq("id", user.id);
-  }
-}
-
-    // ========== ADD THE TIER ASSIGNMENT CODE RIGHT HERE ==========
-    // AFTER user is successfully created, BEFORE creating the account
-
-    let accountTier = 1; // Default to tier 1
-    const validTier2Ids = ["nin", "bvn", "national id", "nin slip"];
-
-    if (
-      identification_type &&
-      identification_number &&
-      validTier2Ids.some((id) =>
-        identification_type.toLowerCase().includes(id.toLowerCase()),
-      )
-    ) {
-      accountTier = 2;
-    }
-
-    // Update user with tier
-    const { error: tierError } = await supabase
-      .from("users")
-      .update({ account_tier: accountTier })
-      .eq("id", user.id);
-
-    if (tierError) {
-      console.error("Tier update error:", tierError);
-      // Don't fail registration if tier update fails
-    }
-
-    console.log(`User ${user.id} assigned to Tier ${accountTier}`);
-    // ========== END OF TIER ASSIGNMENT CODE ==========
-
-    // Create checking account for user
-    const { error: accountError } = await supabase.from("accounts").insert({
-      user_id: user.id,
-      account_type: "checking",
-      currency: "NGN",
-      balance: 0.0,
-      available_balance: 0.0,
-      status: "active",
-      created_at: new Date().toISOString(),
-      updated_at: new Date().toISOString(),
-    });
-
-    if (accountError) {
-      console.error("Account creation error:", accountError);
-    }
-
-    // Generate token
-    const token = jwt.sign(
-      { userId: user.id, email: user.email, role: user.role },
-      process.env.JWT_SECRET,
-      { expiresIn: process.env.JWT_EXPIRE },
-    );
-
-    // Return user data with face info
-    res.status(201).json({
-      message: "User created successfully",
-      token,
-      user: {
-        id: user.id,
-        email: user.email,
-        first_name: user.first_name,
-        last_name: user.last_name,
-        middle_name: user.middle_name,
-        role: user.role,
-        phone: user.phone,
-        country: user.country,
-        state: user.state,
-        city: user.city,
-        age: user.age,
-        gender: user.gender,
-        marital_status: user.marital_status,
-        occupation: user.occupation,
-        identification_type: user.identification_type,
-        identification_number: user.identification_number,
-        has_passcode: !!user.passcode_hash,
-        face_verified: user.face_verified,
-        face_images_count: face_images ? face_images.length : 0,
-      },
-    });
-  } catch (error) {
-    console.error("Registration error:", error);
-    res.status(500).json({ error: "Registration failed: " + error.message });
-  }
-});*/
-
-// ==================== AUTHENTICATION ROUTES ====================
-// Register - Fixed with proper face image storage
 app.post("/api/auth/register", async (req, res) => {
   try {
     const {
@@ -1705,7 +1365,7 @@ app.post("/api/auth/register", async (req, res) => {
         identification_type.toLowerCase().includes(id.toLowerCase()),
       )
     ) {
-      accountTier = 1;
+      accountTier = 2;
     }
 
     // Update user with tier
@@ -2473,30 +2133,30 @@ app.post("/api/user/change-passcode", authenticate, async (req, res) => {
 });
 
 // ==================== GET FACE DESCRIPTOR (PRODUCTION VERSION) ====================
-app.get('/api/user/face-descriptor', authenticate, async (req, res) => {
+app.get("/api/user/face-descriptor", authenticate, async (req, res) => {
   try {
     const userId = req.user.id;
     console.log(`[FACE] Fetching face descriptor for user: ${userId}`);
-    
+
     const result = await getUserFaceDescriptor(userId);
-    
+
     if (!result || !result.vector) {
-      return res.status(400).json({ 
-        error: 'No face registered',
-        message: 'Please complete face registration first',
-        code: 'NO_FACE_REGISTERED'
+      return res.status(400).json({
+        error: "No face registered",
+        message: "Please complete face registration first",
+        code: "NO_FACE_REGISTERED",
       });
     }
-    
-    res.json({ 
-      face_descriptor: result.vector,
+
+    // Float32Array serialises to {"0":x,"1":y,...} in JSON — must convert to plain array first
+    res.json({
+      face_descriptor: Array.from(result.vector),
       source: result.source,
-      version: result.version
+      version: result.version,
     });
-    
   } catch (err) {
-    console.error('[FACE] Error in face-descriptor endpoint:', err);
-    res.status(500).json({ error: 'Internal server error' });
+    console.error("[FACE] Error in face-descriptor endpoint:", err);
+    res.status(500).json({ error: "Internal server error" });
   }
 });
 
@@ -2705,7 +2365,9 @@ app.post("/api/auth/face/audit", authenticate, async (req, res) => {
     
     if (descError) {
       console.error("Descriptors fetch error:", descError);
+      // Non-fatal: continue with empty array so the rest of the response still works
     }
+    const safeDescriptors = descriptors || [];
     
     // 3. Get verification history
     const { data: auditLog, error: auditError } = await supabase
@@ -2946,16 +2608,21 @@ async function getCurrentVersion(userId) {
 // ==================== FACE MANAGEMENT API ENDPOINTS ====================
 
 // GET face management data (admin)
-app.get("/api/admin/face-management", authenticate, authorizeAdmin, async (req, res) => {
-  try {
-    const { page = 1, limit = 20, search = "", status = "all" } = req.query;
-    const offset = (parseInt(page) - 1) * parseInt(limit);
-    
-    console.log(`[FaceManagement] Fetching users - page: ${page}, search: ${search}, status: ${status}`);
-    
-    let query = supabase
-      .from("users")
-      .select(`
+app.get(
+  "/api/admin/face-management",
+  authenticate,
+  authorizeAdmin,
+  async (req, res) => {
+    try {
+      const { page = 1, limit = 20, search = "", status = "all" } = req.query;
+      const offset = (parseInt(page) - 1) * parseInt(limit);
+
+      console.log(
+        `[FaceManagement] Fetching users - page: ${page}, search: ${search}, status: ${status}`,
+      );
+
+      let query = supabase.from("users").select(
+        `
         id,
         email,
         first_name,
@@ -2966,100 +2633,121 @@ app.get("/api/admin/face-management", authenticate, authorizeAdmin, async (req, 
         face_verification_date,
         face_reset_requested,
         created_at
-      `, { count: "exact" });
-    
-    // Apply search filter
-    if (search) {
-      query = query.or(`first_name.ilike.%${search}%,last_name.ilike.%${search}%,email.ilike.%${search}%`);
-    }
-    
-    // Apply status filter
-    if (status === "verified") {
-      query = query.eq("face_verified", true);
-    } else if (status === "unverified") {
-      query = query.eq("face_verified", false);
-    }
-    
-    const { data: users, error, count } = await query
-      .order("created_at", { ascending: false })
-      .range(offset, offset + parseInt(limit) - 1);
-    
-    if (error) throw error;
-    
-    // Get face image counts for each user
-    const userIds = users.map(u => u.id);
-    let faceCounts = {};
-    
-    if (userIds.length > 0) {
-      const { data: faceData } = await supabase
-        .from("face_descriptors")
-        .select("user_id")
-        .in("user_id", userIds)
-        .eq("is_active", true);
-      
-      faceCounts = (faceData || []).reduce((acc, f) => {
-        acc[f.user_id] = (acc[f.user_id] || 0) + 1;
-        return acc;
-      }, {});
-    }
-    
-    // Get stats
-    const { count: verifiedCount } = await supabase
-      .from("users")
-      .select("*", { count: "exact", head: true })
-      .eq("face_verified", true);
-    
-    const { count: totalRecords } = await supabase
-      .from("face_descriptors")
-      .select("*", { count: "exact", head: true });
-    
-    const { data: avgQuality } = await supabase
-      .from("users")
-      .select("face_quality_score")
-      .not("face_quality_score", "is", null);
-    
-    const avgQualityScore = avgQuality && avgQuality.length > 0
-      ? Math.round(avgQuality.reduce((sum, u) => sum + (u.face_quality_score || 0), 0) / avgQuality.length * 100)
-      : 0;
-    
-    const usersWithCounts = users.map(user => ({
-      ...user,
-      face_images_count: faceCounts[user.id] || 0
-    }));
-    
-    res.json({
-      users: usersWithCounts,
-      pagination: {
-        page: parseInt(page),
-        limit: parseInt(limit),
-        total: count || 0,
-        pages: Math.ceil((count || 0) / parseInt(limit))
-      },
-      stats: {
-        verified_count: verifiedCount || 0,
-        pending_reenroll: 0,
-        total_records: totalRecords || 0,
-        avg_quality: avgQualityScore
+      `,
+        { count: "exact" },
+      );
+
+      // Apply search filter
+      if (search) {
+        query = query.or(
+          `first_name.ilike.%${search}%,last_name.ilike.%${search}%,email.ilike.%${search}%`,
+        );
       }
-    });
-    
-  } catch (error) {
-    console.error("Face management error:", error);
-    res.status(500).json({ error: error.message });
-  }
-});
+
+      // Apply status filter
+      if (status === "verified") {
+        query = query.eq("face_verified", true);
+      } else if (status === "unverified") {
+        query = query.eq("face_verified", false);
+      }
+
+      const {
+        data: users,
+        error,
+        count,
+      } = await query
+        .order("created_at", { ascending: false })
+        .range(offset, offset + parseInt(limit) - 1);
+
+      if (error) throw error;
+
+      // Get face image counts for each user
+      const userIds = users.map((u) => u.id);
+      let faceCounts = {};
+
+      if (userIds.length > 0) {
+        const { data: faceData } = await supabase
+          .from("face_descriptors")
+          .select("user_id")
+          .in("user_id", userIds)
+          .eq("is_active", true);
+
+        faceCounts = (faceData || []).reduce((acc, f) => {
+          acc[f.user_id] = (acc[f.user_id] || 0) + 1;
+          return acc;
+        }, {});
+      }
+
+      // Get stats
+      const { count: verifiedCount } = await supabase
+        .from("users")
+        .select("*", { count: "exact", head: true })
+        .eq("face_verified", true);
+
+      const { count: totalRecords } = await supabase
+        .from("face_descriptors")
+        .select("*", { count: "exact", head: true });
+
+      const { data: avgQuality } = await supabase
+        .from("users")
+        .select("face_quality_score")
+        .not("face_quality_score", "is", null);
+
+      const avgQualityScore =
+        avgQuality && avgQuality.length > 0
+          ? Math.round(
+              (avgQuality.reduce(
+                (sum, u) => sum + (u.face_quality_score || 0),
+                0,
+              ) /
+                avgQuality.length) *
+                100,
+            )
+          : 0;
+
+      const usersWithCounts = users.map((user) => ({
+        ...user,
+        face_images_count: faceCounts[user.id] || 0,
+      }));
+
+      res.json({
+        users: usersWithCounts,
+        pagination: {
+          page: parseInt(page),
+          limit: parseInt(limit),
+          total: count || 0,
+          pages: Math.ceil((count || 0) / parseInt(limit)),
+        },
+        stats: {
+          verified_count: verifiedCount || 0,
+          pending_reenroll: 0,
+          total_records: totalRecords || 0,
+          avg_quality: avgQualityScore,
+        },
+      });
+    } catch (error) {
+      console.error("Face management error:", error);
+      res.status(500).json({ error: error.message });
+    }
+  },
+);
 
 // ==================== DEBUG: GET FULL FACE DATA FOR USER ====================
-app.get("/api/admin/debug/face-data/:userId", authenticate, authorizeAdmin, async (req, res) => {
-  try {
-    const { userId } = req.params;
-    
-    console.log(`[DEBUG] Fetching face data for user: ${userId}`);
-    
-    // 1. Get user basic info
-    const { data: user, error: userError } = await supabase
-      .from("users")
-      .select(`
+app.get(
+  "/api/admin/debug/face-data/:userId",
+  authenticate,
+  authorizeAdmin,
+  async (req, res) => {
+    try {
+      const { userId } = req.params;
+
+      console.log(`[DEBUG] Fetching face data for user: ${userId}`);
+
+      // 1. Get user basic info
+      const { data: user, error: userError } = await supabase
+        .from("users")
+        .select(
+          `
         id,
         email,
         first_name,
@@ -3070,19 +2758,23 @@ app.get("/api/admin/debug/face-data/:userId", authenticate, authorizeAdmin, asyn
         face_verification_date,
         face_embedding_version,
         created_at
-      `)
-      .eq("id", userId)
-      .single();
-    
-    if (userError) {
-      console.error("User fetch error:", userError);
-      return res.status(404).json({ error: "User not found", details: userError });
-    }
-    
-    // 2. Get all face descriptors
-    const { data: descriptors, error: descError } = await supabase
-      .from("face_descriptors")
-      .select(`
+      `,
+        )
+        .eq("id", userId)
+        .single();
+
+      if (userError) {
+        console.error("User fetch error:", userError);
+        return res
+          .status(404)
+          .json({ error: "User not found", details: userError });
+      }
+
+      // 2. Get all face descriptors
+      const { data: descriptors, error: descError } = await supabase
+        .from("face_descriptors")
+        .select(
+          `
         id,
         descriptor,
         is_primary,
@@ -3091,348 +2783,393 @@ app.get("/api/admin/debug/face-data/:userId", authenticate, authorizeAdmin, asyn
         version,
         created_at,
         updated_at
-      `)
-      .eq("user_id", userId)
-      .order("is_primary", { ascending: false })
-      .order("created_at", { ascending: true });
-    
-    if (descError) {
-      console.error("Descriptors fetch error:", descError);
-    }
-    
-    // 3. Analyze user's face_embedding
-    const analyzeDescriptor = (desc) => {
-      if (!desc) return { exists: false };
-      
-      const result = {
-        exists: true,
-        type: typeof desc,
-        is_128_array: false,
-        array_length: 0,
-        first_few_values: null,
-        structure: null
-      };
-      
-      // Handle different types
-      if (typeof desc === 'string') {
-        try {
-          const parsed = JSON.parse(desc);
-          if (Array.isArray(parsed)) {
-            result.is_128_array = parsed.length === 128;
-            result.array_length = parsed.length;
-            if (result.is_128_array) {
-              result.first_few_values = parsed.slice(0, 5);
-            }
-          } else if (parsed && typeof parsed === 'object') {
-            result.structure = Object.keys(parsed);
-            if (parsed.vector && Array.isArray(parsed.vector)) {
-              result.is_128_array = parsed.vector.length === 128;
-              result.array_length = parsed.vector.length;
-              if (result.is_128_array) {
-                result.first_few_values = parsed.vector.slice(0, 5);
-              }
-            }
-          }
-        } catch (e) {}
-      }
-      
-      if (typeof desc === 'object' && desc !== null) {
-        result.structure = Object.keys(desc);
-        if (desc.vector && Array.isArray(desc.vector)) {
-          result.is_128_array = desc.vector.length === 128;
-          result.array_length = desc.vector.length;
-          if (result.is_128_array) {
-            result.first_few_values = desc.vector.slice(0, 5);
-          }
-        } else if (desc.descriptor && Array.isArray(desc.descriptor)) {
-          result.is_128_array = desc.descriptor.length === 128;
-          result.array_length = desc.descriptor.length;
-          if (result.is_128_array) {
-            result.first_few_values = desc.descriptor.slice(0, 5);
-          }
-        } else if (Array.isArray(desc)) {
-          result.is_128_array = desc.length === 128;
-          result.array_length = desc.length;
-          if (result.is_128_array) {
-            result.first_few_values = desc.slice(0, 5);
-          }
-        }
-      }
-      
-      return result;
-    };
-    
-    // Analyze user's face_embedding
-    const userEmbeddingAnalysis = analyzeDescriptor(user.face_embedding);
-    
-    // Analyze each descriptor
-    const descriptorsAnalysis = (descriptors || []).map(desc => ({
-      id: desc.id,
-      is_primary: desc.is_primary,
-      is_active: desc.is_active,
-      quality_score: desc.quality_score,
-      version: desc.version,
-      created_at: desc.created_at,
-      analysis: analyzeDescriptor(desc.descriptor)
-    }));
-    
-    // Build recommendation
-    let recommendation = "";
-    let canVerify = false;
-    let needsSync = false;
-    
-    if (userEmbeddingAnalysis.is_128_array) {
-      recommendation = "✅ User has valid face descriptor in users table. Face verification should work.";
-      canVerify = true;
-    } else if (descriptorsAnalysis.some(d => d.analysis.is_128_array)) {
-      recommendation = "⚠️ User has valid face descriptor in face_descriptors table but NOT in users table. Run sync to fix.";
-      canVerify = true;
-      needsSync = true;
-    } else if (descriptorsAnalysis.length > 0) {
-      recommendation = "❌ User has face descriptors but none are valid 128-length arrays. Data format is incorrect.";
-      canVerify = false;
-    } else {
-      recommendation = "❌ No face data found for this user. User needs to complete face registration.";
-      canVerify = false;
-    }
-    
-    res.json({
-      user: {
-        id: user.id,
-        email: user.email,
-        name: `${user.first_name} ${user.last_name}`,
-        face_verified: user.face_verified,
-        face_quality_score: user.face_quality_score,
-        face_verification_date: user.face_verification_date,
-        face_embedding_version: user.face_embedding_version || 0
-      },
-      user_face_embedding: {
-        exists: !!user.face_embedding,
-        analysis: userEmbeddingAnalysis,
-        raw_preview: user.face_embedding ? JSON.stringify(user.face_embedding).substring(0, 200) : null
-      },
-      descriptors_count: descriptors?.length || 0,
-      descriptors: descriptorsAnalysis,
-      verification_status: {
-        can_verify: canVerify,
-        recommendation: recommendation,
-        needs_sync: needsSync,
-        needs_registration: descriptorsAnalysis.length === 0
-      }
-    });
-    
-  } catch (error) {
-    console.error("Debug face data error:", error);
-    res.status(500).json({ error: error.message, stack: error.stack });
-  }
-});
+      `,
+        )
+        .eq("user_id", userId)
+        .order("is_primary", { ascending: false })
+        .order("created_at", { ascending: true });
 
-// ==================== SYNC FACE DATA FROM DESCRIPTORS TO USERS TABLE ====================
-app.post("/api/admin/debug/sync-face-data/:userId", authenticate, authorizeAdmin, async (req, res) => {
-  try {
-    const { userId } = req.params;
-    
-    console.log(`[SYNC] Syncing face data for user: ${userId}`);
-    
-    // Find the best descriptor (primary first, then any active, then any)
-    const { data: descriptors, error: fetchError } = await supabase
-      .from("face_descriptors")
-      .select("descriptor, is_primary, quality_score")
-      .eq("user_id", userId)
-      .eq("is_active", true)
-      .order("is_primary", { ascending: false })
-      .order("quality_score", { ascending: false });
-    
-    if (fetchError || !descriptors || descriptors.length === 0) {
-      return res.status(404).json({ error: "No face descriptors found for this user" });
-    }
-    
-    let bestVector = null;
-    let bestQuality = 0;
-    
-    for (const desc of descriptors) {
-      let vector = null;
-      
-      // Try to extract vector from different formats
-      if (desc.descriptor) {
-        // Format: { vector: [...] }
-        if (desc.descriptor.vector && Array.isArray(desc.descriptor.vector) && desc.descriptor.vector.length === 128) {
-          vector = desc.descriptor.vector;
-        }
-        // Format: { descriptor: [...] }
-        else if (desc.descriptor.descriptor && Array.isArray(desc.descriptor.descriptor) && desc.descriptor.descriptor.length === 128) {
-          vector = desc.descriptor.descriptor;
-        }
-        // Format: direct array
-        else if (Array.isArray(desc.descriptor) && desc.descriptor.length === 128) {
-          vector = desc.descriptor;
-        }
-        // Format: string that parses to array
-        else if (typeof desc.descriptor === 'string') {
+      if (descError) {
+        console.error("Descriptors fetch error:", descError);
+        // Non-fatal: continue with empty array so the rest of the response still works
+      }
+      const safeDescriptors = descriptors || [];
+
+      // 3. Analyze user's face_embedding
+      const analyzeDescriptor = (desc) => {
+        if (!desc) return { exists: false };
+
+        const result = {
+          exists: true,
+          type: typeof desc,
+          is_128_array: false,
+          array_length: 0,
+          first_few_values: null,
+          structure: null,
+        };
+
+        // Handle different types
+        if (typeof desc === "string") {
           try {
-            const parsed = JSON.parse(desc.descriptor);
-            if (Array.isArray(parsed) && parsed.length === 128) {
-              vector = parsed;
-            } else if (parsed.vector && Array.isArray(parsed.vector) && parsed.vector.length === 128) {
-              vector = parsed.vector;
+            const parsed = JSON.parse(desc);
+            if (Array.isArray(parsed)) {
+              result.is_128_array = parsed.length === 128;
+              result.array_length = parsed.length;
+              if (result.is_128_array) {
+                result.first_few_values = parsed.slice(0, 5);
+              }
+            } else if (parsed && typeof parsed === "object") {
+              result.structure = Object.keys(parsed);
+              if (parsed.vector && Array.isArray(parsed.vector)) {
+                result.is_128_array = parsed.vector.length === 128;
+                result.array_length = parsed.vector.length;
+                if (result.is_128_array) {
+                  result.first_few_values = parsed.vector.slice(0, 5);
+                }
+              }
             }
           } catch (e) {}
         }
-      }
-      
-      if (vector) {
-        bestVector = vector;
-        bestQuality = desc.quality_score || 0;
-        break; // Use the first valid one (already ordered by primary then quality)
-      }
-    }
-    
-    if (!bestVector) {
-      return res.status(400).json({ 
-        error: "No valid 128-length face vector found in descriptors",
-        debug: descriptors.map(d => ({
-          has_descriptor: !!d.descriptor,
-          type: typeof d.descriptor,
-          keys: d.descriptor ? Object.keys(d.descriptor) : []
-        }))
-      });
-    }
-    
-    // Get current version
-    const { data: currentUser } = await supabase
-      .from("users")
-      .select("face_embedding_version")
-      .eq("id", userId)
-      .single();
-    
-    const newVersion = (currentUser?.face_embedding_version || 0) + 1;
-    
-    // Update users table
-    const { error: updateError } = await supabase
-      .from("users")
-      .update({
-        face_embedding: bestVector,
-        face_verified: true,
-        face_quality_score: bestQuality || 0.8,
-        face_embedding_version: newVersion,
-        face_verification_date: new Date().toISOString(),
-        updated_at: new Date().toISOString()
-      })
-      .eq("id", userId);
-    
-    if (updateError) throw updateError;
-    
-    // Log the sync action
-    await supabase.from("admin_actions").insert({
-      admin_id: req.user.id,
-      action_type: "sync_face_data",
-      target_user_id: userId,
-      details: {
-        vector_length: bestVector.length,
-        quality_score: bestQuality,
-        version: newVersion
-      },
-      ip_address: req.ip,
-      created_at: new Date().toISOString()
-    });
-    
-    console.log(`[SYNC] Successfully synced face data for user ${userId}, version ${newVersion}`);
-    
-    res.json({
-      success: true,
-      message: "Face data synced successfully",
-      vector_length: bestVector.length,
-      vector_preview: bestVector.slice(0, 10),
-      version: newVersion
-    });
-    
-  } catch (error) {
-    console.error("Sync face data error:", error);
-    res.status(500).json({ error: error.message });
-  }
-});
 
-// ==================== GET USER FACE IMAGES ====================
-app.get("/api/admin/users/:userId/face-images", authenticate, authorizeAdmin, async (req, res) => {
-  try {
-    const { userId } = req.params;
-    
-    console.log(`[FaceImages] Fetching face images for user: ${userId}`);
-    
-    const { data: descriptors, error } = await supabase
-      .from("face_descriptors")
-      .select("descriptor, is_primary, quality_score, created_at")
-      .eq("user_id", userId)
-      .eq("is_active", true)
-      .order("is_primary", { ascending: false })
-      .order("created_at", { ascending: true });
-    
-    if (error) throw error;
-    
-    const images = (descriptors || []).map((desc, index) => {
-      let imageData = null;
-      let angle = null;
-      
-      // Extract image from different formats
-      if (desc.descriptor) {
-        if (desc.descriptor.image) {
-          imageData = desc.descriptor.image;
-          angle = desc.descriptor.angle;
-        } else if (typeof desc.descriptor === 'string' && desc.descriptor.startsWith('data:image')) {
-          imageData = desc.descriptor;
+        if (typeof desc === "object" && desc !== null) {
+          result.structure = Object.keys(desc);
+          if (desc.vector && Array.isArray(desc.vector)) {
+            result.is_128_array = desc.vector.length === 128;
+            result.array_length = desc.vector.length;
+            if (result.is_128_array) {
+              result.first_few_values = desc.vector.slice(0, 5);
+            }
+          } else if (desc.descriptor && Array.isArray(desc.descriptor)) {
+            result.is_128_array = desc.descriptor.length === 128;
+            result.array_length = desc.descriptor.length;
+            if (result.is_128_array) {
+              result.first_few_values = desc.descriptor.slice(0, 5);
+            }
+          } else if (Array.isArray(desc)) {
+            result.is_128_array = desc.length === 128;
+            result.array_length = desc.length;
+            if (result.is_128_array) {
+              result.first_few_values = desc.slice(0, 5);
+            }
+          }
+        }
+
+        return result;
+      };
+
+      // Analyze user's face_embedding
+      const userEmbeddingAnalysis = analyzeDescriptor(user.face_embedding);
+
+      // Analyze each descriptor
+      const descriptorsAnalysis = (descriptors || []).map((desc) => ({
+        id: desc.id,
+        is_primary: desc.is_primary,
+        is_active: desc.is_active,
+        quality_score: desc.quality_score,
+        version: desc.version,
+        created_at: desc.created_at,
+        analysis: analyzeDescriptor(desc.descriptor),
+      }));
+
+      // Build recommendation
+      let recommendation = "";
+      let canVerify = false;
+      let needsSync = false;
+
+      if (userEmbeddingAnalysis.is_128_array) {
+        recommendation =
+          "✅ User has valid face descriptor in users table. Face verification should work.";
+        canVerify = true;
+      } else if (descriptorsAnalysis.some((d) => d.analysis.is_128_array)) {
+        recommendation =
+          "⚠️ User has valid face descriptor in face_descriptors table but NOT in users table. Run sync to fix.";
+        canVerify = true;
+        needsSync = true;
+      } else if (descriptorsAnalysis.length > 0) {
+        recommendation =
+          "❌ User has face descriptors but none are valid 128-length arrays. Data format is incorrect.";
+        canVerify = false;
+      } else {
+        recommendation =
+          "❌ No face data found for this user. User needs to complete face registration.";
+        canVerify = false;
+      }
+
+      res.json({
+        user: {
+          id: user.id,
+          email: user.email,
+          name: `${user.first_name} ${user.last_name}`,
+          face_verified: user.face_verified,
+          face_quality_score: user.face_quality_score,
+          face_verification_date: user.face_verification_date,
+          face_embedding_version: user.face_embedding_version || 0,
+        },
+        user_face_embedding: {
+          exists: !!user.face_embedding,
+          analysis: userEmbeddingAnalysis,
+          raw_preview: user.face_embedding
+            ? JSON.stringify(user.face_embedding).substring(0, 200)
+            : null,
+        },
+        descriptors_count: descriptors?.length || 0,
+        descriptors: descriptorsAnalysis,
+        verification_status: {
+          can_verify: canVerify,
+          recommendation: recommendation,
+          needs_sync: needsSync,
+          needs_registration: descriptorsAnalysis.length === 0,
+        },
+      });
+    } catch (error) {
+      console.error("Debug face data error:", error);
+      res.status(500).json({ error: error.message, stack: error.stack });
+    }
+  },
+);
+
+// ==================== SYNC FACE DATA FROM DESCRIPTORS TO USERS TABLE ====================
+app.post(
+  "/api/admin/debug/sync-face-data/:userId",
+  authenticate,
+  authorizeAdmin,
+  async (req, res) => {
+    try {
+      const { userId } = req.params;
+
+      console.log(`[SYNC] Syncing face data for user: ${userId}`);
+
+      // Find the best descriptor (primary first, then any active, then any)
+      const { data: descriptors, error: fetchError } = await supabase
+        .from("face_descriptors")
+        .select("descriptor, is_primary, quality_score")
+        .eq("user_id", userId)
+        .eq("is_active", true)
+        .order("is_primary", { ascending: false })
+        .order("quality_score", { ascending: false });
+
+      if (fetchError || !descriptors || descriptors.length === 0) {
+        return res
+          .status(404)
+          .json({ error: "No face descriptors found for this user" });
+      }
+
+      let bestVector = null;
+      let bestQuality = 0;
+
+      for (const desc of descriptors) {
+        let vector = null;
+
+        // Try to extract vector from different formats
+        if (desc.descriptor) {
+          // Format: { vector: [...] }
+          if (
+            desc.descriptor.vector &&
+            Array.isArray(desc.descriptor.vector) &&
+            desc.descriptor.vector.length === 128
+          ) {
+            vector = desc.descriptor.vector;
+          }
+          // Format: { descriptor: [...] }
+          else if (
+            desc.descriptor.descriptor &&
+            Array.isArray(desc.descriptor.descriptor) &&
+            desc.descriptor.descriptor.length === 128
+          ) {
+            vector = desc.descriptor.descriptor;
+          }
+          // Format: direct array
+          else if (
+            Array.isArray(desc.descriptor) &&
+            desc.descriptor.length === 128
+          ) {
+            vector = desc.descriptor;
+          }
+          // Format: string that parses to array
+          else if (typeof desc.descriptor === "string") {
+            try {
+              const parsed = JSON.parse(desc.descriptor);
+              if (Array.isArray(parsed) && parsed.length === 128) {
+                vector = parsed;
+              } else if (
+                parsed.vector &&
+                Array.isArray(parsed.vector) &&
+                parsed.vector.length === 128
+              ) {
+                vector = parsed.vector;
+              }
+            } catch (e) {}
+          }
+        }
+
+        if (vector) {
+          bestVector = vector;
+          bestQuality = desc.quality_score || 0;
+          break; // Use the first valid one (already ordered by primary then quality)
         }
       }
-      
-      return {
-        image: imageData,
-        angle: angle || index + 1,
-        is_primary: desc.is_primary || false,
-        quality_score: desc.quality_score,
-        created_at: desc.created_at
-      };
-    }).filter(img => img.image); // Only return entries with actual images
-    
-    res.json({ images });
-    
-  } catch (error) {
-    console.error("Get face images error:", error);
-    res.status(500).json({ error: error.message });
-  }
-});
+
+      if (!bestVector) {
+        return res.status(400).json({
+          error: "No valid 128-length face vector found in descriptors",
+          debug: descriptors.map((d) => ({
+            has_descriptor: !!d.descriptor,
+            type: typeof d.descriptor,
+            keys: d.descriptor ? Object.keys(d.descriptor) : [],
+          })),
+        });
+      }
+
+      // Get current version
+      const { data: currentUser } = await supabase
+        .from("users")
+        .select("face_embedding_version")
+        .eq("id", userId)
+        .single();
+
+      const newVersion = (currentUser?.face_embedding_version || 0) + 1;
+
+      // Update users table
+      const { error: updateError } = await supabase
+        .from("users")
+        .update({
+          face_embedding: bestVector,
+          face_verified: true,
+          face_quality_score: bestQuality || 0.8,
+          face_embedding_version: newVersion,
+          face_verification_date: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", userId);
+
+      if (updateError) throw updateError;
+
+      // Log the sync action
+      await supabase.from("admin_actions").insert({
+        admin_id: req.user.id,
+        action_type: "sync_face_data",
+        target_user_id: userId,
+        details: {
+          vector_length: bestVector.length,
+          quality_score: bestQuality,
+          version: newVersion,
+        },
+        ip_address: req.ip,
+        created_at: new Date().toISOString(),
+      });
+
+      console.log(
+        `[SYNC] Successfully synced face data for user ${userId}, version ${newVersion}`,
+      );
+
+      res.json({
+        success: true,
+        message: "Face data synced successfully",
+        vector_length: bestVector.length,
+        vector_preview: bestVector.slice(0, 10),
+        version: newVersion,
+      });
+    } catch (error) {
+      console.error("Sync face data error:", error);
+      res.status(500).json({ error: error.message });
+    }
+  },
+);
+
+// ==================== GET USER FACE IMAGES ====================
+app.get(
+  "/api/admin/users/:userId/face-images",
+  authenticate,
+  authorizeAdmin,
+  async (req, res) => {
+    try {
+      const { userId } = req.params;
+
+      console.log(`[FaceImages] Fetching face images for user: ${userId}`);
+
+      const { data: descriptors, error } = await supabase
+        .from("face_descriptors")
+        .select("descriptor, is_primary, quality_score, created_at")
+        .eq("user_id", userId)
+        .eq("is_active", true)
+        .order("is_primary", { ascending: false })
+        .order("created_at", { ascending: true });
+
+      if (error) throw error;
+
+      const images = (descriptors || [])
+        .map((desc, index) => {
+          let imageData = null;
+          let angle = null;
+
+          // Extract image from different formats
+          if (desc.descriptor) {
+            if (desc.descriptor.image) {
+              imageData = desc.descriptor.image;
+              angle = desc.descriptor.angle;
+            } else if (
+              typeof desc.descriptor === "string" &&
+              desc.descriptor.startsWith("data:image")
+            ) {
+              imageData = desc.descriptor;
+            }
+          }
+
+          return {
+            image: imageData,
+            angle: angle || index + 1,
+            is_primary: desc.is_primary || false,
+            quality_score: desc.quality_score,
+            created_at: desc.created_at,
+          };
+        })
+        .filter((img) => img.image); // Only return entries with actual images
+
+      res.json({ images });
+    } catch (error) {
+      console.error("Get face images error:", error);
+      res.status(500).json({ error: error.message });
+    }
+  },
+);
 
 // ==================== TEST ENDPOINT FOR CURRENT USER (DEBUG) ====================
 app.get("/api/user/debug-my-face", authenticate, async (req, res) => {
   try {
     const userId = req.user.id;
-    
+
     console.log(`[DEBUG-ME] User ${userId} debugging their own face data`);
-    
+
     // Get from users table
     const { data: user, error: userError } = await supabase
       .from("users")
-      .select("id, email, first_name, last_name, face_verified, face_embedding, face_quality_score")
+      .select(
+        "id, email, first_name, last_name, face_verified, face_embedding, face_quality_score",
+      )
       .eq("id", userId)
       .single();
-    
+
     if (userError) {
-      return res.status(404).json({ error: "User not found", details: userError });
+      return res
+        .status(404)
+        .json({ error: "User not found", details: userError });
     }
-    
+
     // Get from face_descriptors
     const { data: descriptors, error: descError } = await supabase
       .from("face_descriptors")
       .select("id, is_primary, is_active, quality_score")
       .eq("user_id", userId)
       .eq("is_active", true);
-    
+
     // Analyze face_embedding
     let hasValidVector = false;
     let vectorLength = 0;
-    
+
     if (user.face_embedding) {
       try {
         let embedding = user.face_embedding;
-        if (typeof embedding === 'string') embedding = JSON.parse(embedding);
+        if (typeof embedding === "string") embedding = JSON.parse(embedding);
         if (Array.isArray(embedding)) {
           vectorLength = embedding.length;
           hasValidVector = embedding.length === 128;
@@ -3442,7 +3179,7 @@ app.get("/api/user/debug-my-face", authenticate, async (req, res) => {
         }
       } catch (e) {}
     }
-    
+
     res.json({
       user_id: userId,
       email: user.email,
@@ -3454,11 +3191,10 @@ app.get("/api/user/debug-my-face", authenticate, async (req, res) => {
       face_quality_score: user.face_quality_score,
       descriptors_count: descriptors?.length || 0,
       can_verify: hasValidVector,
-      message: hasValidVector 
+      message: hasValidVector
         ? "✅ Your face data is valid. Verification should work."
-        : "❌ Your face data is invalid or missing. Please contact support."
+        : "❌ Your face data is invalid or missing. Please contact support.",
     });
-    
   } catch (error) {
     console.error("Debug my face error:", error);
     res.status(500).json({ error: error.message });
@@ -3466,86 +3202,100 @@ app.get("/api/user/debug-my-face", authenticate, async (req, res) => {
 });
 
 // ==================== FIX MISSING FACE DATA (Admin Utility) ====================
-app.post("/api/admin/fix-missing-face-data", authenticate, authorizeAdmin, async (req, res) => {
-  try {
-    // Find users who have face_descriptors but no face_embedding in users table
-    const { data: usersWithDescriptors, error: fetchError } = await supabase
-      .from("face_descriptors")
-      .select("user_id")
-      .eq("is_active", true)
-      .not("descriptor", "is", null);
-    
-    if (fetchError) throw fetchError;
-    
-    const uniqueUserIds = [...new Set(usersWithDescriptors.map(u => u.user_id))];
-    let fixed = 0;
-    let failed = 0;
-    
-    for (const userId of uniqueUserIds) {
-      try {
-        // Get the user's current face_embedding status
-        const { data: user } = await supabase
-          .from("users")
-          .select("face_embedding")
-          .eq("id", userId)
-          .single();
-        
-        // Skip if already has face_embedding
-        if (user?.face_embedding) continue;
-        
-        // Get best descriptor
-        const { data: descriptors } = await supabase
-          .from("face_descriptors")
-          .select("descriptor, quality_score")
-          .eq("user_id", userId)
-          .eq("is_active", true)
-          .order("quality_score", { ascending: false })
-          .limit(1);
-        
-        if (descriptors && descriptors.length > 0) {
-          let vector = null;
-          const desc = descriptors[0].descriptor;
-          
-          if (desc.vector && Array.isArray(desc.vector) && desc.vector.length === 128) {
-            vector = desc.vector;
-          } else if (desc.descriptor && Array.isArray(desc.descriptor) && desc.descriptor.length === 128) {
-            vector = desc.descriptor;
-          } else if (Array.isArray(desc) && desc.length === 128) {
-            vector = desc;
+app.post(
+  "/api/admin/fix-missing-face-data",
+  authenticate,
+  authorizeAdmin,
+  async (req, res) => {
+    try {
+      // Find users who have face_descriptors but no face_embedding in users table
+      const { data: usersWithDescriptors, error: fetchError } = await supabase
+        .from("face_descriptors")
+        .select("user_id")
+        .eq("is_active", true)
+        .not("descriptor", "is", null);
+
+      if (fetchError) throw fetchError;
+
+      const uniqueUserIds = [
+        ...new Set(usersWithDescriptors.map((u) => u.user_id)),
+      ];
+      let fixed = 0;
+      let failed = 0;
+
+      for (const userId of uniqueUserIds) {
+        try {
+          // Get the user's current face_embedding status
+          const { data: user } = await supabase
+            .from("users")
+            .select("face_embedding")
+            .eq("id", userId)
+            .single();
+
+          // Skip if already has face_embedding
+          if (user?.face_embedding) continue;
+
+          // Get best descriptor
+          const { data: descriptors } = await supabase
+            .from("face_descriptors")
+            .select("descriptor, quality_score")
+            .eq("user_id", userId)
+            .eq("is_active", true)
+            .order("quality_score", { ascending: false })
+            .limit(1);
+
+          if (descriptors && descriptors.length > 0) {
+            let vector = null;
+            const desc = descriptors[0].descriptor;
+
+            if (
+              desc.vector &&
+              Array.isArray(desc.vector) &&
+              desc.vector.length === 128
+            ) {
+              vector = desc.vector;
+            } else if (
+              desc.descriptor &&
+              Array.isArray(desc.descriptor) &&
+              desc.descriptor.length === 128
+            ) {
+              vector = desc.descriptor;
+            } else if (Array.isArray(desc) && desc.length === 128) {
+              vector = desc;
+            }
+
+            if (vector) {
+              await supabase
+                .from("users")
+                .update({
+                  face_embedding: vector,
+                  face_verified: true,
+                  face_quality_score: descriptors[0].quality_score || 0.8,
+                  updated_at: new Date().toISOString(),
+                })
+                .eq("id", userId);
+              fixed++;
+            }
           }
-          
-          if (vector) {
-            await supabase
-              .from("users")
-              .update({
-                face_embedding: vector,
-                face_verified: true,
-                face_quality_score: descriptors[0].quality_score || 0.8,
-                updated_at: new Date().toISOString()
-              })
-              .eq("id", userId);
-            fixed++;
-          }
+        } catch (err) {
+          console.error(`Failed to fix user ${userId}:`, err);
+          failed++;
         }
-      } catch (err) {
-        console.error(`Failed to fix user ${userId}:`, err);
-        failed++;
       }
+
+      res.json({
+        success: true,
+        message: `Fixed ${fixed} users, failed ${failed}`,
+        fixed,
+        failed,
+        total_users_processed: uniqueUserIds.length,
+      });
+    } catch (error) {
+      console.error("Fix missing face data error:", error);
+      res.status(500).json({ error: error.message });
     }
-    
-    res.json({
-      success: true,
-      message: `Fixed ${fixed} users, failed ${failed}`,
-      fixed,
-      failed,
-      total_users_processed: uniqueUserIds.length
-    });
-    
-  } catch (error) {
-    console.error("Fix missing face data error:", error);
-    res.status(500).json({ error: error.message });
-  }
-});
+  },
+);
 
 // Resend OTP
 app.post("/api/auth/resend-otp", async (req, res) => {
