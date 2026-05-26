@@ -1,62 +1,115 @@
-// In index.js - REPLACE your existing CORS configuration with this:
 
-app.use(
-  cors({
-    origin: (origin, callback) => {
-      const allowed = [
-        "http://127.0.0.1:5500",
-        "http://127.0.0.1:5501",
-        "http://localhost:5500",
-        "http://localhost:5501",
-        "https://localhost:5500",
-        "https://bank-backend-blush.vercel.app",
-        "https://zivarabank.vercel.app",
-        "https://paystora.com",
-        "http://paystora.com",
-        "https://www.paystora.com",
-        "http://www.paystora.com",
-        /\.vercel\.app$/,  // Allow all vercel.app subdomains
-      ];
-      
-      // Allow any origin in development
-      if (!origin || process.env.NODE_ENV === 'development') {
-        callback(null, true);
-        return;
-      }
-      
-      // Check against allowed origins
-      const isAllowed = allowed.some(allowedOrigin => {
-        if (allowedOrigin instanceof RegExp) {
-          return allowedOrigin.test(origin);
-        }
-        return allowedOrigin === origin;
-      });
-      
-      if (isAllowed) {
-        callback(null, true);
-      } else {
-        console.log(`CORS blocked origin: ${origin}`);
-        callback(null, true); // Still allow but log - change to false in production if needed
-      }
-    },
-    credentials: true,
-    methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
-    allowedHeaders: [
-      "Content-Type",
-      "Authorization",
-      "X-Requested-With",
-      "Accept",
-      "Origin",
-      "X-Device-ID",
-      "X-Device-Fingerprint",
-      "X-Device-Integrity",
-      "X-Admin-Request",
-      "x-device-id",        // Add lowercase version
-      "X-Device-Id",        // Add alternative case
-      "device-fingerprint",
-      "X-Session-ID"
-    ],
-    exposedHeaders: ["Authorization"],
-    optionsSuccessStatus: 204,
-  })
-);
+
+
+
+
+
+
+
+
+// Check session for anomalies
+app.get("/api/security/check-session", authenticate, async (req, res) => {
+  try {
+    const token = req.headers.authorization?.split(" ")[1];
+    
+    // Count active sessions for this user
+    const { count, error } = await supabase
+      .from("user_sessions")
+      .select("*", { count: "exact", head: true })
+      .eq("user_id", req.user.id)
+      .eq("is_active", true);
+    
+    if (error) throw error;
+    
+    // More than 2 active sessions is suspicious
+    const isCompromised = count > 2;
+    
+    res.json({ 
+      isCompromised: isCompromised,
+      active_sessions_count: count || 0
+    });
+  } catch (error) {
+    console.error("Session check error:", error);
+    res.json({ isCompromised: false });
+  }
+});
+
+// Revoke all other sessions
+app.post("/api/security/revoke-other-sessions", authenticate, async (req, res) => {
+  try {
+    const currentToken = req.headers.authorization?.split(" ")[1];
+    
+    // Get current session ID
+    const { data: currentSession } = await supabase
+      .from("user_sessions")
+      .select("id")
+      .eq("session_token", currentToken)
+      .single();
+    
+    // Revoke all other sessions
+    await supabase
+      .from("user_sessions")
+      .update({ 
+        is_active: false, 
+        expires_at: new Date().toISOString(),
+        invalidated_reason: "User revoked all other sessions"
+      })
+      .eq("user_id", req.user.id)
+      .neq("id", currentSession?.id);
+    
+    res.json({ success: true });
+  } catch (error) {
+    console.error("Revoke sessions error:", error);
+    res.status(500).json({ error: "Failed to revoke sessions" });
+  }
+});
+
+// Log security events batch
+app.post("/api/security/events", authenticate, async (req, res) => {
+  try {
+    const { events } = req.body;
+    
+    if (!events || !Array.isArray(events)) {
+      return res.status(400).json({ error: "Invalid events data" });
+    }
+    
+    // Insert each event
+    for (const event of events) {
+      await supabase
+        .from("security_logs")
+        .insert({
+          user_id: req.user.id,
+          event_type: event.type,
+          details: event.details || {},
+          ip_address: req.ip,
+          user_agent: event.userAgent || req.headers["user-agent"],
+          timestamp: new Date(event.timestamp || Date.now()).toISOString()
+        });
+    }
+    
+    res.json({ success: true, logged: events.length });
+  } catch (error) {
+    console.error("Security events error:", error);
+    res.json({ success: false });
+  }
+});
+
+// Validate session endpoint (for dashboard)
+app.get("/api/auth/validate-session", authenticate, async (req, res) => {
+  try {
+    // Check if user still exists and is active
+    const { data: user, error } = await supabase
+      .from("users")
+      .select("id, is_active, is_frozen")
+      .eq("id", req.user.id)
+      .single();
+    
+    if (error || !user || !user.is_active || user.is_frozen) {
+      return res.status(401).json({ error: "Session invalid", code: "SESSION_EXPIRED" });
+    }
+    
+    res.json({ valid: true });
+  } catch (error) {
+    res.status(401).json({ error: "Session validation failed" });
+  }
+});

@@ -185,6 +185,8 @@ app.use(
       "X-Device-Fingerprint",
       "X-Device-Integrity",
       "X-Admin-Request",
+      "x-request-id",
+      "x-Request-id",
       "x-device-id",        // Add lowercase version
       "X-Device-Id",        // Add alternative case
       "device-fingerprint",
@@ -1027,7 +1029,7 @@ app.get("/api/user/security-events", authenticate, async (req, res) => {
 });
 
 // Revoke all other sessions (security feature)
-app.post(
+/*app.post(
   "/api/security/revoke-other-sessions",
   authenticate,
   async (req, res) => {
@@ -1061,7 +1063,39 @@ app.post(
       res.status(500).json({ error: "Failed to revoke sessions" });
     }
   },
-);
+);*/
+
+
+
+// Revoke all other sessions
+app.post("/api/security/revoke-other-sessions", authenticate, async (req, res) => {
+  try {
+    const currentToken = req.headers.authorization?.split(" ")[1];
+    
+    // Get current session ID
+    const { data: currentSession } = await supabase
+      .from("user_sessions")
+      .select("id")
+      .eq("session_token", currentToken)
+      .single();
+    
+    // Revoke all other sessions
+    await supabase
+      .from("user_sessions")
+      .update({ 
+        is_active: false, 
+        expires_at: new Date().toISOString(),
+        invalidated_reason: "User revoked all other sessions"
+      })
+      .eq("user_id", req.user.id)
+      .neq("id", currentSession?.id);
+    
+    res.json({ success: true });
+  } catch (error) {
+    console.error("Revoke sessions error:", error);
+    res.status(500).json({ error: "Failed to revoke sessions" });
+  }
+});
 
 // Validate session endpoint
 app.get("/api/auth/validate-session", authenticate, async (req, res) => {
@@ -1080,6 +1114,45 @@ app.get("/api/auth/validate-session", authenticate, async (req, res) => {
     res.json({ valid: true });
   } catch (error) {
     res.status(401).json({ error: "Session validation failed" });
+  }
+});
+
+// Report device compromise (from root-detection.js)
+app.post("/api/security/report-compromise", async (req, res) => {
+  try {
+    const { detection_results, compromise_level, device_info } = req.body;
+    
+    // Get token if available (for authenticated users)
+    let userId = null;
+    const authHeader = req.header("Authorization");
+    if (authHeader) {
+      try {
+        const token = authHeader.replace("Bearer ", "");
+        const decoded = jwt.verify(token, process.env.JWT_SECRET);
+        userId = decoded.userId;
+      } catch (e) {}
+    }
+    
+    // Log to security_compromises table
+    const { error } = await supabase
+      .from("security_compromises")
+      .insert({
+        user_id: userId,
+        detection_results: detection_results,
+        compromise_level: compromise_level,
+        device_info: device_info,
+        ip_address: req.ip,
+        user_agent: req.headers["user-agent"],
+        created_at: new Date().toISOString()
+      });
+    
+    if (error) console.error("Compromise report error:", error);
+    
+    // Always return 200 to avoid client errors
+    res.json({ success: true });
+  } catch (error) {
+    console.error("Report compromise error:", error);
+    res.json({ success: false });
   }
 });
 
@@ -10751,6 +10824,9 @@ app.post(
     }
   },
 );
+
+
+
 
 // ==================== UPGRADE DOCUMENT SUBMISSION ====================
 
