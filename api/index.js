@@ -187,6 +187,8 @@ app.use(
       "X-Admin-Request",
       "x-request-id",
       "x-Request-id",
+      "X-Client-Version",
+      "X-client-Version",
       "x-device-id",        // Add lowercase version
       "X-Device-Id",        // Add alternative case
       "device-fingerprint",
