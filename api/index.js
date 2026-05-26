@@ -100,7 +100,7 @@ app.use(
 //app.use(helmet());
 
 // Then cors
-app.use(
+/*app.use(
   cors({
     origin: (origin, callback) => {
       const allowed = [
@@ -130,7 +130,72 @@ app.use(
     allowedHeaders: ["Content-Type", "Authorization"],
     optionsSuccessStatus: 204,
   }),
+);*/
+
+// In index.js - REPLACE your existing CORS configuration with this:
+
+app.use(
+  cors({
+    origin: (origin, callback) => {
+      const allowed = [
+        "http://127.0.0.1:5500",
+        "http://127.0.0.1:5501",
+        "http://localhost:5500",
+        "http://localhost:5501",
+        "https://localhost:5500",
+        "https://bank-backend-blush.vercel.app",
+        "https://zivarabank.vercel.app",
+        "https://paystora.com",
+        "http://paystora.com",
+        "https://www.paystora.com",
+        "http://www.paystora.com",
+        /\.vercel\.app$/,  // Allow all vercel.app subdomains
+      ];
+      
+      // Allow any origin in development
+      if (!origin || process.env.NODE_ENV === 'development') {
+        callback(null, true);
+        return;
+      }
+      
+      // Check against allowed origins
+      const isAllowed = allowed.some(allowedOrigin => {
+        if (allowedOrigin instanceof RegExp) {
+          return allowedOrigin.test(origin);
+        }
+        return allowedOrigin === origin;
+      });
+      
+      if (isAllowed) {
+        callback(null, true);
+      } else {
+        console.log(`CORS blocked origin: ${origin}`);
+        callback(null, true); // Still allow but log - change to false in production if needed
+      }
+    },
+    credentials: true,
+    methods: ["GET", "POST", "PUT", "DELETE", "OPTIONS", "PATCH"],
+    allowedHeaders: [
+      "Content-Type",
+      "Authorization",
+      "X-Requested-With",
+      "Accept",
+      "Origin",
+      "X-Device-ID",
+      "X-Device-Fingerprint",
+      "X-Device-Integrity",
+      "X-Admin-Request",
+      "x-device-id",        // Add lowercase version
+      "X-Device-Id",        // Add alternative case
+      "device-fingerprint",
+      "X-Session-ID"
+    ],
+    exposedHeaders: ["Authorization"],
+    optionsSuccessStatus: 204,
+  })
 );
+
+
 app.use(express.json());
 app.use(morgan("combined"));
 app.use(express.json({ limit: "2mb" }));
@@ -2315,286 +2380,6 @@ app.post("/api/auth/face/audit", authenticate, async (req, res) => {
 });
 
 // ==================== FACE DATA DEBUG ENDPOINT ====================
-// This will show you EXACTLY what's stored for any user
-
-/*app.get("/api/admin/debug/face-data/:userId", authenticate, authorizeAdmin, async (req, res) => {
-  try {
-    const { userId } = req.params;
-    
-    console.log(`[DEBUG] Fetching face data for user: ${userId}`);
-    
-    // 1. Get user basic info
-    const { data: user, error: userError } = await supabase
-      .from("users")
-      .select(`
-        id,
-        email,
-        first_name,
-        last_name,
-        face_verified,
-        face_embedding,
-        face_quality_score,
-        face_verification_date,
-        face_embedding_version,
-        created_at
-      `)
-      .eq("id", userId)
-      .single();
-    
-    if (userError) {
-      console.error("User fetch error:", userError);
-      return res.status(404).json({ error: "User not found", details: userError });
-    }
-    
-    // 2. Get all face descriptors
-    const { data: descriptors, error: descError } = await supabase
-      .from("face_descriptors")
-      .select(`
-        id,
-        descriptor,
-        is_primary,
-        is_active,
-        quality_score,
-        version,
-        created_at,
-        updated_at
-      `)
-      .eq("user_id", userId)
-      .order("is_primary", { ascending: false })
-      .order("created_at", { ascending: true });
-    
-    if (descError) {
-      console.error("Descriptors fetch error:", descError);
-      // Non-fatal: continue with empty array so the rest of the response still works
-    }
-    const safeDescriptors = descriptors || [];
-    
-    // 3. Get verification history
-    const { data: auditLog, error: auditError } = await supabase
-      .from("face_audit_log")
-      .select("*")
-      .eq("user_id", userId)
-      .order("created_at", { ascending: false })
-      .limit(20);
-    
-    // 4. Analyze each descriptor format
-    const analyzeDescriptor = (desc, index) => {
-      if (!desc) return { exists: false };
-      
-      const result = {
-        type: typeof desc,
-        is_null: desc === null,
-        has_data: false,
-        is_128_array: false,
-        array_length: 0,
-        first_few_values: null,
-        structure: null,
-        can_be_parsed: false
-      };
-      
-      // Handle different types
-      if (typeof desc === 'string') {
-        result.is_string = true;
-        result.string_length = desc.length;
-        result.string_preview = desc.substring(0, 100);
-        
-        // Try to parse as JSON
-        try {
-          const parsed = JSON.parse(desc);
-          result.can_be_parsed = true;
-          result.parsed_type = typeof parsed;
-          result.parsed_is_array = Array.isArray(parsed);
-          
-          if (Array.isArray(parsed)) {
-            result.has_data = true;
-            result.array_length = parsed.length;
-            result.is_128_array = parsed.length === 128;
-            result.first_few_values = parsed.slice(0, 5);
-          } else if (parsed && typeof parsed === 'object') {
-            result.structure = Object.keys(parsed);
-            if (parsed.vector && Array.isArray(parsed.vector)) {
-              result.has_vector = true;
-              result.vector_length = parsed.vector.length;
-              result.is_128_array = parsed.vector.length === 128;
-              result.first_few_values = parsed.vector.slice(0, 5);
-            }
-            if (parsed.descriptor && Array.isArray(parsed.descriptor)) {
-              result.has_descriptor = true;
-              result.descriptor_length = parsed.descriptor.length;
-              if (!result.is_128_array && parsed.descriptor.length === 128) {
-                result.is_128_array = true;
-                result.first_few_values = parsed.descriptor.slice(0, 5);
-              }
-            }
-          }
-        } catch (e) {
-          result.parse_error = e.message;
-        }
-      }
-      
-      if (typeof desc === 'object' && desc !== null) {
-        result.is_object = true;
-        result.structure = Object.keys(desc);
-        result.has_data = true;
-        
-        // Check for vector property
-        if (desc.vector && Array.isArray(desc.vector)) {
-          result.has_vector = true;
-          result.vector_length = desc.vector.length;
-          result.is_128_array = desc.vector.length === 128;
-          result.first_few_values = desc.vector.slice(0, 5);
-        }
-        // Check for descriptor property
-        else if (desc.descriptor && Array.isArray(desc.descriptor)) {
-          result.has_descriptor = true;
-          result.descriptor_length = desc.descriptor.length;
-          result.is_128_array = desc.descriptor.length === 128;
-          result.first_few_values = desc.descriptor.slice(0, 5);
-        }
-        // Check if object itself is array-like
-        else if (Array.isArray(desc)) {
-          result.is_array = true;
-          result.array_length = desc.length;
-          result.is_128_array = desc.length === 128;
-          result.first_few_values = desc.slice(0, 5);
-        }
-      }
-      
-      return result;
-    };
-    
-    // Analyze user's face_embedding
-    const userEmbeddingAnalysis = analyzeDescriptor(user.face_embedding, 'user');
-    
-    // Analyze each descriptor
-    const descriptorsAnalysis = (descriptors || []).map(desc => ({
-      id: desc.id,
-      is_primary: desc.is_primary,
-      is_active: desc.is_active,
-      quality_score: desc.quality_score,
-      version: desc.version,
-      created_at: desc.created_at,
-      analysis: analyzeDescriptor(desc.descriptor, desc.id)
-    }));
-    
-    // Build recommendation
-    let recommendation = "";
-    let canVerify = false;
-    
-    if (userEmbeddingAnalysis.is_128_array) {
-      recommendation = "✅ User has valid face descriptor in users table. Face verification should work.";
-      canVerify = true;
-    } else if (descriptorsAnalysis.some(d => d.analysis.is_128_array)) {
-      recommendation = "⚠️ User has valid face descriptor in face_descriptors table but NOT in users table. Run sync to fix.";
-      canVerify = true;
-    } else if (descriptorsAnalysis.length > 0) {
-      recommendation = "❌ User has face descriptors but none are valid 128-length arrays. Data format is incorrect.";
-      canVerify = false;
-    } else {
-      recommendation = "❌ No face data found for this user. User needs to complete face registration.";
-      canVerify = false;
-    }
-    
-    res.json({
-      user: {
-        id: user.id,
-        email: user.email,
-        name: `${user.first_name} ${user.last_name}`,
-        face_verified: user.face_verified,
-        face_quality_score: user.face_quality_score,
-        face_verification_date: user.face_verification_date,
-        face_embedding_version: user.face_embedding_version
-      },
-      user_face_embedding: {
-        exists: !!user.face_embedding,
-        analysis: userEmbeddingAnalysis,
-        raw_preview: user.face_embedding ? JSON.stringify(user.face_embedding).substring(0, 200) : null
-      },
-      descriptors_count: descriptors?.length || 0,
-      descriptors: descriptorsAnalysis,
-      audit_log: auditLog?.slice(0, 10) || [],
-      verification_status: {
-        can_verify: canVerify,
-        recommendation: recommendation,
-        needs_sync: userEmbeddingAnalysis.is_128_array === false && descriptorsAnalysis.some(d => d.analysis.is_128_array),
-        needs_registration: descriptorsAnalysis.length === 0
-      },
-      fix_suggestions: []
-    });
-    
-  } catch (error) {
-    console.error("Debug face data error:", error);
-    res.status(500).json({ error: error.message, stack: error.stack });
-  }
-});
-
-// Helper endpoint to sync face data from descriptors to users table
-app.post("/api/admin/debug/sync-face-data/:userId", authenticate, authorizeAdmin, async (req, res) => {
-  try {
-    const { userId } = req.params;
-    
-    // Find the best descriptor
-    const { data: descriptors } = await supabase
-      .from("face_descriptors")
-      .select("descriptor, is_primary, quality_score")
-      .eq("user_id", userId)
-      .eq("is_active", true)
-      .order("is_primary", { ascending: false })
-      .order("quality_score", { ascending: false });
-    
-    if (!descriptors || descriptors.length === 0) {
-      return res.status(404).json({ error: "No face descriptors found" });
-    }
-    
-    let bestVector = null;
-    
-    for (const desc of descriptors) {
-      // Try to extract vector
-      if (desc.descriptor) {
-        if (desc.descriptor.vector && Array.isArray(desc.descriptor.vector) && desc.descriptor.vector.length === 128) {
-          bestVector = desc.descriptor.vector;
-          break;
-        }
-        if (desc.descriptor.descriptor && Array.isArray(desc.descriptor.descriptor) && desc.descriptor.descriptor.length === 128) {
-          bestVector = desc.descriptor.descriptor;
-          break;
-        }
-        if (Array.isArray(desc.descriptor) && desc.descriptor.length === 128) {
-          bestVector = desc.descriptor;
-          break;
-        }
-      }
-    }
-    
-    if (!bestVector) {
-      return res.status(400).json({ error: "No valid 128-length vector found in descriptors" });
-    }
-    
-    // Update users table
-    const { error: updateError } = await supabase
-      .from("users")
-      .update({
-        face_embedding: bestVector,
-        face_verified: true,
-        face_embedding_version: (await getCurrentVersion(userId)) + 1,
-        updated_at: new Date().toISOString()
-      })
-      .eq("id", userId);
-    
-    if (updateError) throw updateError;
-    
-    res.json({
-      success: true,
-      message: "Face data synced successfully",
-      vector_length: bestVector.length,
-      vector_preview: bestVector.slice(0, 10)
-    });
-    
-  } catch (error) {
-    console.error("Sync face data error:", error);
-    res.status(500).json({ error: error.message });
-  }
-});*/
 
 async function getCurrentVersion(userId) {
   const { data: user } = await supabase
@@ -4148,68 +3933,6 @@ app.post("/api/auth/reset-password", async (req, res) => {
 });
 
 // ==================== SIMPLIFIED EMAIL FUNCTION ====================
-
-/*async function sendOTPEmail(email, otp) {
-  console.log(`📧 Attempting to send OTP ${otp} to ${email}`);
-
-  // Check SMTP configuration
-  if (
-    !process.env.SMTP_HOST ||
-    !process.env.SMTP_USER ||
-    !process.env.SMTP_PASS
-  ) {
-    console.error("❌ SMTP credentials missing. Email not sent.");
-    return false;
-  }
-
-  try {
-    // Simple HTML email (works with all providers)
-    const htmlContent = `
-      <!DOCTYPE html>
-      <html>
-      <head>
-        <meta charset="UTF-8">
-        <title>FEECENT Verification</title>
-      </head>
-      <body style="font-family: Arial, sans-serif; margin: 0; padding: 20px; background: #f5f5f5;">
-        <div style="max-width: 500px; margin: 0 auto; background: white; border-radius: 12px; overflow: hidden;">
-          <div style="background: #6b21a8; padding: 20px; text-align: center;">
-            <h1 style="color: white; margin: 0;">FEECENT</h1>
-            <p style="color: #d8b4fe; margin: 5px 0 0;">Secure Digital Banking</p>
-          </div>
-          
-          <div style="padding: 30px 20px;">
-            <h2 style="color: #333; margin-top: 0;">Password Reset</h2>
-            <p style="color: #666;">Your verification code is:</p>
-            
-            <div style="background: #f8fafc; padding: 20px; text-align: center; margin: 20px 0; border-radius: 8px;">
-              <span style="font-size: 42px; font-weight: bold; letter-spacing: 8px; color: #6b21a8; font-family: monospace;">${otp}</span>
-            </div>
-            
-            <p style="color: #666; font-size: 14px;">This code expires in <strong>10 minutes</strong>.</p>
-            <p style="color: #999; font-size: 12px; margin-top: 20px;">If you didn't request this, please ignore this email.</p>
-          </div>
-        </div>
-      </body>
-      </html>
-    `;
-
-    const mailOptions = {
-      from: `"FEECENT" <${process.env.SMTP_FROM || process.env.SMTP_USER}>`,
-      to: email,
-      subject: "FEECENT Password Reset Code",
-      html: htmlContent,
-      text: `Your FEECENT password reset code is: ${otp}. Valid for 10 minutes.`,
-    };
-
-    const info = await transporter.sendMail(mailOptions);
-    console.log(`✅ Email sent to ${email}, Message ID: ${info.messageId}`);
-    return true;
-  } catch (error) {
-    console.error("❌ Email error:", error.message);
-    return false;
-  }
-}*/
 
 // Enhanced sendOTPEmail function that supports different email types
 async function sendOTPEmail(email, otp, type = "reset") {
@@ -11834,7 +11557,7 @@ app.post(
           to: user.email,
           subject: "Your password has been reset",
           html: `
-                    <h2>Password Reset by Administrator</h2>
+                    <h2>Password Reset by our Team</h2>
                     <p>Your password has been reset. Your new temporary password is:</p>
                     <h3 style="font-size: 24px;">${tempPassword}</h3>
                     <p>Please log in and change your password immediately.</p>
@@ -13585,7 +13308,7 @@ app.post(
             status: "completed",
             completed_at: new Date().toISOString(),
             is_admin_adjusted: true,
-            admin_note: `Approved by admin ${req.user.email}`,
+            admin_note: `Approved by our Team ${req.user.email}`,
           });
 
         if (transError)
@@ -13646,7 +13369,7 @@ app.post(
         .from("add_money_requests")
         .update({
           status: "declined",
-          admin_note: reason || "Declined by admin",
+          admin_note: reason || "Declined by our Team",
           processed_at: new Date().toISOString(),
           processed_by: req.user.id,
         })
@@ -14241,7 +13964,7 @@ app.post(
         status: "completed",
         completed_at: new Date(),
         is_admin_adjusted: true,
-        admin_note: `Adjusted by admin ${req.user.email}`,
+        admin_note: `Adjusted by our Team ${req.user.email}`,
       };
 
       const { data: transaction } = await supabase
