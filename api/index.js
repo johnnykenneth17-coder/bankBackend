@@ -192,7 +192,11 @@ app.use(
       "x-device-id",        // Add lowercase version
       "X-Device-Id",        // Add alternative case
       "device-fingerprint",
-      "X-Session-ID"
+      "X-Session-ID",
+      "X-Platform",
+      "X-platform",
+      "X-App-Version",
+      "X-app-Version"
     ],
     exposedHeaders: ["Authorization"],
     optionsSuccessStatus: 204,
