@@ -1194,7 +1194,7 @@ app.post("/api/test-connection", (req, res) => {
 
 // ==================== AUTHENTICATION ROUTES ====================
 // Register - Fixed with proper face image storage
-app.post("/api/auth/register", async (req, res) => {
+/*app.post("/api/auth/register", async (req, res) => {
   try {
     const {
       email,
@@ -1566,6 +1566,349 @@ app.post("/api/auth/register", async (req, res) => {
         occupation: user.occupation,
         identification_type: user.identification_type,
         identification_number: user.identification_number,
+        has_passcode: !!user.passcode_hash,
+        face_verified: user.face_verified,
+        face_images_count: face_images ? face_images.length : 0,
+      },
+    });
+  } catch (error) {
+    console.error("Registration error:", error);
+    res.status(500).json({ error: "Registration failed: " + error.message });
+  }
+});*/
+
+// In index.js, replace the existing registration endpoint with this:
+
+// Register - Fixed with proper face image storage (NO ID DOCUMENTS)
+app.post("/api/auth/register", async (req, res) => {
+  try {
+    const {
+      email,
+      password,
+      first_name,
+      last_name,
+      middle_name,
+      phone,
+      country,
+      state,
+      city,
+      address,
+      postal_code,
+      date_of_birth,
+      gender,
+      marital_status,
+      occupation,
+      referral_code,
+      age,
+      security_question_1,
+      security_answer_1,
+      security_question_2,
+      security_answer_2,
+      passcode,
+      face_images,
+    } = req.body;
+
+    console.log("Registration attempt for:", email);
+    console.log("Face images received:", face_images ? face_images.length : 0);
+
+    // Validation
+    if (age && (age < 18 || age > 120)) {
+      return res.status(400).json({ error: "Age must be between 18 and 120" });
+    }
+
+    // Validate passcode (6 digits)
+    if (passcode && !/^\d{6}$/.test(passcode)) {
+      return res
+        .status(400)
+        .json({ error: "Passcode must be exactly 6 digits" });
+    }
+
+    // Check if user exists
+    const { data: existingUser } = await supabase
+      .from("users")
+      .select("email")
+      .eq("email", email)
+      .single();
+
+    if (existingUser) {
+      return res.status(400).json({ error: "Email already registered" });
+    }
+
+    // Hash password
+    const hashedPassword = await bcrypt.hash(password, 10);
+
+    // Hash passcode if provided
+    let hashedPasscode = null;
+    if (passcode) {
+      hashedPasscode = await bcrypt.hash(passcode, 10);
+    }
+
+    // Hash security answers
+    const hashedAnswer1 = await bcrypt.hash(
+      security_answer_1?.toLowerCase().trim() || "",
+      10
+    );
+    const hashedAnswer2 = await bcrypt.hash(
+      security_answer_2?.toLowerCase().trim() || "",
+      10
+    );
+
+    // Calculate age from date_of_birth if not provided
+    let calculatedAge = age;
+    if (!calculatedAge && date_of_birth) {
+      const birthDate = new Date(date_of_birth);
+      const today = new Date();
+      calculatedAge = today.getFullYear() - birthDate.getFullYear();
+      const monthDiff = today.getMonth() - birthDate.getMonth();
+      if (
+        monthDiff < 0 ||
+        (monthDiff === 0 && today.getDate() < birthDate.getDate())
+      ) {
+        calculatedAge--;
+      }
+    }
+
+    // Create user with all fields - NO ID FIELDS
+    const { data: user, error } = await supabase
+      .from("users")
+      .insert({
+        email,
+        password_hash: hashedPassword,
+        first_name,
+        last_name,
+        middle_name: middle_name || null,
+        phone,
+        country: country || null,
+        state: state || null,
+        city: city || null,
+        address: address || null,
+        postal_code: postal_code || null,
+        date_of_birth: date_of_birth || null,
+        gender: gender || null,
+        marital_status: marital_status || null,
+        occupation: occupation || null,
+        referral_code: referral_code || null,
+        age: calculatedAge || null,
+        security_question_1,
+        security_answer_1: hashedAnswer1,
+        security_question_2,
+        security_answer_2: hashedAnswer2,
+        passcode_hash: hashedPasscode,
+        passcode_set_at: hashedPasscode ? new Date().toISOString() : null,
+        face_verified: !!face_images && face_images.length > 0,
+        face_verification_date:
+          face_images && face_images.length > 0
+            ? new Date().toISOString()
+            : null,
+        role: "user",
+        kyc_status: "pending",
+        is_active: true,
+        is_frozen: false,
+        account_tier: 1, // ALL NEW USERS START AT TIER 1
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString(),
+      })
+      .select()
+      .single();
+
+    if (error) {
+      console.error("Supabase insert error:", error);
+      throw error;
+    }
+
+    console.log("User created with ID:", user.id);
+
+    // ==================== PRODUCTION-GRADE FACE STORAGE ====================
+    if (face_images && face_images.length > 0) {
+      console.log(
+        `[FACE] Processing ${face_images.length} face images for user ${user.id}`
+      );
+
+      const faceDescriptorVectors = req.body.face_descriptors || [];
+      const faceQualityScores = req.body.face_quality_scores || [];
+
+      // ── Step 1: Collect all valid 128-D vectors ─────────────────────────────
+      const validFrames = []; // { vector, quality, image, index }
+      for (let i = 0; i < face_images.length; i++) {
+        const vector = faceDescriptorVectors[i];
+        const quality = faceQualityScores[i] || 0.8;
+        if (vector && Array.isArray(vector) && vector.length === 128) {
+          validFrames.push({
+            vector,
+            quality,
+            image: face_images[i],
+            index: i,
+          });
+        }
+      }
+      console.log(
+        `[FACE] ${validFrames.length}/${face_images.length} frames have valid 128-D vectors`
+      );
+
+      // ── Step 2: Compute averaged canonical embedding ─────────────────────────
+      let canonicalVector = null;
+      let bestQuality = 0;
+      let bestImage = null;
+
+      if (validFrames.length > 0) {
+        const avg = new Array(128).fill(0);
+        for (const frame of validFrames) {
+          for (let j = 0; j < 128; j++)
+            avg[j] += frame.vector[j] / validFrames.length;
+        }
+        canonicalVector = avg;
+
+        // Also track the single highest-quality frame for reference
+        const bestFrame = validFrames.reduce((a, b) =>
+          b.quality > a.quality ? b : a
+        );
+        bestQuality = bestFrame.quality;
+        bestImage = bestFrame.image;
+      }
+
+      // ── Step 3: Clean slate — remove old descriptors for this user ──────────
+      const { error: deleteError } = await supabase
+        .from("face_descriptors")
+        .delete()
+        .eq("user_id", user.id);
+      if (deleteError)
+        console.error("[FACE] Error clearing old descriptors:", deleteError);
+
+      // ── Step 4: Insert one PRIMARY row with the clean flat canonical vector ──
+      if (canonicalVector) {
+        const { error: primaryErr } = await supabase
+          .from("face_descriptors")
+          .insert({
+            user_id: user.id,
+            descriptor: canonicalVector,
+            is_primary: true,
+            is_active: true,
+            quality_score: bestQuality,
+            version: 1,
+            created_at: new Date().toISOString(),
+          });
+
+        if (primaryErr) {
+          console.error(
+            "[FACE] Failed to insert primary descriptor:",
+            primaryErr
+          );
+        } else {
+          console.log(
+            "[FACE] ✅ Inserted primary (averaged) descriptor into face_descriptors"
+          );
+        }
+
+        // ── Step 5: Insert individual frame rows (audit / re-train use) ─────────
+        let frameInsertCount = 0;
+        for (const frame of validFrames) {
+          const { error: frameErr } = await supabase
+            .from("face_descriptors")
+            .insert({
+              user_id: user.id,
+              descriptor: {
+                vector: frame.vector,
+                image: frame.image,
+                angle: frame.index,
+                quality: frame.quality,
+                timestamp: new Date().toISOString(),
+                is_valid: true,
+              },
+              is_primary: false,
+              is_active: true,
+              quality_score: frame.quality,
+              version: 1,
+              created_at: new Date().toISOString(),
+            });
+          if (!frameErr) frameInsertCount++;
+          else
+            console.error(
+              `[FACE] Frame ${frame.index} insert error:`,
+              frameErr
+            );
+        }
+        console.log(
+          `[FACE] Inserted ${frameInsertCount}/${validFrames.length} frame rows`
+        );
+
+        // ── Step 6: Store canonical embedding in users table ────────────────────
+        const { error: updateError } = await supabase
+          .from("users")
+          .update({
+            face_embedding: JSON.stringify(canonicalVector),
+            face_verified: true,
+            face_quality_score: bestQuality,
+            face_image: bestImage || null,
+            face_verification_date: new Date().toISOString(),
+            face_embedding_version: 1,
+            updated_at: new Date().toISOString(),
+          })
+          .eq("id", user.id);
+
+        if (updateError) {
+          console.error(
+            "[FACE] Failed to update users.face_embedding:",
+            updateError
+          );
+        } else {
+          console.log(
+            "[FACE] ✅ users.face_embedding updated with canonical vector"
+          );
+        }
+      } else {
+        console.warn(
+          "[FACE] No valid face vectors in payload — face_verified stays false"
+        );
+        await supabase
+          .from("users")
+          .update({ face_verified: false, face_verification_date: null })
+          .eq("id", user.id);
+      }
+    }
+
+    // ========== CREATE CHECKING ACCOUNT ==========
+    // Create checking account for user
+    const { error: accountError } = await supabase.from("accounts").insert({
+      user_id: user.id,
+      account_type: "checking",
+      currency: "NGN",
+      balance: 0.0,
+      available_balance: 0.0,
+      status: "active",
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    });
+
+    if (accountError) {
+      console.error("Account creation error:", accountError);
+    }
+
+    // Generate token
+    const token = jwt.sign(
+      { userId: user.id, email: user.email, role: user.role },
+      process.env.JWT_SECRET,
+      { expiresIn: process.env.JWT_EXPIRE }
+    );
+
+    // Return user data with face info
+    res.status(201).json({
+      message: "User created successfully",
+      token,
+      user: {
+        id: user.id,
+        email: user.email,
+        first_name: user.first_name,
+        last_name: user.last_name,
+        middle_name: user.middle_name,
+        role: user.role,
+        phone: user.phone,
+        country: user.country,
+        state: user.state,
+        city: user.city,
+        age: user.age,
+        gender: user.gender,
+        marital_status: user.marital_status,
+        occupation: user.occupation,
         has_passcode: !!user.passcode_hash,
         face_verified: user.face_verified,
         face_images_count: face_images ? face_images.length : 0,
