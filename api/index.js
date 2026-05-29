@@ -1214,8 +1214,8 @@ app.post("/api/test-connection", (req, res) => {
       occupation,
       referral_code,
       age,
-      identification_type,
-      identification_number,
+      //identification_type,
+      //identification_number,
       security_question_1,
       security_answer_1,
       security_question_2,
@@ -1305,8 +1305,8 @@ app.post("/api/test-connection", (req, res) => {
         occupation: occupation || null,
         referral_code: referral_code || null,
         age: calculatedAge || null,
-        identification_type: identification_type || null,
-        identification_number: identification_number || null,
+        //identification_type: identification_type || null,
+        //identification_number: identification_number || null,
         security_question_1,
         security_answer_1: hashedAnswer1,
         security_question_2,
@@ -1719,7 +1719,7 @@ app.post("/api/auth/register", async (req, res) => {
     console.log("User created with ID:", user.id);
 
     // ==================== PRODUCTION-GRADE FACE STORAGE ====================
-    if (face_images && face_images.length > 0) {
+    /*if (face_images && face_images.length > 0) {
       console.log(
         `[FACE] Processing ${face_images.length} face images for user ${user.id}`
       );
@@ -1858,6 +1858,163 @@ app.post("/api/auth/register", async (req, res) => {
       } else {
         console.warn(
           "[FACE] No valid face vectors in payload — face_verified stays false"
+        );
+        await supabase
+          .from("users")
+          .update({ face_verified: false, face_verification_date: null })
+          .eq("id", user.id);
+      }
+    }*/
+
+       // ==================== PRODUCTION-GRADE FACE STORAGE ====================
+    if (face_images && face_images.length > 0) {
+      console.log(
+        `[FACE] Processing ${face_images.length} face images for user ${user.id}`,
+      );
+
+      const faceDescriptorVectors = req.body.face_descriptors || [];
+      const faceQualityScores = req.body.face_quality_scores || [];
+
+      // ── Step 1: Collect all valid 128-D vectors ─────────────────────────────
+      const validFrames = []; // { vector, quality, image, index }
+      for (let i = 0; i < face_images.length; i++) {
+        const vector = faceDescriptorVectors[i];
+        const quality = faceQualityScores[i] || 0.8;
+        if (vector && Array.isArray(vector) && vector.length === 128) {
+          validFrames.push({
+            vector,
+            quality,
+            image: face_images[i],
+            index: i,
+          });
+        }
+      }
+      console.log(
+        `[FACE] ${validFrames.length}/${face_images.length} frames have valid 128-D vectors`,
+      );
+
+      // ── Step 2: Compute averaged canonical embedding ─────────────────────────
+      // Averaging all captures is more robust than picking one frame.
+      let canonicalVector = null;
+      let bestQuality = 0;
+      let bestImage = null;
+
+      if (validFrames.length > 0) {
+        const avg = new Array(128).fill(0);
+        for (const frame of validFrames) {
+          for (let j = 0; j < 128; j++)
+            avg[j] += frame.vector[j] / validFrames.length;
+        }
+        canonicalVector = avg;
+
+        // Also track the single highest-quality frame for reference
+        const bestFrame = validFrames.reduce((a, b) =>
+          b.quality > a.quality ? b : a,
+        );
+        bestQuality = bestFrame.quality;
+        bestImage = bestFrame.image;
+      }
+
+      // ── Step 3: Clean slate — remove old descriptors for this user ──────────
+      const { error: deleteError } = await supabase
+        .from("face_descriptors")
+        .delete()
+        .eq("user_id", user.id);
+      if (deleteError)
+        console.error("[FACE] Error clearing old descriptors:", deleteError);
+
+      // ── Step 4: Insert one PRIMARY row with the clean flat canonical vector ──
+      // This is what getUserFaceDescriptor() reads. Storing as a plain array
+      // (not nested in an object) means all three extraction paths in that
+      // function will find it reliably.
+      if (canonicalVector) {
+        const { error: primaryErr } = await supabase
+          .from("face_descriptors")
+          .insert({
+            user_id: user.id,
+            descriptor: canonicalVector, // flat 128-number array → JSONB
+            is_primary: true,
+            is_active: true,
+            quality_score: bestQuality,
+            version: 1,
+            created_at: new Date().toISOString(),
+          });
+
+        if (primaryErr) {
+          console.error(
+            "[FACE] Failed to insert primary descriptor:",
+            primaryErr,
+          );
+        } else {
+          console.log(
+            "[FACE] ✅ Inserted primary (averaged) descriptor into face_descriptors",
+          );
+        }
+
+        // ── Step 5: Insert individual frame rows (audit / re-train use) ─────────
+        // These are stored with the nested format {image, vector, angle} for
+        // forensic purposes. They are NOT the ones used for verification lookup.
+        let frameInsertCount = 0;
+        for (const frame of validFrames) {
+          const { error: frameErr } = await supabase
+            .from("face_descriptors")
+            .insert({
+              user_id: user.id,
+              descriptor: {
+                vector: frame.vector, // nested — for audit only
+                image: frame.image,
+                angle: frame.index,
+                quality: frame.quality,
+                timestamp: new Date().toISOString(),
+                is_valid: true,
+              },
+              is_primary: false,
+              is_active: true,
+              quality_score: frame.quality,
+              version: 1,
+              created_at: new Date().toISOString(),
+            });
+          if (!frameErr) frameInsertCount++;
+          else
+            console.error(
+              `[FACE] Frame ${frame.index} insert error:`,
+              frameErr,
+            );
+        }
+        console.log(
+          `[FACE] Inserted ${frameInsertCount}/${validFrames.length} frame rows`,
+        );
+
+        // ── Step 6: Store canonical embedding in users table ────────────────────
+        // users.face_embedding is the fastest lookup path (no join needed).
+        // Always store as a flat JSON array string so parsing is unambiguous.
+        const { error: updateError } = await supabase
+          .from("users")
+          .update({
+            face_embedding: JSON.stringify(canonicalVector), // flat array string
+            face_verified: true,
+            face_quality_score: bestQuality,
+            face_image: bestImage || null,
+            face_verification_date: new Date().toISOString(),
+            face_embedding_version: 1,
+            updated_at: new Date().toISOString(),
+          })
+          .eq("id", user.id);
+
+        if (updateError) {
+          console.error(
+            "[FACE] Failed to update users.face_embedding:",
+            updateError,
+          );
+        } else {
+          console.log(
+            "[FACE] ✅ users.face_embedding updated with canonical vector",
+          );
+        }
+      } else {
+        // Images received but no valid 128-D descriptor vectors were sent
+        console.warn(
+          "[FACE] No valid face vectors in payload — face_verified stays false",
         );
         await supabase
           .from("users")
