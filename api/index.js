@@ -4715,6 +4715,9 @@ app.get("/api/user/profile", authenticate, async (req, res) => {
         identification_type,
         identification_number,
         kyc_status,
+        role,
+        admin_role,
+        admin_permissions,
         two_factor_enabled,
         is_frozen,
         freeze_reason,
@@ -14116,6 +14119,8 @@ app.get("/api/admin/users", authenticate, authorizeAdmin, async (req, res) => {
         middle_name,
         phone,
         role,
+        admin_role,
+        admin_permissions,
         kyc_status,
         is_active,
         is_frozen,
@@ -15037,6 +15042,8 @@ app.get(
           security_question_1,
           security_question_2,
           role,
+          admin_role,
+          admin_permissions,
           kyc_status,
           is_active,
           is_frozen,
@@ -15205,6 +15212,8 @@ app.put(
         "country",
         "postal_code",
         "role",
+        "admin_role",
+        "admin_permissions",
         "kyc_status",
         "identification_type",
         "identification_number",
@@ -15216,8 +15225,13 @@ app.put(
       ];
 
       allowedFields.forEach((field) => {
-        if (updates[field] !== undefined && updates[field] !== null) {
-          safeUpdates[field] = updates[field];
+        if (updates[field] !== undefined) {
+          // Allow null explicitly for admin_role and admin_permissions (revoke operation)
+          if (field === "admin_role" || field === "admin_permissions") {
+            safeUpdates[field] = updates[field]; // keep null
+          } else if (updates[field] !== null && updates[field] !== "") {
+            safeUpdates[field] = updates[field];
+          }
         }
       });
 
@@ -15257,6 +15271,8 @@ app.put(
           marital_status,
           occupation,
           role,
+          admin_role,
+          admin_permissions,
           kyc_status,
           is_active,
           is_frozen,
