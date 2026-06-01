@@ -42,6 +42,9 @@ const authenticate = async (req, res, next) => {
 
     req.user = user;
     req.token = token;
+    req.userRole = user.role; // Add this for easier access
+
+    
     next();
   } catch (error) {
     console.error("Authentication error:", error.message);
@@ -50,11 +53,25 @@ const authenticate = async (req, res, next) => {
 };
 
 // Admin authorization middleware — allows both 'admin' and 'super_admin'
-const authorizeAdmin = async (req, res, next) => {
+/*const authorizeAdmin = async (req, res, next) => {
   if (req.user.role !== "admin" && req.user.role !== "super_admin") {
     return res.status(403).json({ error: "Access denied. Admin only." });
   }
   next();
+};*/
+
+const authorizeAdmin = async (req, res, next) => {
+  // Super admin has full access to everything
+  if (req.user.role === "super_admin") {
+    return next();
+  }
+  
+  // Regular admin
+  if (req.user.role === "admin") {
+    return next();
+  }
+  
+  return res.status(403).json({ error: "Access denied. Admin only." });
 };
 
 // Check if account is frozen

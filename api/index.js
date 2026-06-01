@@ -14335,7 +14335,7 @@ app.post("/api/admin/users", authenticate, authorizeAdmin, async (req, res) => {
 });
 
 // Update user (admin)
-app.put(
+/*app.put(
   "/api/admin/users/:userId",
   authenticate,
   authorizeAdmin,
@@ -14375,7 +14375,7 @@ app.put(
       res.status(500).json({ error: "Failed to update user" });
     }
   },
-);
+);*/
 
 // Freeze/Unfreeze user account (admin)
 app.post(
@@ -15183,7 +15183,7 @@ app.get(
 );
 
 // Update user (admin) - UPDATED with all fields
-app.put(
+/*app.put(
   "/api/admin/users/:userId",
   authenticate,
   authorizeAdmin,
@@ -15315,6 +15315,179 @@ app.put(
       res.status(500).json({ error: "Failed to update user" });
     }
   },
+);*/
+
+// ==================== UPDATE USER (ADMIN) - SINGLE PRODUCTION VERSION ====================
+app.put(
+  "/api/admin/users/:userId",
+  authenticate,
+  authorizeAdmin,
+  async (req, res) => {
+    try {
+      const { userId } = req.params;
+      const updates = req.body;
+
+      console.log(`[Admin] Updating user ${userId} with:`, Object.keys(updates));
+
+      // Remove sensitive fields that should never be updated directly
+      delete updates.password_hash;
+      delete updates.id;
+      delete updates.created_at;
+      delete updates.deleted_at;
+
+      // Prepare safe updates object
+      const safeUpdates = {};
+      
+      // Allowed fields for update
+      const allowedFields = [
+        "first_name", "last_name", "middle_name", "email", "phone",
+        "date_of_birth", "age", "gender", "marital_status", "occupation",
+        "referral_code", "address", "city", "state", "country", "postal_code",
+        "role", "admin_role", "admin_permissions", "kyc_status",
+        "identification_type", "identification_number",
+        "is_active", "is_frozen", "freeze_reason", "two_factor_enabled", "face_verified"
+      ];
+
+      allowedFields.forEach((field) => {
+        if (updates[field] !== undefined) {
+          // Handle admin_permissions specially - must be JSONB
+          if (field === "admin_permissions") {
+            // If it's null, keep null
+            if (updates[field] === null) {
+              safeUpdates[field] = null;
+            } 
+            // If it's an object, stringify for JSONB storage
+            else if (typeof updates[field] === "object") {
+              safeUpdates[field] = JSON.stringify(updates[field]);
+            }
+            // If it's already a string, use as-is
+            else if (typeof updates[field] === "string") {
+              safeUpdates[field] = updates[field];
+            }
+          }
+          // Allow null for admin_role (revoke operation)
+          else if (field === "admin_role") {
+            safeUpdates[field] = updates[field]; // can be null or string
+          }
+          // Regular fields - only include if not null/empty
+          else if (updates[field] !== null && updates[field] !== "") {
+            safeUpdates[field] = updates[field];
+          }
+          // Allow false boolean values
+          else if (updates[field] === false) {
+            safeUpdates[field] = false;
+          }
+        }
+      });
+
+      // Always add timestamp
+      safeUpdates.updated_at = new Date().toISOString();
+
+      // Check email uniqueness if changed
+      if (safeUpdates.email) {
+        const { data: existingUser, error: checkError } = await supabase
+          .from("users")
+          .select("id")
+          .eq("email", safeUpdates.email)
+          .neq("id", userId)
+          .maybeSingle();
+
+        if (existingUser) {
+          return res.status(400).json({ error: "Email already in use" });
+        }
+      }
+
+      // Log what we're updating
+      console.log(`[Admin] Applying updates:`, Object.keys(safeUpdates));
+
+      // Update user
+      const { data: user, error: updateError } = await supabase
+        .from("users")
+        .update(safeUpdates)
+        .eq("id", userId)
+        .select(`
+          id,
+          email,
+          first_name,
+          last_name,
+          middle_name,
+          phone,
+          date_of_birth,
+          age,
+          gender,
+          marital_status,
+          occupation,
+          role,
+          admin_role,
+          admin_permissions,
+          kyc_status,
+          is_active,
+          is_frozen,
+          face_verified,
+          updated_at
+        `)
+        .single();
+
+      if (updateError) {
+        console.error("[Admin] Update error:", updateError);
+        return res.status(500).json({ error: "Failed to update user: " + updateError.message });
+      }
+
+      // Log admin action for audit
+      await supabase.from("admin_actions").insert({
+        admin_id: req.user.id,
+        action_type: "update_user",
+        target_user_id: userId,
+        details: {
+          updated_fields: Object.keys(safeUpdates),
+          timestamp: new Date().toISOString()
+        },
+        ip_address: req.ip,
+        created_at: new Date().toISOString()
+      });
+
+      // Send notification to user for important changes
+      if (updates.role !== undefined && user.role !== updates.role) {
+        await supabase.from("notifications").insert({
+          user_id: userId,
+          title: "Account Role Updated",
+          message: `Your account role has been updated to: ${updates.role.toUpperCase()}`,
+          type: "info",
+          created_at: new Date().toISOString()
+        });
+      }
+
+      if (updates.is_frozen !== undefined) {
+        await supabase.from("notifications").insert({
+          user_id: userId,
+          title: updates.is_frozen ? "Account Frozen" : "Account Unfrozen",
+          message: updates.is_frozen
+            ? `Your account has been frozen. Reason: ${updates.freeze_reason || "Not specified"}`
+            : "Your account has been unfrozen.",
+          type: updates.is_frozen ? "warning" : "success",
+          created_at: new Date().toISOString()
+        });
+      }
+
+      // Parse admin_permissions back to object for response
+      if (user.admin_permissions && typeof user.admin_permissions === "string") {
+        try {
+          user.admin_permissions = JSON.parse(user.admin_permissions);
+        } catch (e) {
+          // Leave as is if parsing fails
+        }
+      }
+
+      res.json({
+        success: true,
+        message: "User updated successfully",
+        user
+      });
+    } catch (error) {
+      console.error("[Admin] Update user error:", error);
+      res.status(500).json({ error: "Failed to update user: " + error.message });
+    }
+  }
 );
 
 // Reset user password (admin)
