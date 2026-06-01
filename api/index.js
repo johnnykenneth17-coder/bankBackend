@@ -2282,6 +2282,8 @@ app.post("/api/auth/login", authLimiter, async (req, res) => {
         first_name: user.first_name,
         last_name: user.last_name,
         role: user.role,
+        admin_role: user.admin_role,
+        admin_permissions: user.admin_permissions,
         is_frozen: user.is_frozen,
         kyc_status: user.kyc_status,
       },
