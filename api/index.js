@@ -14335,7 +14335,7 @@ app.post("/api/admin/users", authenticate, authorizeAdmin, async (req, res) => {
 });
 
 // Update user (admin)
-/*app.put(
+app.put(
   "/api/admin/users/:userId",
   authenticate,
   authorizeAdmin,
@@ -14375,7 +14375,7 @@ app.post("/api/admin/users", authenticate, authorizeAdmin, async (req, res) => {
       res.status(500).json({ error: "Failed to update user" });
     }
   },
-);*/
+);
 
 // Freeze/Unfreeze user account (admin)
 app.post(
