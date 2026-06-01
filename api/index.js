@@ -149,23 +149,23 @@ app.use(
         "http://paystora.com",
         "https://www.paystora.com",
         "http://www.paystora.com",
-        /\.vercel\.app$/,  // Allow all vercel.app subdomains
+        /\.vercel\.app$/, // Allow all vercel.app subdomains
       ];
-      
+
       // Allow any origin in development
-      if (!origin || process.env.NODE_ENV === 'development') {
+      if (!origin || process.env.NODE_ENV === "development") {
         callback(null, true);
         return;
       }
-      
+
       // Check against allowed origins
-      const isAllowed = allowed.some(allowedOrigin => {
+      const isAllowed = allowed.some((allowedOrigin) => {
         if (allowedOrigin instanceof RegExp) {
           return allowedOrigin.test(origin);
         }
         return allowedOrigin === origin;
       });
-      
+
       if (isAllowed) {
         callback(null, true);
       } else {
@@ -189,16 +189,15 @@ app.use(
       "x-Request-id",
       "X-Client-Version",
       "X-client-Version",
-      "x-device-id",        // Add lowercase version
-      "X-Device-Id",        // Add alternative case
+      "x-device-id", // Add lowercase version
+      "X-Device-Id", // Add alternative case
       "device-fingerprint",
-      "X-Session-ID"
+      "X-Session-ID",
     ],
     exposedHeaders: ["Authorization"],
     optionsSuccessStatus: 204,
-  })
+  }),
 );
-
 
 app.use(express.json());
 app.use(morgan("combined"));
@@ -1067,37 +1066,39 @@ app.get("/api/user/security-events", authenticate, async (req, res) => {
   },
 );*/
 
-
-
 // Revoke all other sessions
-app.post("/api/security/revoke-other-sessions", authenticate, async (req, res) => {
-  try {
-    const currentToken = req.headers.authorization?.split(" ")[1];
-    
-    // Get current session ID
-    const { data: currentSession } = await supabase
-      .from("user_sessions")
-      .select("id")
-      .eq("session_token", currentToken)
-      .single();
-    
-    // Revoke all other sessions
-    await supabase
-      .from("user_sessions")
-      .update({ 
-        is_active: false, 
-        expires_at: new Date().toISOString(),
-        invalidated_reason: "User revoked all other sessions"
-      })
-      .eq("user_id", req.user.id)
-      .neq("id", currentSession?.id);
-    
-    res.json({ success: true });
-  } catch (error) {
-    console.error("Revoke sessions error:", error);
-    res.status(500).json({ error: "Failed to revoke sessions" });
-  }
-});
+app.post(
+  "/api/security/revoke-other-sessions",
+  authenticate,
+  async (req, res) => {
+    try {
+      const currentToken = req.headers.authorization?.split(" ")[1];
+
+      // Get current session ID
+      const { data: currentSession } = await supabase
+        .from("user_sessions")
+        .select("id")
+        .eq("session_token", currentToken)
+        .single();
+
+      // Revoke all other sessions
+      await supabase
+        .from("user_sessions")
+        .update({
+          is_active: false,
+          expires_at: new Date().toISOString(),
+          invalidated_reason: "User revoked all other sessions",
+        })
+        .eq("user_id", req.user.id)
+        .neq("id", currentSession?.id);
+
+      res.json({ success: true });
+    } catch (error) {
+      console.error("Revoke sessions error:", error);
+      res.status(500).json({ error: "Failed to revoke sessions" });
+    }
+  },
+);
 
 // Validate session endpoint
 app.get("/api/auth/validate-session", authenticate, async (req, res) => {
@@ -1123,7 +1124,7 @@ app.get("/api/auth/validate-session", authenticate, async (req, res) => {
 app.post("/api/security/report-compromise", async (req, res) => {
   try {
     const { detection_results, compromise_level, device_info } = req.body;
-    
+
     // Get token if available (for authenticated users)
     let userId = null;
     const authHeader = req.header("Authorization");
@@ -1134,22 +1135,20 @@ app.post("/api/security/report-compromise", async (req, res) => {
         userId = decoded.userId;
       } catch (e) {}
     }
-    
+
     // Log to security_compromises table
-    const { error } = await supabase
-      .from("security_compromises")
-      .insert({
-        user_id: userId,
-        detection_results: detection_results,
-        compromise_level: compromise_level,
-        device_info: device_info,
-        ip_address: req.ip,
-        user_agent: req.headers["user-agent"],
-        created_at: new Date().toISOString()
-      });
-    
+    const { error } = await supabase.from("security_compromises").insert({
+      user_id: userId,
+      detection_results: detection_results,
+      compromise_level: compromise_level,
+      device_info: device_info,
+      ip_address: req.ip,
+      user_agent: req.headers["user-agent"],
+      created_at: new Date().toISOString(),
+    });
+
     if (error) console.error("Compromise report error:", error);
-    
+
     // Always return 200 to avoid client errors
     res.json({ success: true });
   } catch (error) {
@@ -1646,11 +1645,11 @@ app.post("/api/auth/register", async (req, res) => {
     // Hash security answers
     const hashedAnswer1 = await bcrypt.hash(
       security_answer_1?.toLowerCase().trim() || "",
-      10
+      10,
     );
     const hashedAnswer2 = await bcrypt.hash(
       security_answer_2?.toLowerCase().trim() || "",
-      10
+      10,
     );
 
     // Calculate age from date_of_birth if not provided
@@ -1866,7 +1865,7 @@ app.post("/api/auth/register", async (req, res) => {
       }
     }*/
 
-       // ==================== PRODUCTION-GRADE FACE STORAGE ====================
+    // ==================== PRODUCTION-GRADE FACE STORAGE ====================
     if (face_images && face_images.length > 0) {
       console.log(
         `[FACE] Processing ${face_images.length} face images for user ${user.id}`,
@@ -2044,7 +2043,7 @@ app.post("/api/auth/register", async (req, res) => {
     const token = jwt.sign(
       { userId: user.id, email: user.email, role: user.role },
       process.env.JWT_SECRET,
-      { expiresIn: process.env.JWT_EXPIRE }
+      { expiresIn: process.env.JWT_EXPIRE },
     );
 
     // Return user data with face info
@@ -2663,11 +2662,124 @@ app.post("/api/auth/verify-passcode", async (req, res) => {
       })
       .eq("id", user_id);
 
-    const token = jwt.sign(
+    /*const token = jwt.sign(
       { userId: user.id, email: user.email, role: user.role },
       process.env.JWT_SECRET,
       { expiresIn: process.env.JWT_EXPIRE },
+    );*/
+
+    // ========== SESSION MANAGEMENT ==========
+    const deviceInfo = getDeviceInfo(req);
+    const sessionVersion = Date.now();
+
+    // generateSessionId() takes no args — do NOT pass user.id
+    const sessionId = generateSessionId();
+
+    // Build JWT with session info embedded
+    const token = jwt.sign(
+      {
+        userId: user.id,
+        email: user.email,
+        role: user.role,
+        sessionId: sessionId,
+        sessionVersion: sessionVersion,
+        issuedAt: Date.now(),
+      },
+      process.env.JWT_SECRET,
+      { expiresIn: process.env.JWT_EXPIRE || "7d" },
     );
+
+    const expiresAt = new Date();
+    expiresAt.setDate(expiresAt.getDate() + 7);
+
+    // STEP 1: Insert the new session row FIRST
+    // This must exist before we update active_session_id on the user
+    const { error: sessionError } = await supabase
+      .from("user_sessions")
+      .insert({
+        user_id: user.id,
+        session_token: token,
+        session_id: sessionId,
+        device_fingerprint: deviceInfo.device_name,
+        device_name: deviceInfo.device_name,
+        ip_address: deviceInfo.ip_address,
+        user_agent: deviceInfo.user_agent,
+        expires_at: expiresAt.toISOString(),
+        is_active: true,
+        is_current: true,
+        session_version: sessionVersion,
+        created_at: new Date().toISOString(),
+        last_activity: new Date().toISOString(),
+      });
+
+    if (sessionError) {
+      console.error("Session insert error:", sessionError);
+      // Non-fatal — continue, session check will still work via users.active_session_id
+    }
+
+    // STEP 2: Update the user record to point to the NEW session immediately
+    // Doing this BEFORE invalidating old sessions closes the race condition window.
+    // Any session check that runs right now will see the correct active_session_id
+    // and match it against the new token's sessionId — no phantom logout.
+    await supabase
+      .from("users")
+      .update({
+        active_session_id: sessionId,
+        last_active_device: deviceInfo.device_name,
+        active_session_started_at: new Date().toISOString(),
+        last_login: new Date().toISOString(),
+        session_version: sessionVersion,
+      })
+      .eq("id", user.id);
+
+    // STEP 3: NOW invalidate all OLD sessions (explicitly exclude the new one)
+    const { data: oldSessions } = await supabase
+      .from("user_sessions")
+      .select("id, session_id, device_name")
+      .eq("user_id", user.id)
+      .eq("is_active", true)
+      .neq("session_id", sessionId); // Never touch the session we just created
+
+    if (oldSessions && oldSessions.length > 0) {
+      console.log(
+        `Invalidating ${oldSessions.length} old session(s) for user ${user.id}`,
+      );
+
+      await supabase
+        .from("user_sessions")
+        .update({
+          is_active: false,
+          is_current: false,
+          invalidated_reason: "New login from another device",
+          expires_at: new Date().toISOString(),
+        })
+        .eq("user_id", user.id)
+        .eq("is_active", true)
+        .neq("session_id", sessionId); // Safety guard — never kill the new session
+
+      // Send a notification for each displaced session
+      for (const old of oldSessions) {
+        await supabase
+          .from("notifications")
+          .insert({
+            user_id: user.id,
+            title: "New Device Login",
+            message: `Your account was accessed from: ${deviceInfo.device_name}. Your session on ${old.device_name || "another device"} was terminated. If this wasn't you, log in and change your password immediately.`,
+            type: "security",
+            created_at: new Date().toISOString(),
+          })
+          .catch((e) => console.error("Notification insert error:", e));
+      }
+    } else {
+      console.log(`No old sessions to invalidate for user ${user.id}`);
+    }
+
+    await logSecurityEvent(user.id, "successful_login", {
+      ip,
+      fingerprint,
+      device: deviceInfo.device_name,
+      session_id: sessionId,
+    });
 
     res.json({
       token,
@@ -2677,6 +2789,15 @@ app.post("/api/auth/verify-passcode", async (req, res) => {
         first_name: user.first_name,
         last_name: user.last_name,
         role: user.role,
+        admin_role: user.admin_role,
+        admin_permissions: user.admin_permissions,
+        is_frozen: user.is_frozen,
+        kyc_status: user.kyc_status,
+      },
+      session: {
+        id: sessionId,
+        device: deviceInfo.device_name,
+        logged_in_at: new Date().toISOString(),
       },
     });
   } catch (error) {
@@ -11332,9 +11453,6 @@ app.post(
   },
 );
 
-
-
-
 // ==================== UPGRADE DOCUMENT SUBMISSION ====================
 
 // Submit upgrade documents (ID and/or Address)
@@ -15329,7 +15447,10 @@ app.put(
       const { userId } = req.params;
       const updates = req.body;
 
-      console.log(`[Admin] Updating user ${userId} with:`, Object.keys(updates));
+      console.log(
+        `[Admin] Updating user ${userId} with:`,
+        Object.keys(updates),
+      );
 
       // Remove sensitive fields that should never be updated directly
       delete updates.password_hash;
@@ -15339,15 +15460,36 @@ app.put(
 
       // Prepare safe updates object
       const safeUpdates = {};
-      
+
       // Allowed fields for update
       const allowedFields = [
-        "first_name", "last_name", "middle_name", "email", "phone",
-        "date_of_birth", "age", "gender", "marital_status", "occupation",
-        "referral_code", "address", "city", "state", "country", "postal_code",
-        "role", "admin_role", "admin_permissions", "kyc_status",
-        "identification_type", "identification_number",
-        "is_active", "is_frozen", "freeze_reason", "two_factor_enabled", "face_verified"
+        "first_name",
+        "last_name",
+        "middle_name",
+        "email",
+        "phone",
+        "date_of_birth",
+        "age",
+        "gender",
+        "marital_status",
+        "occupation",
+        "referral_code",
+        "address",
+        "city",
+        "state",
+        "country",
+        "postal_code",
+        "role",
+        "admin_role",
+        "admin_permissions",
+        "kyc_status",
+        "identification_type",
+        "identification_number",
+        "is_active",
+        "is_frozen",
+        "freeze_reason",
+        "two_factor_enabled",
+        "face_verified",
       ];
 
       allowedFields.forEach((field) => {
@@ -15357,7 +15499,7 @@ app.put(
             // If it's null, keep null
             if (updates[field] === null) {
               safeUpdates[field] = null;
-            } 
+            }
             // If it's an object, stringify for JSONB storage
             else if (typeof updates[field] === "object") {
               safeUpdates[field] = JSON.stringify(updates[field]);
@@ -15407,7 +15549,8 @@ app.put(
         .from("users")
         .update(safeUpdates)
         .eq("id", userId)
-        .select(`
+        .select(
+          `
           id,
           email,
           first_name,
@@ -15427,12 +15570,15 @@ app.put(
           is_frozen,
           face_verified,
           updated_at
-        `)
+        `,
+        )
         .single();
 
       if (updateError) {
         console.error("[Admin] Update error:", updateError);
-        return res.status(500).json({ error: "Failed to update user: " + updateError.message });
+        return res
+          .status(500)
+          .json({ error: "Failed to update user: " + updateError.message });
       }
 
       // Log admin action for audit
@@ -15442,10 +15588,10 @@ app.put(
         target_user_id: userId,
         details: {
           updated_fields: Object.keys(safeUpdates),
-          timestamp: new Date().toISOString()
+          timestamp: new Date().toISOString(),
         },
         ip_address: req.ip,
-        created_at: new Date().toISOString()
+        created_at: new Date().toISOString(),
       });
 
       // Send notification to user for important changes
@@ -15455,7 +15601,7 @@ app.put(
           title: "Account Role Updated",
           message: `Your account role has been updated to: ${updates.role.toUpperCase()}`,
           type: "info",
-          created_at: new Date().toISOString()
+          created_at: new Date().toISOString(),
         });
       }
 
@@ -15467,12 +15613,15 @@ app.put(
             ? `Your account has been frozen. Reason: ${updates.freeze_reason || "Not specified"}`
             : "Your account has been unfrozen.",
           type: updates.is_frozen ? "warning" : "success",
-          created_at: new Date().toISOString()
+          created_at: new Date().toISOString(),
         });
       }
 
       // Parse admin_permissions back to object for response
-      if (user.admin_permissions && typeof user.admin_permissions === "string") {
+      if (
+        user.admin_permissions &&
+        typeof user.admin_permissions === "string"
+      ) {
         try {
           user.admin_permissions = JSON.parse(user.admin_permissions);
         } catch (e) {
@@ -15483,13 +15632,15 @@ app.put(
       res.json({
         success: true,
         message: "User updated successfully",
-        user
+        user,
       });
     } catch (error) {
       console.error("[Admin] Update user error:", error);
-      res.status(500).json({ error: "Failed to update user: " + error.message });
+      res
+        .status(500)
+        .json({ error: "Failed to update user: " + error.message });
     }
-  }
+  },
 );
 
 // Reset user password (admin)
