@@ -2597,7 +2597,7 @@ app.post("/api/auth/check-passcode", async (req, res) => {
 });
 
 // Verify passcode login
-app.post("/api/auth/verify-passcode", async (req, res) => {
+/*app.post("/api/auth/verify-passcode", async (req, res) => {
   try {
     const { user_id, passcode } = req.body;
 
@@ -2666,7 +2666,7 @@ app.post("/api/auth/verify-passcode", async (req, res) => {
       { userId: user.id, email: user.email, role: user.role },
       process.env.JWT_SECRET,
       { expiresIn: process.env.JWT_EXPIRE },
-    );*/
+    );*
 
     // ========== SESSION MANAGEMENT ==========
     const deviceInfo = getDeviceInfo(req);
@@ -2803,6 +2803,214 @@ app.post("/api/auth/verify-passcode", async (req, res) => {
   } catch (error) {
     console.error("Passcode verification error:", error);
     res.status(500).json({ error: "Verification failed" });
+  }
+});*/
+
+// Verify passcode login - FIXED VERSION
+app.post("/api/auth/verify-passcode", async (req, res) => {
+  try {
+    const { user_id, passcode } = req.body;
+
+    // Get IP address properly
+    const ip =
+      req.ip ||
+      req.connection?.remoteAddress ||
+      req.headers["x-forwarded-for"] ||
+      "unknown";
+    const userAgent = req.headers["user-agent"] || "unknown";
+
+    if (!passcode || passcode.length !== 6 || !/^\d{6}$/.test(passcode)) {
+      return res.status(400).json({ error: "Invalid passcode format" });
+    }
+
+    const { data: user, error } = await supabase
+      .from("users")
+      .select("*")
+      .eq("id", user_id)
+      .single();
+
+    if (error || !user) {
+      return res.status(404).json({ error: "User not found" });
+    }
+
+    if (!user.is_active) {
+      return res.status(403).json({ error: "Account is deactivated" });
+    }
+
+    if (user.is_frozen) {
+      return res.status(403).json({ error: "Account is frozen" });
+    }
+
+    const maxAttempts = 5;
+    const attemptWindow = 15 * 60 * 1000;
+
+    if (user.passcode_attempts >= maxAttempts) {
+      const lastAttempt = new Date(user.last_passcode_attempt);
+      if (Date.now() - lastAttempt < attemptWindow) {
+        return res
+          .status(429)
+          .json({ error: "Too many incorrect attempts. Try again later." });
+      } else {
+        await supabase
+          .from("users")
+          .update({ passcode_attempts: 0 })
+          .eq("id", user_id);
+      }
+    }
+
+    const isValid = await bcrypt.compare(passcode, user.passcode_hash);
+
+    if (!isValid) {
+      const newAttempts = (user.passcode_attempts || 0) + 1;
+      await supabase
+        .from("users")
+        .update({
+          passcode_attempts: newAttempts,
+          last_passcode_attempt: new Date(),
+        })
+        .eq("id", user_id);
+      return res.status(401).json({
+        error: "Invalid passcode",
+        attempts_remaining: maxAttempts - newAttempts,
+      });
+    }
+
+    // Reset attempts on success
+    await supabase
+      .from("users")
+      .update({
+        passcode_attempts: 0,
+        last_passcode_attempt: null,
+        last_login: new Date(),
+      })
+      .eq("id", user_id);
+
+    // ========== SESSION MANAGEMENT ==========
+    const deviceInfo = getDeviceInfo(req);
+    const sessionVersion = Math.floor(Date.now() / 1000); // ← FIX: Use seconds instead of milliseconds (fits in integer)
+
+    // Generate session ID
+    const sessionId = generateSessionId();
+
+    // Build JWT with session info embedded
+    const token = jwt.sign(
+      {
+        userId: user.id,
+        email: user.email,
+        role: user.role,
+        sessionId: sessionId,
+        sessionVersion: sessionVersion,
+        issuedAt: Date.now(),
+      },
+      process.env.JWT_SECRET,
+      { expiresIn: process.env.JWT_EXPIRE || "7d" },
+    );
+
+    const expiresAt = new Date();
+    expiresAt.setDate(expiresAt.getDate() + 7);
+
+    // STEP 1: Insert the new session row FIRST
+    const { error: sessionError } = await supabase
+      .from("user_sessions")
+      .insert({
+        user_id: user.id,
+        session_token: token,
+        session_id: sessionId,
+        device_fingerprint: deviceInfo.device_name,
+        device_name: deviceInfo.device_name,
+        ip_address: deviceInfo.ip_address,
+        user_agent: deviceInfo.user_agent,
+        expires_at: expiresAt.toISOString(),
+        is_active: true,
+        is_current: true,
+        session_version: sessionVersion, // ← Now stores a valid integer (e.g., 1734567890)
+        created_at: new Date().toISOString(),
+        last_activity: new Date().toISOString(),
+      });
+
+    if (sessionError) {
+      console.error("Session insert error:", sessionError);
+      // Non-fatal — continue
+    }
+
+    // STEP 2: Update the user record to point to the NEW session
+    await supabase
+      .from("users")
+      .update({
+        active_session_id: sessionId,
+        last_active_device: deviceInfo.device_name,
+        active_session_started_at: new Date().toISOString(),
+        last_login: new Date().toISOString(),
+        session_version: sessionVersion,
+      })
+      .eq("id", user.id);
+
+    // STEP 3: Invalidate all OLD sessions
+    const { data: oldSessions } = await supabase
+      .from("user_sessions")
+      .select("id, session_id, device_name")
+      .eq("user_id", user.id)
+      .eq("is_active", true)
+      .neq("session_id", sessionId);
+
+    if (oldSessions && oldSessions.length > 0) {
+      await supabase
+        .from("user_sessions")
+        .update({
+          is_active: false,
+          is_current: false,
+          invalidated_reason: "New login from another device",
+          expires_at: new Date().toISOString(),
+        })
+        .eq("user_id", user.id)
+        .eq("is_active", true)
+        .neq("session_id", sessionId);
+
+      // Send notifications for displaced sessions
+      for (const old of oldSessions) {
+        await supabase
+          .from("notifications")
+          .insert({
+            user_id: user.id,
+            title: "New Device Login",
+            message: `Your account was accessed from: ${deviceInfo.device_name}. Your session on ${old.device_name || "another device"} was terminated. If this wasn't you, log in and change your password immediately.`,
+            type: "security",
+            created_at: new Date().toISOString(),
+          })
+          .catch((e) => console.error("Notification error:", e));
+      }
+    }
+
+    // Log successful login
+    await logSecurityEvent(user.id, "successful_login", {
+      ip,
+      device: deviceInfo.device_name,
+      session_id: sessionId,
+    });
+
+    // Return response
+    res.json({
+      token,
+      user: {
+        id: user.id,
+        email: user.email,
+        first_name: user.first_name,
+        last_name: user.last_name,
+        role: user.role,
+        admin_role: user.admin_role,
+        admin_permissions: user.admin_permissions,
+        is_frozen: user.is_frozen,
+        kyc_status: user.kyc_status,
+      },
+      session: {
+        id: sessionId,
+        device: deviceInfo.device_name,
+        logged_in_at: new Date().toISOString(),
+      },
+    });
+  } catch (error) {
+    console.error("Passcode verification error:", error);
+    res.status(500).json({ error: "Verification failed: " + error.message });
   }
 });
 
@@ -12696,6 +12904,314 @@ app.get(
     } catch (error) {
       console.error("Savings stats error:", error);
       res.status(500).json({ error: "Failed to fetch savings stats" });
+    }
+  },
+);
+
+// ==================== ADMIN STAFF ID MANAGEMENT ====================
+
+// Generate staff ID for admin (super admin only)
+app.post(
+  "/api/sys/generate-staff-id/:userId",
+  authenticate,
+  authorizeAdmin,
+  async (req, res) => {
+    try {
+      const { userId } = req.params;
+
+      // Only super admin can generate staff IDs
+      if (req.user.role !== "super_admin") {
+        return res
+          .status(403)
+          .json({ error: "Only super admin can generate staff IDs" });
+      }
+
+      // Get user to verify they are admin
+      const { data: user, error: userError } = await supabase
+        .from("users")
+        .select("role, admin_staff_id")
+        .eq("id", userId)
+        .single();
+
+      if (userError) throw userError;
+
+      if (user.role !== "admin") {
+        return res
+          .status(400)
+          .json({ error: "User must be an admin to generate staff ID" });
+      }
+
+      // Generate unique staff ID: FEE + 10 alphanumeric characters
+      const generateStaffId = () => {
+        const prefix = "FEE";
+        const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+        let result = prefix;
+        for (let i = 0; i < 10; i++) {
+          result += chars.charAt(Math.floor(Math.random() * chars.length));
+        }
+        return result;
+      };
+
+      let staffId = generateStaffId();
+      let isUnique = false;
+      let attempts = 0;
+
+      // Ensure uniqueness
+      while (!isUnique && attempts < 5) {
+        const { data: existing } = await supabase
+          .from("users")
+          .select("id")
+          .eq("admin_staff_id", staffId)
+          .single();
+
+        if (!existing) {
+          isUnique = true;
+        } else {
+          staffId = generateStaffId();
+        }
+        attempts++;
+      }
+
+      // Update user with new staff ID
+      const { error: updateError } = await supabase
+        .from("users")
+        .update({
+          admin_staff_id: staffId,
+          admin_staff_id_set_at: new Date().toISOString(),
+          admin_staff_id_verified: false,
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", userId);
+
+      if (updateError) throw updateError;
+
+      // Log admin action
+      await supabase.from("admin_actions").insert({
+        admin_id: req.user.id,
+        action_type: "generate_staff_id",
+        target_user_id: userId,
+        details: { staff_id: staffId },
+        ip_address: req.ip,
+        created_at: new Date().toISOString(),
+      });
+
+      res.json({
+        success: true,
+        staff_id: staffId,
+        message: "Staff ID generated successfully",
+      });
+    } catch (error) {
+      console.error("Generate staff ID error:", error);
+      res.status(500).json({ error: "Failed to generate staff ID" });
+    }
+  },
+);
+
+// Clear/Regenerate staff ID for admin (super admin only)
+app.post(
+  "/api/sys/regenerate-staff-id/:userId",
+  authenticate,
+  authorizeAdmin,
+  async (req, res) => {
+    try {
+      const { userId } = req.params;
+
+      if (req.user.role !== "super_admin") {
+        return res
+          .status(403)
+          .json({ error: "Only super admin can regenerate staff IDs" });
+      }
+
+      // Get user
+      const { data: user, error: userError } = await supabase
+        .from("users")
+        .select("role")
+        .eq("id", userId)
+        .single();
+
+      if (userError) throw userError;
+
+      if (user.role !== "admin") {
+        return res.status(400).json({ error: "User must be an admin" });
+      }
+
+      // Generate new staff ID
+      const generateStaffId = () => {
+        const prefix = "FEE";
+        const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789";
+        let result = prefix;
+        for (let i = 0; i < 10; i++) {
+          result += chars.charAt(Math.floor(Math.random() * chars.length));
+        }
+        return result;
+      };
+
+      let staffId = generateStaffId();
+      let isUnique = false;
+      let attempts = 0;
+
+      while (!isUnique && attempts < 5) {
+        const { data: existing } = await supabase
+          .from("users")
+          .select("id")
+          .eq("admin_staff_id", staffId)
+          .single();
+
+        if (!existing) {
+          isUnique = true;
+        } else {
+          staffId = generateStaffId();
+        }
+        attempts++;
+      }
+
+      // Update with new staff ID
+      const { error: updateError } = await supabase
+        .from("users")
+        .update({
+          admin_staff_id: staffId,
+          admin_staff_id_set_at: new Date().toISOString(),
+          admin_staff_id_verified: false,
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", userId);
+
+      if (updateError) throw updateError;
+
+      // Log admin action
+      await supabase.from("admin_actions").insert({
+        admin_id: req.user.id,
+        action_type: "regenerate_staff_id",
+        target_user_id: userId,
+        details: { old_staff_id: user.admin_staff_id, new_staff_id: staffId },
+        ip_address: req.ip,
+        created_at: new Date().toISOString(),
+      });
+
+      res.json({
+        success: true,
+        staff_id: staffId,
+        message: "Staff ID regenerated successfully",
+      });
+    } catch (error) {
+      console.error("Regenerate staff ID error:", error);
+      res.status(500).json({ error: "Failed to regenerate staff ID" });
+    }
+  },
+);
+
+// Verify staff ID during admin login
+app.post("/api/auth/verify-staff-id", async (req, res) => {
+  try {
+    const { userId, staff_id } = req.body;
+
+    if (!userId || !staff_id) {
+      return res.status(400).json({ error: "User ID and Staff ID required" });
+    }
+
+    // Get user
+    const { data: user, error: userError } = await supabase
+      .from("users")
+      .select(
+        "id, role, admin_staff_id, admin_staff_id_verified, email, first_name, last_name",
+      )
+      .eq("id", userId)
+      .single();
+
+    if (userError || !user) {
+      return res.status(404).json({ error: "User not found" });
+    }
+
+    // Super admin doesn't need staff ID
+    if (user.role === "super_admin") {
+      return res.json({
+        valid: true,
+        message: "Super admin verified",
+      });
+    }
+
+    // Check if user is admin
+    if (user.role !== "admin") {
+      return res.status(403).json({ error: "Not an admin account" });
+    }
+
+    // Verify staff ID
+    if (!user.admin_staff_id) {
+      return res.status(401).json({
+        valid: false,
+        error: "No staff ID assigned. Please contact super admin.",
+        needs_setup: true,
+      });
+    }
+
+    if (user.admin_staff_id !== staff_id) {
+      // Log failed attempt
+      await supabase.from("security_logs").insert({
+        user_id: userId,
+        event_type: "failed_staff_id_verification",
+        details: { ip: req.ip, user_agent: req.headers["user-agent"] },
+        ip_address: req.ip,
+        timestamp: new Date().toISOString(),
+      });
+
+      return res.status(401).json({
+        valid: false,
+        error: "Invalid staff ID",
+        attempts_remaining: 3,
+      });
+    }
+
+    // Mark as verified for this session
+    await supabase
+      .from("users")
+      .update({ admin_staff_id_verified: true })
+      .eq("id", userId);
+
+    // Log successful verification
+    await supabase.from("security_logs").insert({
+      user_id: userId,
+      event_type: "staff_id_verified",
+      details: { ip: req.ip },
+      ip_address: req.ip,
+      timestamp: new Date().toISOString(),
+    });
+
+    res.json({
+      valid: true,
+      message: "Staff ID verified successfully",
+    });
+  } catch (error) {
+    console.error("Staff ID verification error:", error);
+    res.status(500).json({ error: "Verification failed" });
+  }
+});
+
+// Get admin's staff ID status (for display in modal)
+app.get(
+  "/api/sys/admin-staff-id/:userId",
+  authenticate,
+  authorizeAdmin,
+  async (req, res) => {
+    try {
+      const { userId } = req.params;
+
+      const { data: user, error } = await supabase
+        .from("users")
+        .select("admin_staff_id, admin_staff_id_set_at, role")
+        .eq("id", userId)
+        .single();
+
+      if (error) throw error;
+
+      res.json({
+        has_staff_id: !!user.admin_staff_id,
+        staff_id: user.admin_staff_id,
+        set_at: user.admin_staff_id_set_at,
+        role: user.role,
+      });
+    } catch (error) {
+      console.error("Get staff ID error:", error);
+      res.status(500).json({ error: "Failed to get staff ID status" });
     }
   },
 );
