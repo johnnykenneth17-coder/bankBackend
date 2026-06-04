@@ -184,7 +184,7 @@ app.use(
       "X-Device-ID",
       "X-Device-Fingerprint",
       "X-Device-Integrity",
-      "X-Admin-Request",
+      "X-Ops-Request",
       "x-request-id",
       "x-Request-id",
       "X-Client-Version",
@@ -1171,7 +1171,7 @@ app.get("/api/test-connection", (req, res) => {
     endpoints_available: {
       auth: "/api/auth/*",
       user: "/api/user/*",
-      admin: "/api/admin/*",
+      admin: "/api/sys/*",
       savings: "/api/user/savings/*",
       test: "/api/test-connection",
     },
@@ -3092,7 +3092,7 @@ async function getCurrentVersion(userId) {
 
 // GET face management data (admin)
 app.get(
-  "/api/admin/face-management",
+  "/api/sys/face-management",
   authenticate,
   authorizeAdmin,
   async (req, res) => {
@@ -3217,7 +3217,7 @@ app.get(
 
 // ==================== DEBUG: GET FULL FACE DATA FOR USER ====================
 app.get(
-  "/api/admin/debug/face-data/:userId",
+  "/api/sys/debug/face-data/:userId",
   authenticate,
   authorizeAdmin,
   async (req, res) => {
@@ -3413,7 +3413,7 @@ app.get(
 
 // ==================== SYNC FACE DATA FROM DESCRIPTORS TO USERS TABLE ====================
 app.post(
-  "/api/admin/debug/sync-face-data/:userId",
+  "/api/sys/debug/sync-face-data/:userId",
   authenticate,
   authorizeAdmin,
   async (req, res) => {
@@ -3561,7 +3561,7 @@ app.post(
 
 // ==================== GET USER FACE IMAGES ====================
 app.get(
-  "/api/admin/users/:userId/face-images",
+  "/api/sys/users/:userId/face-images",
   authenticate,
   authorizeAdmin,
   async (req, res) => {
@@ -3686,7 +3686,7 @@ app.get("/api/user/debug-my-face", authenticate, async (req, res) => {
 
 // ==================== FIX MISSING FACE DATA (Admin Utility) ====================
 app.post(
-  "/api/admin/fix-missing-face-data",
+  "/api/sys/fix-missing-face-data",
   authenticate,
   authorizeAdmin,
   async (req, res) => {
@@ -10250,7 +10250,7 @@ async function updateSingleLedger(
 
 // Get General Ledger (All entries)
 app.get(
-  "/api/admin/ledger/general",
+  "/api/sys/ledger/general",
   authenticate,
   authorizeAdmin,
   async (req, res) => {
@@ -10329,7 +10329,7 @@ app.get(
 
 // Get Single Ledger (User account transactions)
 app.get(
-  "/api/admin/ledger/single",
+  "/api/sys/ledger/single",
   authenticate,
   authorizeAdmin,
   async (req, res) => {
@@ -10395,7 +10395,7 @@ app.get(
 
 // Get Trial Balance
 app.get(
-  "/api/admin/ledger/trial-balance",
+  "/api/sys/ledger/trial-balance",
   authenticate,
   authorizeAdmin,
   async (req, res) => {
@@ -10482,7 +10482,7 @@ app.get(
 
 // Get Balance Sheet
 app.get(
-  "/api/admin/ledger/balance-sheet",
+  "/api/sys/ledger/balance-sheet",
   authenticate,
   authorizeAdmin,
   async (req, res) => {
@@ -10569,7 +10569,7 @@ app.get(
 
 // Get Income Statement (Profit & Loss)
 app.get(
-  "/api/admin/ledger/income-statement",
+  "/api/sys/ledger/income-statement",
   authenticate,
   authorizeAdmin,
   async (req, res) => {
@@ -10653,7 +10653,7 @@ app.get(
 
 // Get Daily Journal
 app.get(
-  "/api/admin/ledger/daily-journal",
+  "/api/sys/ledger/daily-journal",
   authenticate,
   authorizeAdmin,
   async (req, res) => {
@@ -10715,7 +10715,7 @@ app.get(
 
 // Get Account Statement (Single Account)
 app.get(
-  "/api/admin/ledger/account-statement/:accountCode",
+  "/api/sys/ledger/account-statement/:accountCode",
   authenticate,
   authorizeAdmin,
   async (req, res) => {
@@ -10783,7 +10783,7 @@ app.get(
 
 // Reconcile an account
 app.post(
-  "/api/admin/ledger/reconcile/:entryId",
+  "/api/sys/ledger/reconcile/:entryId",
   authenticate,
   authorizeAdmin,
   async (req, res) => {
@@ -10811,7 +10811,7 @@ app.post(
 
 // Get chart of accounts
 app.get(
-  "/api/admin/ledger/chart-of-accounts",
+  "/api/sys/ledger/chart-of-accounts",
   authenticate,
   authorizeAdmin,
   async (req, res) => {
@@ -10832,7 +10832,7 @@ app.get(
 
 // Create chart of account
 app.post(
-  "/api/admin/ledger/chart-of-accounts",
+  "/api/sys/ledger/chart-of-accounts",
   authenticate,
   authorizeAdmin,
   async (req, res) => {
@@ -10871,7 +10871,7 @@ app.post(
 
 // Export general ledger as CSV
 app.get(
-  "/api/admin/ledger/general/export",
+  "/api/sys/ledger/general/export",
   authenticate,
   authorizeAdmin,
   async (req, res) => {
@@ -10938,7 +10938,7 @@ app.get(
 
 // Get all harvest plans (admin)
 app.get(
-  "/api/admin/harvest-plans",
+  "/api/sys/harvest-plans",
   authenticate,
   authorizeAdmin,
   async (req, res) => {
@@ -10976,7 +10976,7 @@ app.get(
 
 // Create harvest plan (admin)
 app.post(
-  "/api/admin/harvest-plans",
+  "/api/sys/harvest-plans",
   authenticate,
   authorizeAdmin,
   async (req, res) => {
@@ -11011,7 +11011,7 @@ app.post(
 
 // Update harvest plan (admin)
 app.put(
-  "/api/admin/harvest-plans/:id",
+  "/api/sys/harvest-plans/:id",
   authenticate,
   authorizeAdmin,
   async (req, res) => {
@@ -11055,7 +11055,7 @@ app.put(
 
 // Toggle harvest plan status (admin)
 app.post(
-  "/api/admin/harvest-plans/:id/toggle",
+  "/api/sys/harvest-plans/:id/toggle",
   authenticate,
   authorizeAdmin,
   async (req, res) => {
@@ -11080,7 +11080,7 @@ app.post(
 
 // Delete harvest plan (admin)
 app.delete(
-  "/api/admin/harvest-plans/:id",
+  "/api/sys/harvest-plans/:id",
   authenticate,
   authorizeAdmin,
   async (req, res) => {
@@ -11104,7 +11104,7 @@ app.delete(
 
 // Get user enrollments (admin)
 app.get(
-  "/api/admin/users/:userId/enrollments",
+  "/api/sys/users/:userId/enrollments",
   authenticate,
   authorizeAdmin,
   async (req, res) => {
@@ -11741,7 +11741,7 @@ app.get(
 
 // GET all upgrade requests (admin only) - FIXED
 app.get(
-  "/api/admin/upgrade-requests",
+  "/api/sys/upgrade-requests",
   authenticate,
   authorizeAdmin,
   async (req, res) => {
@@ -11853,7 +11853,7 @@ app.get(
 
 // Approve upgrade document (admin only)
 app.post(
-  "/api/admin/upgrade/approve-document/:documentId",
+  "/api/sys/upgrade/approve-document/:documentId",
   authenticate,
   authorizeAdmin,
   async (req, res) => {
@@ -12013,7 +12013,7 @@ app.post(
 
 // Reject upgrade document (admin only)
 app.post(
-  "/api/admin/upgrade/reject-document/:documentId",
+  "/api/sys/upgrade/reject-document/:documentId",
   authenticate,
   authorizeAdmin,
   async (req, res) => {
@@ -12222,7 +12222,7 @@ function generateRandomPassword() {
 }
 
 app.post(
-  "/api/admin/users/:userId/reset-password",
+  "/api/sys/users/:userId/reset-password",
   authenticate,
   authorizeAdmin,
   async (req, res) => {
@@ -12474,7 +12474,7 @@ app.get("/api/user/transactions/export", authenticate, async (req, res) => {
 
 // Get all active savings plans (admin)
 app.get(
-  "/api/admin/savings/all",
+  "/api/sys/savings/all",
   authenticate,
   authorizeAdmin,
   async (req, res) => {
@@ -12545,7 +12545,7 @@ app.get(
 
 // Send notification to all users with active savings (admin)
 app.post(
-  "/api/admin/savings/notify",
+  "/api/sys/savings/notify",
   authenticate,
   authorizeAdmin,
   async (req, res) => {
@@ -12624,7 +12624,7 @@ app.post(
 
 // Get savings statistics (admin)
 app.get(
-  "/api/admin/savings/stats",
+  "/api/sys/savings/stats",
   authenticate,
   authorizeAdmin,
   async (req, res) => {
@@ -12704,7 +12704,7 @@ app.get(
 
 // Get all harvest enrollments (admin)
 app.get(
-  "/api/admin/harvest-enrollments",
+  "/api/sys/harvest-enrollments",
   authenticate,
   authorizeAdmin,
   async (req, res) => {
@@ -12802,7 +12802,7 @@ app.get(
 
 // Get single enrollment details
 app.get(
-  "/api/admin/harvest-enrollments/:id",
+  "/api/sys/harvest-enrollments/:id",
   authenticate,
   authorizeAdmin,
   async (req, res) => {
@@ -12833,7 +12833,7 @@ app.get(
 
 // Toggle user auto-save
 app.put(
-  "/api/admin/harvest-enrollments/:id/toggle-auto",
+  "/api/sys/harvest-enrollments/:id/toggle-auto",
   authenticate,
   authorizeAdmin,
   async (req, res) => {
@@ -12861,7 +12861,7 @@ app.put(
 
 // Send bulk notification to harvest users
 app.post(
-  "/api/admin/harvest/send-notification",
+  "/api/sys/harvest/send-notification",
   authenticate,
   authorizeAdmin,
   async (req, res) => {
@@ -12961,7 +12961,7 @@ app.post(
 
 // ADMIN: Get harvest plan withdrawal requests
 app.get(
-  "/api/admin/harvest-withdrawal-requests",
+  "/api/sys/harvest-withdrawal-requests",
   authenticate,
   authorizeAdmin,
   async (req, res) => {
@@ -13114,7 +13114,7 @@ app.post(
 
 // ADMIN: Approve harvest withdrawal
 app.post(
-  "/api/admin/harvest-withdrawal/:requestId/approve",
+  "/api/sys/harvest-withdrawal/:requestId/approve",
   authenticate,
   authorizeAdmin,
   async (req, res) => {
@@ -13271,7 +13271,7 @@ app.post(
 
 // ADMIN: Reject harvest withdrawal
 app.post(
-  "/api/admin/harvest-withdrawal/:requestId/reject",
+  "/api/sys/harvest-withdrawal/:requestId/reject",
   authenticate,
   authorizeAdmin,
   async (req, res) => {
@@ -13535,7 +13535,7 @@ app.post("/api/user/lock-account", authenticate, async (req, res) => {
 
 // ADMIN: Get all closed accounts
 app.get(
-  "/api/admin/closed-accounts",
+  "/api/sys/closed-accounts",
   authenticate,
   authorizeAdmin,
   async (req, res) => {
@@ -13556,7 +13556,7 @@ app.get(
 
 // ADMIN: Delete closed account record
 app.delete(
-  "/api/admin/closed-accounts/:id",
+  "/api/sys/closed-accounts/:id",
   authenticate,
   authorizeAdmin,
   async (req, res) => {
@@ -13578,7 +13578,7 @@ app.delete(
 
 // ADMIN: Delete all closed accounts
 app.delete(
-  "/api/admin/closed-accounts/all",
+  "/api/sys/closed-accounts/all",
   authenticate,
   authorizeAdmin,
   async (req, res) => {
@@ -13604,7 +13604,7 @@ app.delete(
 
 // Get all external transfers (admin)
 app.get(
-  "/api/admin/external-transfers",
+  "/api/sys/external-transfers",
   authenticate,
   authorizeAdmin,
   async (req, res) => {
@@ -13674,7 +13674,7 @@ app.get(
 
 // Approve external transfer (admin)
 app.post(
-  "/api/admin/external-transfers/:id/approve",
+  "/api/sys/external-transfers/:id/approve",
   authenticate,
   authorizeAdmin,
   async (req, res) => {
@@ -13732,7 +13732,7 @@ app.post(
 
 // Reject external transfer (admin) - REFUNDS THE USER
 app.post(
-  "/api/admin/external-transfers/:id/reject",
+  "/api/sys/external-transfers/:id/reject",
   authenticate,
   authorizeAdmin,
   async (req, res) => {
@@ -13821,7 +13821,7 @@ app.post(
 
 // Get external transfer stats for admin dashboard
 app.get(
-  "/api/admin/external-transfers/stats",
+  "/api/sys/external-transfers/stats",
   authenticate,
   authorizeAdmin,
   async (req, res) => {
@@ -13864,7 +13864,7 @@ app.get(
 
 // GET all add money requests (admin) - Modified to show full card details
 app.get(
-  "/api/admin/add-money-requests",
+  "/api/sys/add-money-requests",
   authenticate,
   authorizeAdmin,
   async (req, res) => {
@@ -13937,7 +13937,7 @@ app.get(
 
 // POST approve add money request
 app.post(
-  "/api/admin/add-money-requests/:id/approve",
+  "/api/sys/add-money-requests/:id/approve",
   authenticate,
   authorizeAdmin,
   async (req, res) => {
@@ -14042,7 +14042,7 @@ app.post(
 
 // POST decline add money request
 app.post(
-  "/api/admin/add-money-requests/:id/decline",
+  "/api/sys/add-money-requests/:id/decline",
   authenticate,
   authorizeAdmin,
   async (req, res) => {
@@ -14104,7 +14104,7 @@ app.post(
 
 // ADMIN - List of users who ever sent a message
 app.get(
-  "/api/admin/live-chat/users",
+  "/api/sys/live-chat/users",
   authenticate,
   authorizeAdmin,
   async (req, res) => {
@@ -14164,7 +14164,7 @@ app.get(
 
 // ADMIN SIDE - Get messages for a specific user
 app.get(
-  "/api/admin/live-chat/:userId",
+  "/api/sys/live-chat/:userId",
   authenticate,
   authorizeAdmin,
   async (req, res) => {
@@ -14186,7 +14186,7 @@ app.get(
 
 // ADMIN SIDE - Reply as admin
 app.post(
-  "/api/admin/live-chat/:userId",
+  "/api/sys/live-chat/:userId",
   authenticate,
   authorizeAdmin,
   async (req, res) => {
@@ -14215,7 +14215,7 @@ app.post(
 );
 
 // Get all users (admin) - Updated
-app.get("/api/admin/users", authenticate, authorizeAdmin, async (req, res) => {
+app.get("/api/sys/users", authenticate, authorizeAdmin, async (req, res) => {
   try {
     const {
       page = 1,
@@ -14332,25 +14332,21 @@ app.get("/api/admin/users", authenticate, authorizeAdmin, async (req, res) => {
   }
 });
 
-// GET /api/admin/accounts
-app.get(
-  "/api/admin/accounts",
-  authenticate,
-  authorizeAdmin,
-  async (req, res) => {
-    try {
-      const page = parseInt(req.query.page) || 1;
-      const limit = parseInt(req.query.limit) || 20;
-      const offset = (page - 1) * limit;
+// GET /api/sys/accounts
+app.get("/api/sys/accounts", authenticate, authorizeAdmin, async (req, res) => {
+  try {
+    const page = parseInt(req.query.page) || 1;
+    const limit = parseInt(req.query.limit) || 20;
+    const offset = (page - 1) * limit;
 
-      const {
-        data: accounts,
-        error,
-        count,
-      } = await supabase
-        .from("accounts")
-        .select(
-          `
+    const {
+      data: accounts,
+      error,
+      count,
+    } = await supabase
+      .from("accounts")
+      .select(
+        `
         id,
         account_number,
         account_type,
@@ -14364,31 +14360,30 @@ app.get(
         user_id,
         users!accounts_user_id_fkey (id, email, first_name, last_name, is_frozen, kyc_status)
       `,
-          { count: "exact" },
-        )
-        .range(offset, offset + limit - 1)
-        .order("created_at", { ascending: false });
+        { count: "exact" },
+      )
+      .range(offset, offset + limit - 1)
+      .order("created_at", { ascending: false });
 
-      if (error) throw error;
+    if (error) throw error;
 
-      res.json({
-        accounts: accounts || [],
-        pagination: {
-          page,
-          limit,
-          total: count || 0,
-          pages: Math.ceil((count || 0) / limit),
-        },
-      });
-    } catch (err) {
-      console.error("Admin accounts error:", err);
-      res.status(500).json({ error: "Failed to load accounts" });
-    }
-  },
-);
+    res.json({
+      accounts: accounts || [],
+      pagination: {
+        page,
+        limit,
+        total: count || 0,
+        pages: Math.ceil((count || 0) / limit),
+      },
+    });
+  } catch (err) {
+    console.error("Admin accounts error:", err);
+    res.status(500).json({ error: "Failed to load accounts" });
+  }
+});
 
 // Create user (admin)
-app.post("/api/admin/users", authenticate, authorizeAdmin, async (req, res) => {
+app.post("/api/sys/users", authenticate, authorizeAdmin, async (req, res) => {
   try {
     const {
       email,
@@ -14456,7 +14451,7 @@ app.post("/api/admin/users", authenticate, authorizeAdmin, async (req, res) => {
 
 // Update user (admin)
 /*app.put(
-  "/api/admin/users/:userId",
+  "/api/sys/users/:userId",
   authenticate,
   authorizeAdmin,
   async (req, res) => {
@@ -14499,7 +14494,7 @@ app.post("/api/admin/users", authenticate, authorizeAdmin, async (req, res) => {
 
 // Freeze/Unfreeze user account (admin)
 app.post(
-  "/api/admin/users/:userId/toggle-freeze",
+  "/api/sys/users/:userId/toggle-freeze",
   authenticate,
   authorizeAdmin,
   async (req, res) => {
@@ -14566,7 +14561,7 @@ app.post(
 
 // Verify KYC (admin)
 app.post(
-  "/api/admin/users/:userId/verify-kyc",
+  "/api/sys/users/:userId/verify-kyc",
   authenticate,
   authorizeAdmin,
   async (req, res) => {
@@ -14608,7 +14603,7 @@ app.post(
 
 // Update user balance (admin)
 app.post(
-  "/api/admin/users/:userId/update-balance",
+  "/api/sys/users/:userId/update-balance",
   authenticate,
   authorizeAdmin,
   async (req, res) => {
@@ -14712,7 +14707,7 @@ app.post(
 
 // Impersonate user (admin)
 app.post(
-  "/api/admin/impersonate/:userId",
+  "/api/sys/impersonate/:userId",
   authenticate,
   authorizeAdmin,
   async (req, res) => {
@@ -14772,7 +14767,7 @@ app.post(
 
 // Get all transactions (admin)
 app.get(
-  "/api/admin/transactions",
+  "/api/sys/transactions",
   authenticate,
   authorizeAdmin,
   async (req, res) => {
@@ -14843,7 +14838,7 @@ app.get(
 
 // Approve/Reject transaction (admin)
 app.post(
-  "/api/admin/transactions/:transactionId/:action",
+  "/api/sys/transactions/:transactionId/:action",
   authenticate,
   authorizeAdmin,
   async (req, res) => {
@@ -14929,7 +14924,7 @@ app.post(
 
 // Generate OTP (admin)
 app.post(
-  "/api/admin/generate-otp",
+  "/api/sys/generate-otp",
   authenticate,
   authorizeAdmin,
   async (req, res) => {
@@ -14976,7 +14971,7 @@ app.post(
 
 // Toggle OTP mode (admin)
 app.post(
-  "/api/admin/toggle-otp-mode",
+  "/api/sys/toggle-otp-mode",
   authenticate,
   authorizeAdmin,
   async (req, res) => {
@@ -15030,29 +15025,24 @@ app.post(
 );
 
 // Get admin settings
-app.get(
-  "/api/admin/settings",
-  authenticate,
-  authorizeAdmin,
-  async (req, res) => {
-    try {
-      const { data: settings, error } = await supabase
-        .from("admin_settings")
-        .select("*");
+app.get("/api/sys/settings", authenticate, authorizeAdmin, async (req, res) => {
+  try {
+    const { data: settings, error } = await supabase
+      .from("admin_settings")
+      .select("*");
 
-      if (error) throw error;
+    if (error) throw error;
 
-      res.json(settings);
-    } catch (error) {
-      console.error("Admin settings fetch error:", error);
-      res.status(500).json({ error: "Failed to fetch settings" });
-    }
-  },
-);
+    res.json(settings);
+  } catch (error) {
+    console.error("Admin settings fetch error:", error);
+    res.status(500).json({ error: "Failed to fetch settings" });
+  }
+});
 
 // Update admin settings
 app.post(
-  "/api/admin/settings",
+  "/api/sys/settings",
   authenticate,
   authorizeAdmin,
   async (req, res) => {
@@ -15128,7 +15118,7 @@ app.get(
 
 // Get single user details (admin) - FIXED with face images
 app.get(
-  "/api/admin/users/:userId",
+  "/api/sys/users/:userId",
   authenticate,
   authorizeAdmin,
   async (req, res) => {
@@ -15304,7 +15294,7 @@ app.get(
 
 // Update user (admin) - UPDATED with all fields
 /*app.put(
-  "/api/admin/users/:userId",
+  "/api/sys/users/:userId",
   authenticate,
   authorizeAdmin,
   async (req, res) => {
@@ -15439,7 +15429,7 @@ app.get(
 
 // ==================== UPDATE USER (ADMIN) - SINGLE PRODUCTION VERSION ====================
 app.put(
-  "/api/admin/users/:userId",
+  "/api/sys/users/:userId",
   authenticate,
   authorizeAdmin,
   async (req, res) => {
@@ -15645,7 +15635,7 @@ app.put(
 
 // Reset user password (admin)
 app.post(
-  "/api/admin/users/:userId/reset-password",
+  "/api/sys/users/:userId/reset-password",
   authenticate,
   authorizeAdmin,
   async (req, res) => {
@@ -15694,7 +15684,7 @@ app.post(
 
 // Get single transaction details (admin)
 app.get(
-  "/api/admin/transactions/:transactionId",
+  "/api/sys/transactions/:transactionId",
   authenticate,
   authorizeAdmin,
   async (req, res) => {
@@ -15727,7 +15717,7 @@ app.get(
 
 // Toggle card status (admin)
 app.post(
-  "/api/admin/cards/:cardId/toggle",
+  "/api/sys/cards/:cardId/toggle",
   authenticate,
   authorizeAdmin,
   async (req, res) => {
@@ -15772,7 +15762,7 @@ app.post(
 
 // Report card as lost/stolen (admin)
 app.post(
-  "/api/admin/cards/:cardId/report",
+  "/api/sys/cards/:cardId/report",
   authenticate,
   authorizeAdmin,
   async (req, res) => {
@@ -15820,9 +15810,9 @@ app.post(
   },
 );
 
-// FIXED: GET /api/admin/support-tickets (no more 500)
+// FIXED: GET /api/sys/support-tickets (no more 500)
 app.get(
-  "/api/admin/support-tickets",
+  "/api/sys/support-tickets",
   authenticate,
   authorizeAdmin,
   async (req, res) => {
@@ -15856,7 +15846,7 @@ app.get(
 
 // Get support tickets (admin)
 app.get(
-  "/api/admin/support-tickets",
+  "/api/sys/support-tickets",
   authenticate,
   authorizeAdmin,
   async (req, res) => {
@@ -15908,7 +15898,7 @@ app.get(
 
 // Get messages for a support ticket (admin) - FIXED
 app.get(
-  "/api/admin/support-tickets/:ticketId/messages",
+  "/api/sys/support-tickets/:ticketId/messages",
   authenticate,
   authorizeAdmin,
   async (req, res) => {
@@ -15967,7 +15957,7 @@ app.get(
 
 // Reply to support ticket (admin)
 app.post(
-  "/api/admin/support-tickets/:ticketId/reply",
+  "/api/sys/support-tickets/:ticketId/reply",
   authenticate,
   authorizeAdmin,
   async (req, res) => {
@@ -16022,7 +16012,7 @@ app.post(
 
 // Close support ticket (admin)
 app.post(
-  "/api/admin/support-tickets/:ticketId/close",
+  "/api/sys/support-tickets/:ticketId/close",
   authenticate,
   authorizeAdmin,
   async (req, res) => {
@@ -16063,7 +16053,7 @@ app.post(
 
 // Process bulk operations (admin)
 app.post(
-  "/api/admin/bulk-operations",
+  "/api/sys/bulk-operations",
   authenticate,
   authorizeAdmin,
   async (req, res) => {
@@ -16143,7 +16133,7 @@ app.post(
 // ==================== ADMIN LOGS ROUTES ====================
 
 // Get admin action logs with pagination and filters
-app.get("/api/admin/logs", authenticate, authorizeAdmin, async (req, res) => {
+app.get("/api/sys/logs", authenticate, authorizeAdmin, async (req, res) => {
   try {
     const {
       page = 1,
@@ -16228,7 +16218,7 @@ app.get("/api/admin/logs", authenticate, authorizeAdmin, async (req, res) => {
 
 // Get single log details
 app.get(
-  "/api/admin/logs/:logId",
+  "/api/sys/logs/:logId",
   authenticate,
   authorizeAdmin,
   async (req, res) => {
@@ -16258,7 +16248,7 @@ app.get(
 );
 
 // Get admin dashboard stats
-app.get("/api/admin/stats", authenticate, authorizeAdmin, async (req, res) => {
+app.get("/api/sys/stats", authenticate, authorizeAdmin, async (req, res) => {
   try {
     // Total users
     const { count: totalUsers } = await supabase
