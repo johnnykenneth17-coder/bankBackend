@@ -2139,23 +2139,43 @@ app.post("/api/auth/login", authLimiter, async (req, res) => {
     // Clear failed attempts
     failedAttempts.delete(attemptsKey);
 
-    // 2FA check (keep your existing code)
+     // ========== CHECK IF 2FA IS ENABLED ==========
     if (user.two_factor_enabled) {
-      const otp = Math.floor(100000 + Math.random() * 900000).toString();
+      // Generate OTP
+      const otpCode = Math.floor(100000 + Math.random() * 900000).toString();
       const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
-
+      
+      // Store OTP with user_id
       await supabase.from("otps").insert({
         user_id: user.id,
-        otp_code: otp,
-        otp_type: "login",
+        otp_code: otpCode,
+        otp_type: "login_2fa",
         expires_at: expiresAt,
+        is_used: false,
       });
-
-      await sendOTPEmail(user.email, otp);
+      
+      // Send email
+      await sendOTPEmail(user.email, otpCode, "2fa");
+      
+      // Generate TEMPORARY token (short-lived, only for 2FA verification)
+      const tempToken = jwt.sign(
+        {
+          userId: user.id,
+          email: user.email,
+          role: user.role,
+          tempAuth: true,  // Flag to indicate this is a temporary token
+          purpose: "2fa_verification",
+          issuedAt: Date.now(),
+        },
+        process.env.JWT_SECRET,
+        { expiresIn: "15m" }  // Short expiry for 2FA step
+      );
+      
       return res.json({
         requiresTwoFactor: true,
+        tempToken: tempToken,
         userId: user.id,
-        message: "OTP sent to your email",
+        message: "Verification code sent to your email",
       });
     }
 
@@ -2303,96 +2323,246 @@ app.post("/api/auth/login", authLimiter, async (req, res) => {
   }
 });
 
-// LOGIN - COMPLETE REPLACEMENT with proper session handling
-/*app.post("/api/auth/login", authLimiter, async (req, res) => {
+// ==================== TWO-FACTOR AUTHENTICATION ROUTES ====================
+
+
+// Get 2FA status
+app.get("/api/user/2fa/status", authenticate, async (req, res) => {
   try {
-    const { email, password, fingerprint } = req.body;
+    const { data: user, error } = await supabase
+      .from("users")
+      .select("two_factor_enabled")
+      .eq("id", req.user.id)
+      .single();
+    
+    if (error) throw error;
+    
+    res.json({ enabled: user?.two_factor_enabled || false });
+  } catch (error) {
+    console.error("2FA status error:", error);
+    res.status(500).json({ error: "Failed to get 2FA status" });
+  }
+});
+
+// Send setup OTP
+app.post("/api/user/2fa/send-setup-otp", authenticate, async (req, res) => {
+  try {
+    const otpCode = Math.floor(100000 + Math.random() * 900000).toString();
+    const requestId = uuidv4();
+    const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
+    
+    await supabase.from("otps").insert({
+      id: requestId,
+      user_id: req.user.id,
+      otp_code: otpCode,
+      otp_type: "2fa_setup",
+      expires_at: expiresAt,
+      is_used: false,
+    });
+    
+    await sendOTPEmail(req.user.email, otpCode, "2fa");
+    
+    res.json({ success: true, request_id: requestId });
+  } catch (error) {
+    console.error("Send setup OTP error:", error);
+    res.status(500).json({ error: "Failed to send verification code" });
+  }
+});
+
+// Resend setup OTP
+app.post("/api/user/2fa/resend-setup-otp", authenticate, async (req, res) => {
+  try {
+    const { request_id } = req.body;
+    
+    // Mark old OTP as used
+    await supabase
+      .from("otps")
+      .update({ is_used: true })
+      .eq("id", request_id);
+    
+    const otpCode = Math.floor(100000 + Math.random() * 900000).toString();
+    const newRequestId = uuidv4();
+    const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
+    
+    await supabase.from("otps").insert({
+      id: newRequestId,
+      user_id: req.user.id,
+      otp_code: otpCode,
+      otp_type: "2fa_setup",
+      expires_at: expiresAt,
+      is_used: false,
+    });
+    
+    await sendOTPEmail(req.user.email, otpCode, "2fa");
+    
+    res.json({ success: true, request_id: newRequestId });
+  } catch (error) {
+    console.error("Resend setup OTP error:", error);
+    res.status(500).json({ error: "Failed to resend code" });
+  }
+});
+
+// Enable 2FA
+app.post("/api/user/2fa/enable", authenticate, async (req, res) => {
+  try {
+    const { otp_code, request_id } = req.body;
+    
+    // Verify OTP
+    const { data: otpRecord, error: otpError } = await supabase
+      .from("otps")
+      .select("*")
+      .eq("id", request_id)
+      .eq("user_id", req.user.id)
+      .eq("otp_code", otp_code)
+      .eq("otp_type", "2fa_setup")
+      .eq("is_used", false)
+      .single();
+    
+    if (otpError || !otpRecord) {
+      return res.status(401).json({ error: "Invalid verification code" });
+    }
+    
+    if (new Date(otpRecord.expires_at) < new Date()) {
+      return res.status(401).json({ error: "Code has expired" });
+    }
+    
+    // Mark OTP as used
+    await supabase
+      .from("otps")
+      .update({ is_used: true })
+      .eq("id", request_id);
+    
+    // Enable 2FA
+    await supabase
+      .from("users")
+      .update({ two_factor_enabled: true })
+      .eq("id", req.user.id);
+    
+    res.json({ success: true, message: "2FA enabled successfully" });
+  } catch (error) {
+    console.error("Enable 2FA error:", error);
+    res.status(500).json({ error: "Failed to enable 2FA" });
+  }
+});
+
+// Disable 2FA
+app.post("/api/user/2fa/disable", authenticate, async (req, res) => {
+  try {
+    await supabase
+      .from("users")
+      .update({ two_factor_enabled: false })
+      .eq("id", req.user.id);
+    
+    res.json({ success: true, message: "2FA disabled" });
+  } catch (error) {
+    console.error("Disable 2FA error:", error);
+    res.status(500).json({ error: "Failed to disable 2FA" });
+  }
+});
+
+// ==================== 2FA VERIFICATION ENDPOINT (GATE ONLY) ====================
+
+let twoFactorAttempts = new Map(); // Track OTP attempts per user
+
+app.post("/api/auth/verify-2fa", async (req, res) => {
+  try {
+    const { tempToken, otp_code } = req.body;
     const ip = req.ip;
-
-    // ========== FAILED ATTEMPTS CHECK ==========
-    const attemptsKey = `${ip}:${email}`;
-    const attempts = failedAttempts.get(attemptsKey) || {
-      count: 0,
-      firstAttempt: Date.now(),
-    };
-
+    
+    // Step 1: Verify the temporary token
+    let decoded;
+    try {
+      decoded = jwt.verify(tempToken, process.env.JWT_SECRET);
+    } catch (err) {
+      return res.status(401).json({ 
+        error: "Invalid or expired session. Please login again.",
+        code: "SESSION_EXPIRED"
+      });
+    }
+    
+    // Verify this is a temporary 2FA token
+    if (!decoded.tempAuth || decoded.purpose !== "2fa_verification") {
+      return res.status(401).json({ 
+        error: "Invalid verification session",
+        code: "INVALID_SESSION"
+      });
+    }
+    
+    const userId = decoded.userId;
+    
+    // Step 2: Check OTP attempts limit
+    const attemptsKey = `${ip}:${userId}`;
+    const attempts = twoFactorAttempts.get(attemptsKey) || { count: 0, firstAttempt: Date.now() };
+    
+    // Reset attempts after 15 minutes
     if (Date.now() - attempts.firstAttempt > 15 * 60 * 1000) {
       attempts.count = 0;
       attempts.firstAttempt = Date.now();
     }
-
+    
     if (attempts.count >= 5) {
       return res.status(429).json({
-        error: "Too many failed attempts. Account temporarily locked.",
+        error: "Too many incorrect OTP attempts. Please login again.",
+        code: "TOO_MANY_ATTEMPTS"
       });
     }
-
-    // ========== FETCH USER ==========
-    const { data: user, error } = await supabase
+    
+    // Step 3: Verify OTP
+    const { data: otpRecord, error: otpError } = await supabase
+      .from("otps")
+      .select("*")
+      .eq("user_id", userId)
+      .eq("otp_code", otp_code)
+      .eq("otp_type", "login_2fa")
+      .eq("is_used", false)
+      .single();
+    
+    if (otpError || !otpRecord) {
+      // Increment failed attempts
+      attempts.count++;
+      twoFactorAttempts.set(attemptsKey, attempts);
+      
+      const remaining = 5 - attempts.count;
+      return res.status(401).json({
+        error: "Invalid verification code",
+        attempts_remaining: remaining,
+        code: "INVALID_OTP"
+      });
+    }
+    
+    // Check expiry
+    if (new Date(otpRecord.expires_at) < new Date()) {
+      return res.status(401).json({
+        error: "Verification code has expired. Please login again.",
+        code: "OTP_EXPIRED"
+      });
+    }
+    
+    // Step 4: Mark OTP as used
+    await supabase
+      .from("otps")
+      .update({ is_used: true })
+      .eq("id", otpRecord.id);
+    
+    // Step 5: Clear failed attempts on success
+    twoFactorAttempts.delete(attemptsKey);
+    
+    // Step 6: Get fresh user data
+    const { data: user, error: userError } = await supabase
       .from("users")
       .select("*")
-      .eq("email", email)
+      .eq("id", userId)
       .single();
-
-    if (error || !user) {
-      attempts.count++;
-      failedAttempts.set(attemptsKey, attempts);
-      return res.status(401).json({ error: "Invalid credentials" });
+    
+    if (userError || !user) {
+      return res.status(404).json({ error: "User not found" });
     }
-
-    // ========== PASSWORD CHECK ==========
-    const validPassword = await bcrypt.compare(password, user.password_hash);
-    if (!validPassword) {
-      attempts.count++;
-      failedAttempts.set(attemptsKey, attempts);
-      await logSecurityEvent(user.id, "failed_login", { ip, fingerprint });
-      return res.status(401).json({ error: "Invalid credentials" });
-    }
-
-    // ========== ACCOUNT STATUS CHECKS ==========
-    if (!user.is_active) {
-      return res.status(403).json({ error: "Account is deactivated" });
-    }
-
-    if (user.is_frozen) {
-      return res.status(403).json({
-        error: "Account frozen",
-        freeze_reason: user.freeze_reason,
-        unfreeze_method: user.unfreeze_method,
-      });
-    }
-
-    // Clear failed attempts on successful credential check
-    failedAttempts.delete(attemptsKey);
-
-    // ========== 2FA CHECK ==========
-    if (user.two_factor_enabled) {
-      const otp = Math.floor(100000 + Math.random() * 900000).toString();
-      const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
-
-      await supabase.from("otps").insert({
-        user_id: user.id,
-        otp_code: otp,
-        otp_type: "login",
-        expires_at: expiresAt,
-      });
-
-      await sendOTPEmail(user.email, otp);
-      return res.json({
-        requiresTwoFactor: true,
-        userId: user.id,
-        message: "OTP sent to your email",
-      });
-    }
-
-    // ========== SESSION MANAGEMENT ==========
+    
+    // Step 7: CREATE FULL SESSION (same as successful login)
     const deviceInfo = getDeviceInfo(req);
-    const sessionVersion = Date.now();
-
-    // generateSessionId() takes no args — do NOT pass user.id
+    const sessionVersion = Math.floor(Date.now() / 1000);
     const sessionId = generateSessionId();
-
-    // Build JWT with session info embedded
+    
     const token = jwt.sign(
       {
         userId: user.id,
@@ -2403,41 +2573,37 @@ app.post("/api/auth/login", authLimiter, async (req, res) => {
         issuedAt: Date.now(),
       },
       process.env.JWT_SECRET,
-      { expiresIn: process.env.JWT_EXPIRE || "7d" },
+      { expiresIn: process.env.JWT_EXPIRE || "7d" }
     );
-
+    
     const expiresAt = new Date();
     expiresAt.setDate(expiresAt.getDate() + 7);
-
-    // STEP 1: Insert the new session row FIRST
-    // This must exist before we update active_session_id on the user
-    const { error: sessionError } = await supabase
+    
+    // Get existing sessions to invalidate
+    const { data: existingSessions } = await supabase
       .from("user_sessions")
-      .insert({
-        user_id: user.id,
-        session_token: token,
-        session_id: sessionId,
-        device_fingerprint: deviceInfo.device_name,
-        device_name: deviceInfo.device_name,
-        ip_address: deviceInfo.ip_address,
-        user_agent: deviceInfo.user_agent,
-        expires_at: expiresAt.toISOString(),
-        is_active: true,
-        is_current: true,
-        session_version: sessionVersion,
-        created_at: new Date().toISOString(),
-        last_activity: new Date().toISOString(),
-      });
-
-    if (sessionError) {
-      console.error("Session insert error:", sessionError);
-      // Non-fatal — continue, session check will still work via users.active_session_id
-    }
-
-    // STEP 2: Update the user record to point to the NEW session immediately
-    // Doing this BEFORE invalidating old sessions closes the race condition window.
-    // Any session check that runs right now will see the correct active_session_id
-    // and match it against the new token's sessionId — no phantom logout.
+      .select("id, session_id, device_name")
+      .eq("user_id", user.id)
+      .eq("is_active", true);
+    
+    // Insert new session
+    await supabase.from("user_sessions").insert({
+      user_id: user.id,
+      session_token: token,
+      session_id: sessionId,
+      device_fingerprint: deviceInfo.device_name,
+      device_name: deviceInfo.device_name,
+      ip_address: deviceInfo.ip_address,
+      user_agent: deviceInfo.user_agent,
+      expires_at: expiresAt.toISOString(),
+      is_active: true,
+      is_current: true,
+      session_version: sessionVersion,
+      created_at: new Date().toISOString(),
+      last_activity: new Date().toISOString(),
+    });
+    
+    // Update user record
     await supabase
       .from("users")
       .update({
@@ -2448,58 +2614,39 @@ app.post("/api/auth/login", authLimiter, async (req, res) => {
         session_version: sessionVersion,
       })
       .eq("id", user.id);
-
-    // STEP 3: NOW invalidate all OLD sessions (explicitly exclude the new one)
-    const { data: oldSessions } = await supabase
-      .from("user_sessions")
-      .select("id, session_id, device_name")
-      .eq("user_id", user.id)
-      .eq("is_active", true)
-      .neq("session_id", sessionId); // Never touch the session we just created
-
-    if (oldSessions && oldSessions.length > 0) {
-      console.log(
-        `Invalidating ${oldSessions.length} old session(s) for user ${user.id}`,
-      );
-
+    
+    // Invalidate old sessions
+    if (existingSessions && existingSessions.length > 0) {
       await supabase
         .from("user_sessions")
         .update({
           is_active: false,
           is_current: false,
-          invalidated_reason: "New login from another device",
+          invalidated_reason: `New 2FA login from ${deviceInfo.device_name}`,
           expires_at: new Date().toISOString(),
         })
-        .eq("user_id", user.id)
-        .eq("is_active", true)
-        .neq("session_id", sessionId); // Safety guard — never kill the new session
-
-      // Send a notification for each displaced session
-      for (const old of oldSessions) {
-        await supabase
-          .from("notifications")
-          .insert({
-            user_id: user.id,
-            title: "New Device Login",
-            message: `Your account was accessed from: ${deviceInfo.device_name}. Your session on ${old.device_name || "another device"} was terminated. If this wasn't you, log in and change your password immediately.`,
-            type: "security",
-            created_at: new Date().toISOString(),
-          })
-          .catch((e) => console.error("Notification insert error:", e));
+        .in("id", existingSessions.map(s => s.id));
+      
+      // Send notifications
+      for (const oldSession of existingSessions) {
+        await supabase.from("notifications").insert({
+          user_id: user.id,
+          title: "New Device Login (2FA)",
+          message: `Your account was accessed via 2FA from: ${deviceInfo.device_name}. Your session on ${oldSession.device_name || "another device"} was terminated.`,
+          type: "security",
+          created_at: new Date().toISOString(),
+        }).catch(e => console.error("Notification error:", e));
       }
-    } else {
-      console.log(`No old sessions to invalidate for user ${user.id}`);
     }
-
-    // ========== LOG SUCCESSFUL LOGIN ==========
-    await logSecurityEvent(user.id, "successful_login", {
+    
+    // Log successful 2FA verification
+    await logSecurityEvent(user.id, "successful_2fa_verification", {
       ip,
-      fingerprint,
       device: deviceInfo.device_name,
       session_id: sessionId,
     });
-
-    // ========== RESPOND ==========
+    
+    // Return full login response
     res.json({
       token,
       user: {
@@ -2520,10 +2667,72 @@ app.post("/api/auth/login", authLimiter, async (req, res) => {
       },
     });
   } catch (error) {
-    console.error("Login error:", error);
-    res.status(500).json({ error: "Login failed: " + error.message });
+    console.error("2FA verification error:", error);
+    res.status(500).json({ error: "Verification failed: " + error.message });
   }
-});*/
+});
+
+// Resend 2FA OTP endpoint
+app.post("/api/auth/resend-2fa-otp", async (req, res) => {
+  try {
+    const { tempToken } = req.body;
+    
+    // Verify temporary token
+    let decoded;
+    try {
+      decoded = jwt.verify(tempToken, process.env.JWT_SECRET);
+    } catch (err) {
+      return res.status(401).json({ 
+        error: "Invalid session. Please login again.",
+        code: "SESSION_EXPIRED"
+      });
+    }
+    
+    if (!decoded.tempAuth || decoded.purpose !== "2fa_verification") {
+      return res.status(401).json({ error: "Invalid verification session" });
+    }
+    
+    const userId = decoded.userId;
+    
+    // Get user email
+    const { data: user } = await supabase
+      .from("users")
+      .select("email")
+      .eq("id", userId)
+      .single();
+    
+    if (!user) {
+      return res.status(404).json({ error: "User not found" });
+    }
+    
+    // Invalidate old OTPs
+    await supabase
+      .from("otps")
+      .update({ is_used: true })
+      .eq("user_id", userId)
+      .eq("otp_type", "login_2fa")
+      .eq("is_used", false);
+    
+    // Generate new OTP
+    const otpCode = Math.floor(100000 + Math.random() * 900000).toString();
+    const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
+    
+    await supabase.from("otps").insert({
+      user_id: userId,
+      otp_code: otpCode,
+      otp_type: "login_2fa",
+      expires_at: expiresAt,
+      is_used: false,
+    });
+    
+    await sendOTPEmail(user.email, otpCode, "2fa");
+    
+    res.json({ success: true, message: "New code sent to your email" });
+  } catch (error) {
+    console.error("Resend 2FA OTP error:", error);
+    res.status(500).json({ error: "Failed to resend code" });
+  }
+});
 
 // Add to index.js - Logout endpoint
 app.post("/api/user/logout", authenticate, async (req, res) => {
@@ -2558,39 +2767,6 @@ app.post("/api/user/logout", authenticate, async (req, res) => {
 
 // ==================== SESSION MANAGEMENT ENDPOINTS ====================
 
-/*app.get("/api/auth/check-session", authenticate, async (req, res) => {
-  try {
-    const token = req.headers.authorization?.split(" ")[1];
-    const decoded = jwt.verify(token, process.env.JWT_SECRET);
-
-    // If token has no sessionId, just say valid — don't force logout.
-    // The token will expire naturally via JWT expiry.
-    if (!decoded.sessionId) {
-      return res.json({ valid: true });
-    }
-
-    const { valid, reason, code, device_name } = await checkSessionValidity(
-      req.user.id,
-      decoded.sessionId,
-      token,
-    );
-
-    if (!valid) {
-      return res.json({
-        valid: false,
-        reason: reason,
-        code: code,
-        device_name: device_name,
-      });
-    }
-
-    res.json({ valid: true });
-  } catch (error) {
-    console.error("Session check error:", error);
-    // On any error, say valid — never force logout due to server errors
-    res.json({ valid: true });
-  }
-});*/
 
 // In index.js - Update the check-session endpoint
 
@@ -2890,214 +3066,6 @@ app.post("/api/auth/check-passcode", async (req, res) => {
     res.status(500).json({ error: "Failed to check passcode" });
   }
 });
-
-// Verify passcode login - FIXED VERSION
-/*app.post("/api/auth/verify-passcode", async (req, res) => {
-  try {
-    const { user_id, passcode } = req.body;
-
-    // Get IP address properly
-    const ip =
-      req.ip ||
-      req.connection?.remoteAddress ||
-      req.headers["x-forwarded-for"] ||
-      "unknown";
-    const userAgent = req.headers["user-agent"] || "unknown";
-
-    if (!passcode || passcode.length !== 6 || !/^\d{6}$/.test(passcode)) {
-      return res.status(400).json({ error: "Invalid passcode format" });
-    }
-
-    const { data: user, error } = await supabase
-      .from("users")
-      .select("*")
-      .eq("id", user_id)
-      .single();
-
-    if (error || !user) {
-      return res.status(404).json({ error: "User not found" });
-    }
-
-    if (!user.is_active) {
-      return res.status(403).json({ error: "Account is deactivated" });
-    }
-
-    if (user.is_frozen) {
-      return res.status(403).json({ error: "Account is frozen" });
-    }
-
-    const maxAttempts = 5;
-    const attemptWindow = 15 * 60 * 1000;
-
-    if (user.passcode_attempts >= maxAttempts) {
-      const lastAttempt = new Date(user.last_passcode_attempt);
-      if (Date.now() - lastAttempt < attemptWindow) {
-        return res
-          .status(429)
-          .json({ error: "Too many incorrect attempts. Try again later." });
-      } else {
-        await supabase
-          .from("users")
-          .update({ passcode_attempts: 0 })
-          .eq("id", user_id);
-      }
-    }
-
-    const isValid = await bcrypt.compare(passcode, user.passcode_hash);
-
-    if (!isValid) {
-      const newAttempts = (user.passcode_attempts || 0) + 1;
-      await supabase
-        .from("users")
-        .update({
-          passcode_attempts: newAttempts,
-          last_passcode_attempt: new Date(),
-        })
-        .eq("id", user_id);
-      return res.status(401).json({
-        error: "Invalid passcode",
-        attempts_remaining: maxAttempts - newAttempts,
-      });
-    }
-
-    // Reset attempts on success
-    await supabase
-      .from("users")
-      .update({
-        passcode_attempts: 0,
-        last_passcode_attempt: null,
-        last_login: new Date(),
-      })
-      .eq("id", user_id);
-
-    // ========== SESSION MANAGEMENT ==========
-    const deviceInfo = getDeviceInfo(req);
-    const sessionVersion = Math.floor(Date.now() / 1000); // ← FIX: Use seconds instead of milliseconds (fits in integer)
-
-    // Generate session ID
-    const sessionId = generateSessionId();
-
-    // Build JWT with session info embedded
-    const token = jwt.sign(
-      {
-        userId: user.id,
-        email: user.email,
-        role: user.role,
-        sessionId: sessionId,
-        sessionVersion: sessionVersion,
-        issuedAt: Date.now(),
-      },
-      process.env.JWT_SECRET,
-      { expiresIn: process.env.JWT_EXPIRE || "7d" },
-    );
-
-    const expiresAt = new Date();
-    expiresAt.setDate(expiresAt.getDate() + 7);
-
-    // STEP 1: Insert the new session row FIRST
-    const { error: sessionError } = await supabase
-      .from("user_sessions")
-      .insert({
-        user_id: user.id,
-        session_token: token,
-        session_id: sessionId,
-        device_fingerprint: deviceInfo.device_name,
-        device_name: deviceInfo.device_name,
-        ip_address: deviceInfo.ip_address,
-        user_agent: deviceInfo.user_agent,
-        expires_at: expiresAt.toISOString(),
-        is_active: true,
-        is_current: true,
-        session_version: sessionVersion, // ← Now stores a valid integer (e.g., 1734567890)
-        created_at: new Date().toISOString(),
-        last_activity: new Date().toISOString(),
-      });
-
-    if (sessionError) {
-      console.error("Session insert error:", sessionError);
-      // Non-fatal — continue
-    }
-
-    // STEP 2: Update the user record to point to the NEW session
-    await supabase
-      .from("users")
-      .update({
-        active_session_id: sessionId,
-        last_active_device: deviceInfo.device_name,
-        active_session_started_at: new Date().toISOString(),
-        last_login: new Date().toISOString(),
-        session_version: sessionVersion,
-      })
-      .eq("id", user.id);
-
-    // STEP 3: Invalidate all OLD sessions
-    const { data: oldSessions } = await supabase
-      .from("user_sessions")
-      .select("id, session_id, device_name")
-      .eq("user_id", user.id)
-      .eq("is_active", true)
-      .neq("session_id", sessionId);
-
-    if (oldSessions && oldSessions.length > 0) {
-      await supabase
-        .from("user_sessions")
-        .update({
-          is_active: false,
-          is_current: false,
-          invalidated_reason: "New login from another device",
-          expires_at: new Date().toISOString(),
-        })
-        .eq("user_id", user.id)
-        .eq("is_active", true)
-        .neq("session_id", sessionId);
-
-      // Send notifications for displaced sessions
-      for (const old of oldSessions) {
-        await supabase
-          .from("notifications")
-          .insert({
-            user_id: user.id,
-            title: "New Device Login",
-            message: `Your account was accessed from: ${deviceInfo.device_name}. Your session on ${old.device_name || "another device"} was terminated. If this wasn't you, log in and change your password immediately.`,
-            type: "security",
-            created_at: new Date().toISOString(),
-          })
-          .catch((e) => console.error("Notification error:", e));
-      }
-    }
-
-    // Log successful login
-    await logSecurityEvent(user.id, "successful_login", {
-      ip,
-      device: deviceInfo.device_name,
-      session_id: sessionId,
-    });
-
-    // Return response
-    res.json({
-      token,
-      user: {
-        id: user.id,
-        email: user.email,
-        first_name: user.first_name,
-        last_name: user.last_name,
-        role: user.role,
-        admin_role: user.admin_role,
-        admin_permissions: user.admin_permissions,
-        is_frozen: user.is_frozen,
-        kyc_status: user.kyc_status,
-      },
-      session: {
-        id: sessionId,
-        device: deviceInfo.device_name,
-        logged_in_at: new Date().toISOString(),
-      },
-    });
-  } catch (error) {
-    console.error("Passcode verification error:", error);
-    res.status(500).json({ error: "Verification failed: " + error.message });
-  }
-});*/
 
 // index.js - REPLACE the entire /api/auth/verify-passcode endpoint
 
@@ -5197,6 +5165,34 @@ async function sendOTPEmail(email, otp, type = "reset") {
                 </body>
                 </html>
             `;
+    } else if (type === "2fa") {
+      subject = "FEECENT - Two-Factor Authentication Code";
+      htmlContent = `
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <meta charset="UTF-8">
+        <title>FEECENT 2FA Code</title>
+    </head>
+    <body style="font-family: Arial, sans-serif; margin: 0; padding: 20px; background: #f5f5f5;">
+        <div style="max-width: 500px; margin: 0 auto; background: white; border-radius: 12px; overflow: hidden;">
+            <div style="background: #6b21a8; padding: 20px; text-align: center;">
+                <h1 style="color: white; margin: 0;">FEECENT</h1>
+                <p style="color: #d8b4fe; margin: 5px 0 0;">Two-Factor Authentication</p>
+            </div>
+            <div style="padding: 30px 20px;">
+                <h2 style="color: #333; margin-top: 0;">Verification Code</h2>
+                <p style="color: #666;">Use the following code to complete your login:</p>
+                <div style="background: #f8fafc; padding: 20px; text-align: center; margin: 20px 0; border-radius: 8px;">
+                    <span style="font-size: 42px; font-weight: bold; letter-spacing: 8px; color: #6b21a8; font-family: monospace;">${otp}</span>
+                </div>
+                <p style="color: #666; font-size: 14px;">This code expires in <strong>10 minutes</strong>.</p>
+                <p style="color: #999; font-size: 12px; margin-top: 20px;">If you didn't request this, please ignore this email.</p>
+            </div>
+        </div>
+    </body>
+    </html>
+  `;
     } else if (type === "verified") {
       subject = "FEECENT - Email Verified Successfully";
       htmlContent = `
@@ -5275,7 +5271,7 @@ async function sendOTPEmail(email, otp, type = "reset") {
 }
 
 // Verify 2FA
-app.post("/api/auth/verify-2fa", async (req, res) => {
+/*app.post("/api/auth/verify-2fa", async (req, res) => {
   try {
     const { userId, token } = req.body;
 
@@ -5319,7 +5315,7 @@ app.post("/api/auth/verify-2fa", async (req, res) => {
     console.error("2FA verification error:", error);
     res.status(500).json({ error: "Verification failed" });
   }
-});
+});*/
 
 // TEMPORARY DEBUG ROUTE - Put this FIRST
 app.get("/api/test", (req, res) => {
