@@ -132,8 +132,6 @@ app.use(
   }),
 );*/
 
-// In index.js - REPLACE your existing CORS configuration with this:
-
 app.use(
   cors({
     origin: (origin, callback) => {
@@ -149,12 +147,18 @@ app.use(
         "http://paystora.com",
         "https://www.paystora.com",
         "http://www.paystora.com",
+        "capacitor://localhost",
+        "capacitor://localhost:8080",
+        "ionic://localhost",
+        "http://localhost",
+        "http://localhost:8080",
+        "http://localhost:3000",
         /\.vercel\.app$/, // Allow all vercel.app subdomains
       ];
 
       // Allow any origin in development
       if (!origin || process.env.NODE_ENV === "development") {
-        callback(null, true);
+        callback(null, false);
         return;
       }
 
@@ -170,7 +174,7 @@ app.use(
         callback(null, true);
       } else {
         console.log(`CORS blocked origin: ${origin}`);
-        callback(null, true); // Still allow but log - change to false in production if needed
+        callback(null, false); // Still allow but log - change to false in production if needed
       }
     },
     credentials: true,
@@ -249,6 +253,327 @@ startLockCleanup();
 
 let cleanupInterval = null;
 
+// index.js - Add at the top with other imports
+const http = require("http");
+const socketIo = require("socket.io");
+
+// Create HTTP server
+const server = http.createServer(app);
+
+// Initialize Socket.IO with CORS
+const io = socketIo(server, {
+  cors: {
+    origin: [
+      "http://127.0.0.1:5500",
+      "http://127.0.0.1:5501",
+      "http://localhost:5500",
+      "http://localhost:5501",
+      "https://bank-backend-blush.vercel.app",
+      "https://zivarabank.vercel.app",
+      "https://paystora.com",
+      "capacitor://localhost",
+        "capacitor://localhost:8080",
+        "ionic://localhost",
+        "http://localhost",
+        "http://localhost:8080",
+        "http://localhost:3000",
+      /\.vercel\.app$/,
+    ],
+    credentials: true,
+    methods: ["GET", "POST"],
+  },
+});
+
+// Store connected users and their socket IDs
+const connectedUsers = new Map(); // userId -> { socketId, deviceInfo }
+const userUnreadCounts = new Map(); // userId -> unread count for admin
+
+// Socket.IO authentication middleware
+io.use(async (socket, next) => {
+  try {
+    const token = socket.handshake.auth.token;
+    if (!token) {
+      return next(new Error("Authentication required"));
+    }
+
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    const { data: user, error } = await supabase
+      .from("users")
+      .select("id, role, first_name, last_name, email")
+      .eq("id", decoded.userId)
+      .single();
+
+    if (error || !user) {
+      return next(new Error("User not found"));
+    }
+
+    socket.user = user;
+    next();
+  } catch (err) {
+    next(new Error("Invalid token"));
+  }
+});
+
+// Socket.IO connection handler
+io.on("connection", (socket) => {
+  console.log(`User connected: ${socket.user.id} (${socket.user.role})`);
+
+  // Store connected user
+  connectedUsers.set(socket.user.id, {
+    socketId: socket.id,
+    user: socket.user,
+    connectedAt: new Date(),
+  });
+
+  // Join user to their personal room
+  socket.join(`user_${socket.user.id}`);
+
+  // If admin, join admin room
+  if (socket.user.role === "admin" || socket.user.role === "super_admin") {
+    socket.join("admin_room");
+
+    // Send initial unread counts to admin
+    sendUnreadCountsToAdmin();
+
+    // Send list of active conversations
+    sendActiveConversationsToAdmin();
+  }
+
+  // Handle sending a message
+  socket.on("send_message", async (data) => {
+    try {
+      const { message, toUserId } = data;
+
+      if (!message || !message.trim()) {
+        return socket.emit("error", { message: "Message cannot be empty" });
+      }
+
+      const isAdmin =
+        socket.user.role === "admin" || socket.user.role === "super_admin";
+      const fromUserId = socket.user.id;
+      const toUser = isAdmin ? toUserId : null;
+
+      // Insert message into database
+      const { data: messageRecord, error } = await supabase
+        .from("live_support_messages")
+        .insert({
+          user_id: isAdmin ? toUserId : fromUserId,
+          admin_id: isAdmin ? fromUserId : null,
+          message: message.trim(),
+          is_from_admin: isAdmin,
+          status: "sent",
+          created_at: new Date().toISOString(),
+        })
+        .select()
+        .single();
+
+      if (error) throw error;
+
+      // Determine recipient
+      const recipientId = isAdmin ? toUserId : "admin_room";
+
+      // Emit to recipient
+      if (recipientId === "admin_room") {
+        // Send to all admins
+        io.to("admin_room").emit("new_message", {
+          message: messageRecord,
+          fromUser: {
+            id: fromUserId,
+            name: `${socket.user.first_name || ""} ${socket.user.last_name || ""}`.trim(),
+            email: socket.user.email,
+            isAdmin: false,
+          },
+        });
+
+        // Increment unread count for this user in admin view
+        const currentCount = userUnreadCounts.get(fromUserId) || 0;
+        userUnreadCounts.set(fromUserId, currentCount + 1);
+
+        // Update unread counts for all admins
+        sendUnreadCountsToAdmin();
+
+        // Update conversation list
+        sendActiveConversationsToAdmin();
+      } else {
+        // Send to specific user
+        const recipientSocket = connectedUsers.get(recipientId);
+        if (recipientSocket) {
+          io.to(recipientSocket.socketId).emit("new_message", {
+            message: messageRecord,
+            fromUser: {
+              id: fromUserId,
+              name: `${socket.user.first_name || ""} ${socket.user.last_name || ""}`.trim(),
+              isAdmin: isAdmin,
+            },
+          });
+        }
+      }
+
+      // Emit back to sender for confirmation
+      socket.emit("message_sent", messageRecord);
+    } catch (error) {
+      console.error("Send message error:", error);
+      socket.emit("error", { message: "Failed to send message" });
+    }
+  });
+
+  // Handle marking messages as read (when admin views a chat)
+  socket.on("mark_conversation_read", async (data) => {
+    const { userId } = data;
+
+    if (socket.user.role !== "admin" && socket.user.role !== "super_admin") {
+      return;
+    }
+
+    // Reset unread count for this user
+    userUnreadCounts.set(userId, 0);
+
+    // Update database - mark messages as read
+    await supabase
+      .from("live_support_messages")
+      .update({
+        status: "read",
+        read_at: new Date().toISOString(),
+      })
+      .eq("user_id", userId)
+      .eq("is_from_admin", false)
+      .eq("status", "sent");
+
+    // Send updated counts to all admins
+    sendUnreadCountsToAdmin();
+    sendActiveConversationsToAdmin();
+  });
+
+  // Handle typing indicator
+  socket.on("typing", (data) => {
+    const { toUserId, isTyping } = data;
+    const isAdmin =
+      socket.user.role === "admin" || socket.user.role === "super_admin";
+
+    const recipientId = isAdmin ? toUserId : "admin_room";
+
+    if (recipientId === "admin_room") {
+      socket.to("admin_room").emit("user_typing", {
+        userId: socket.user.id,
+        userName:
+          `${socket.user.first_name || ""} ${socket.user.last_name || ""}`.trim(),
+        isTyping,
+      });
+    } else {
+      const recipientSocket = connectedUsers.get(recipientId);
+      if (recipientSocket) {
+        io.to(recipientSocket.socketId).emit("user_typing", {
+          userId: socket.user.id,
+          isTyping,
+        });
+      }
+    }
+  });
+
+  // Handle disconnection
+  socket.on("disconnect", () => {
+    console.log(`User disconnected: ${socket.user.id}`);
+    connectedUsers.delete(socket.user.id);
+
+    // Update admin view
+    if (socket.user.role !== "admin") {
+      sendActiveConversationsToAdmin();
+    }
+  });
+});
+
+// Helper function to send unread counts to all admins
+async function sendUnreadCountsToAdmin() {
+  // Get all users who have sent messages
+  const { data: allMessages } = await supabase
+    .from("live_support_messages")
+    .select("user_id, status")
+    .eq("is_from_admin", false)
+    .eq("status", "sent")
+    .order("created_at", { ascending: false });
+
+  // Calculate unread counts per user
+  const unreadCounts = {};
+  for (const msg of allMessages || []) {
+    unreadCounts[msg.user_id] = (unreadCounts[msg.user_id] || 0) + 1;
+  }
+
+  // Update our map
+  for (const [userId, count] of Object.entries(unreadCounts)) {
+    userUnreadCounts.set(userId, count);
+  }
+
+  // Send to all admins
+  io.to("admin_room").emit(
+    "unread_counts",
+    Object.fromEntries(userUnreadCounts),
+  );
+}
+
+// Helper function to send active conversations to admin
+async function sendActiveConversationsToAdmin() {
+  // Get all users who have sent messages, with their latest message
+  const { data: conversations } = await supabase
+    .from("live_support_messages")
+    .select(
+      `
+      user_id,
+      users!live_support_messages_user_id_fkey (
+        id,
+        first_name,
+        last_name,
+        email
+      ),
+      message,
+      created_at,
+      is_from_admin,
+      status
+    `,
+    )
+    .order("created_at", { ascending: false });
+
+  // Group by user and get latest message
+  const userConversations = new Map();
+
+  for (const msg of conversations || []) {
+    if (!userConversations.has(msg.user_id)) {
+      const unreadCount = userUnreadCounts.get(msg.user_id) || 0;
+      userConversations.set(msg.user_id, {
+        user_id: msg.user_id,
+        user_name: msg.users
+          ? `${msg.users.first_name || ""} ${msg.users.last_name || ""}`.trim()
+          : "Unknown User",
+        user_email: msg.users?.email || "",
+        last_message: msg.message,
+        last_message_time: msg.created_at,
+        last_message_is_from_admin: msg.is_from_admin,
+        unread_count: unreadCount,
+        status: msg.status,
+      });
+    }
+  }
+
+  // Convert to array and sort: unread first, then by last message time
+  const sortedConversations = Array.from(userConversations.values()).sort(
+    (a, b) => {
+      // Unread conversations first
+      if (a.unread_count > 0 && b.unread_count === 0) return -1;
+      if (a.unread_count === 0 && b.unread_count > 0) return 1;
+      // Then by last message time (newest first)
+      return new Date(b.last_message_time) - new Date(a.last_message_time);
+    },
+  );
+
+  io.to("admin_room").emit("active_conversations", sortedConversations);
+}
+
+// Replace app.listen with server.listen
+const PORT = process.env.PORT || 3000;
+server.listen(PORT, () => {
+  console.log(`Server running on port ${PORT}`);
+  console.log(`Socket.IO enabled for real-time chat`);
+});
+
 // Function to send push notification to user
 async function sendPushNotificationToUser(userId, title, body, data = {}) {
   try {
@@ -307,23 +632,6 @@ const transporter = nodemailer.createTransport({
     pass: process.env.SMTP_PASS,
   },
 });
-
-// Create transporter with Brevo-specific settings
-/*const transporter = nodemailer.createTransport({
-  host: process.env.SMTP_HOST || "smtp-relay.brevo.com",
-  port: parseInt(process.env.SMTP_PORT) || 587,
-  secure: false, // Use TLS, not SSL (587 is TLS)
-  auth: {
-    user: process.env.SMTP_USER,
-    pass: process.env.SMTP_PASS,
-  },
-  tls: {
-    rejectUnauthorized: false, // For Brevo free tier
-  },
-  connectionTimeout: 10000, // 10 seconds
-  greetingTimeout: 10000,
-  socketTimeout: 15000,
-});*/
 
 // Test transporter on startup (silent fail)
 async function testEmailConfig() {
@@ -1192,393 +1500,7 @@ app.post("/api/test-connection", (req, res) => {
 });
 
 // ==================== AUTHENTICATION ROUTES ====================
-// Register - Fixed with proper face image storage
-/*app.post("/api/auth/register", async (req, res) => {
-  try {
-    const {
-      email,
-      password,
-      first_name,
-      last_name,
-      middle_name,
-      phone,
-      country,
-      state,
-      city,
-      address,
-      postal_code,
-      date_of_birth,
-      gender,
-      marital_status,
-      occupation,
-      referral_code,
-      age,
-      //identification_type,
-      //identification_number,
-      security_question_1,
-      security_answer_1,
-      security_question_2,
-      security_answer_2,
-      passcode,
-      face_images,
-    } = req.body;
 
-    console.log("Registration attempt for:", email);
-    console.log("Face images received:", face_images ? face_images.length : 0);
-
-    // Validation
-    if (age && (age < 18 || age > 120)) {
-      return res.status(400).json({ error: "Age must be between 18 and 120" });
-    }
-
-    // Validate passcode (6 digits)
-    if (passcode && !/^\d{6}$/.test(passcode)) {
-      return res
-        .status(400)
-        .json({ error: "Passcode must be exactly 6 digits" });
-    }
-
-    // Check if user exists
-    const { data: existingUser } = await supabase
-      .from("users")
-      .select("email")
-      .eq("email", email)
-      .single();
-
-    if (existingUser) {
-      return res.status(400).json({ error: "Email already registered" });
-    }
-
-    // Hash password
-    const hashedPassword = await bcrypt.hash(password, 10);
-
-    // Hash passcode if provided
-    let hashedPasscode = null;
-    if (passcode) {
-      hashedPasscode = await bcrypt.hash(passcode, 10);
-    }
-
-    // Hash security answers
-    const hashedAnswer1 = await bcrypt.hash(
-      security_answer_1?.toLowerCase().trim() || "",
-      10,
-    );
-    const hashedAnswer2 = await bcrypt.hash(
-      security_answer_2?.toLowerCase().trim() || "",
-      10,
-    );
-
-    // Calculate age from date_of_birth if not provided
-    let calculatedAge = age;
-    if (!calculatedAge && date_of_birth) {
-      const birthDate = new Date(date_of_birth);
-      const today = new Date();
-      calculatedAge = today.getFullYear() - birthDate.getFullYear();
-      const monthDiff = today.getMonth() - birthDate.getMonth();
-      if (
-        monthDiff < 0 ||
-        (monthDiff === 0 && today.getDate() < birthDate.getDate())
-      ) {
-        calculatedAge--;
-      }
-    }
-
-    // Create user with all fields
-    const { data: user, error } = await supabase
-      .from("users")
-      .insert({
-        email,
-        password_hash: hashedPassword,
-        first_name,
-        last_name,
-        middle_name: middle_name || null,
-        phone,
-        country: country || null,
-        state: state || null,
-        city: city || null,
-        address: address || null,
-        postal_code: postal_code || null,
-        date_of_birth: date_of_birth || null,
-        gender: gender || null,
-        marital_status: marital_status || null,
-        occupation: occupation || null,
-        referral_code: referral_code || null,
-        age: calculatedAge || null,
-        //identification_type: identification_type || null,
-        //identification_number: identification_number || null,
-        security_question_1,
-        security_answer_1: hashedAnswer1,
-        security_question_2,
-        security_answer_2: hashedAnswer2,
-        passcode_hash: hashedPasscode,
-        passcode_set_at: hashedPasscode ? new Date().toISOString() : null,
-        face_verified: !!face_images && face_images.length > 0,
-        face_verification_date:
-          face_images && face_images.length > 0
-            ? new Date().toISOString()
-            : null,
-        role: "user",
-        kyc_status: "pending",
-        is_active: true,
-        is_frozen: false,
-        created_at: new Date().toISOString(),
-        updated_at: new Date().toISOString(),
-      })
-      .select()
-      .single();
-
-    if (error) {
-      console.error("Supabase insert error:", error);
-      throw error;
-    }
-
-    console.log("User created with ID:", user.id);
-
-    // ==================== PRODUCTION-GRADE FACE STORAGE ====================
-    if (face_images && face_images.length > 0) {
-      console.log(
-        `[FACE] Processing ${face_images.length} face images for user ${user.id}`,
-      );
-
-      const faceDescriptorVectors = req.body.face_descriptors || [];
-      const faceQualityScores = req.body.face_quality_scores || [];
-
-      // ── Step 1: Collect all valid 128-D vectors ─────────────────────────────
-      const validFrames = []; // { vector, quality, image, index }
-      for (let i = 0; i < face_images.length; i++) {
-        const vector = faceDescriptorVectors[i];
-        const quality = faceQualityScores[i] || 0.8;
-        if (vector && Array.isArray(vector) && vector.length === 128) {
-          validFrames.push({
-            vector,
-            quality,
-            image: face_images[i],
-            index: i,
-          });
-        }
-      }
-      console.log(
-        `[FACE] ${validFrames.length}/${face_images.length} frames have valid 128-D vectors`,
-      );
-
-      // ── Step 2: Compute averaged canonical embedding ─────────────────────────
-      // Averaging all captures is more robust than picking one frame.
-      let canonicalVector = null;
-      let bestQuality = 0;
-      let bestImage = null;
-
-      if (validFrames.length > 0) {
-        const avg = new Array(128).fill(0);
-        for (const frame of validFrames) {
-          for (let j = 0; j < 128; j++)
-            avg[j] += frame.vector[j] / validFrames.length;
-        }
-        canonicalVector = avg;
-
-        // Also track the single highest-quality frame for reference
-        const bestFrame = validFrames.reduce((a, b) =>
-          b.quality > a.quality ? b : a,
-        );
-        bestQuality = bestFrame.quality;
-        bestImage = bestFrame.image;
-      }
-
-      // ── Step 3: Clean slate — remove old descriptors for this user ──────────
-      const { error: deleteError } = await supabase
-        .from("face_descriptors")
-        .delete()
-        .eq("user_id", user.id);
-      if (deleteError)
-        console.error("[FACE] Error clearing old descriptors:", deleteError);
-
-      // ── Step 4: Insert one PRIMARY row with the clean flat canonical vector ──
-      // This is what getUserFaceDescriptor() reads. Storing as a plain array
-      // (not nested in an object) means all three extraction paths in that
-      // function will find it reliably.
-      if (canonicalVector) {
-        const { error: primaryErr } = await supabase
-          .from("face_descriptors")
-          .insert({
-            user_id: user.id,
-            descriptor: canonicalVector, // flat 128-number array → JSONB
-            is_primary: true,
-            is_active: true,
-            quality_score: bestQuality,
-            version: 1,
-            created_at: new Date().toISOString(),
-          });
-
-        if (primaryErr) {
-          console.error(
-            "[FACE] Failed to insert primary descriptor:",
-            primaryErr,
-          );
-        } else {
-          console.log(
-            "[FACE] ✅ Inserted primary (averaged) descriptor into face_descriptors",
-          );
-        }
-
-        // ── Step 5: Insert individual frame rows (audit / re-train use) ─────────
-        // These are stored with the nested format {image, vector, angle} for
-        // forensic purposes. They are NOT the ones used for verification lookup.
-        let frameInsertCount = 0;
-        for (const frame of validFrames) {
-          const { error: frameErr } = await supabase
-            .from("face_descriptors")
-            .insert({
-              user_id: user.id,
-              descriptor: {
-                vector: frame.vector, // nested — for audit only
-                image: frame.image,
-                angle: frame.index,
-                quality: frame.quality,
-                timestamp: new Date().toISOString(),
-                is_valid: true,
-              },
-              is_primary: false,
-              is_active: true,
-              quality_score: frame.quality,
-              version: 1,
-              created_at: new Date().toISOString(),
-            });
-          if (!frameErr) frameInsertCount++;
-          else
-            console.error(
-              `[FACE] Frame ${frame.index} insert error:`,
-              frameErr,
-            );
-        }
-        console.log(
-          `[FACE] Inserted ${frameInsertCount}/${validFrames.length} frame rows`,
-        );
-
-        // ── Step 6: Store canonical embedding in users table ────────────────────
-        // users.face_embedding is the fastest lookup path (no join needed).
-        // Always store as a flat JSON array string so parsing is unambiguous.
-        const { error: updateError } = await supabase
-          .from("users")
-          .update({
-            face_embedding: JSON.stringify(canonicalVector), // flat array string
-            face_verified: true,
-            face_quality_score: bestQuality,
-            face_image: bestImage || null,
-            face_verification_date: new Date().toISOString(),
-            face_embedding_version: 1,
-            updated_at: new Date().toISOString(),
-          })
-          .eq("id", user.id);
-
-        if (updateError) {
-          console.error(
-            "[FACE] Failed to update users.face_embedding:",
-            updateError,
-          );
-        } else {
-          console.log(
-            "[FACE] ✅ users.face_embedding updated with canonical vector",
-          );
-        }
-      } else {
-        // Images received but no valid 128-D descriptor vectors were sent
-        console.warn(
-          "[FACE] No valid face vectors in payload — face_verified stays false",
-        );
-        await supabase
-          .from("users")
-          .update({ face_verified: false, face_verification_date: null })
-          .eq("id", user.id);
-      }
-    }
-
-    // ========== ADD THE TIER ASSIGNMENT CODE RIGHT HERE ==========
-    // AFTER user is successfully created, BEFORE creating the account
-
-    let accountTier = 1; // Default to tier 1
-    const validTier2Ids = ["nin", "bvn", "national id", "nin slip"];
-
-    if (
-      identification_type &&
-      identification_number &&
-      validTier2Ids.some((id) =>
-        identification_type.toLowerCase().includes(id.toLowerCase()),
-      )
-    ) {
-      accountTier = 2;
-    }
-
-    // Update user with tier
-    const { error: tierError } = await supabase
-      .from("users")
-      .update({ account_tier: accountTier })
-      .eq("id", user.id);
-
-    if (tierError) {
-      console.error("Tier update error:", tierError);
-      // Don't fail registration if tier update fails
-    }
-
-    console.log(`User ${user.id} assigned to Tier ${accountTier}`);
-    // ========== END OF TIER ASSIGNMENT CODE ==========
-
-    // Create checking account for user
-    const { error: accountError } = await supabase.from("accounts").insert({
-      user_id: user.id,
-      account_type: "checking",
-      currency: "NGN",
-      balance: 0.0,
-      available_balance: 0.0,
-      status: "active",
-      created_at: new Date().toISOString(),
-      updated_at: new Date().toISOString(),
-    });
-
-    if (accountError) {
-      console.error("Account creation error:", accountError);
-    }
-
-    // Generate token
-    const token = jwt.sign(
-      { userId: user.id, email: user.email, role: user.role },
-      process.env.JWT_SECRET,
-      { expiresIn: process.env.JWT_EXPIRE },
-    );
-
-    // Return user data with face info
-    res.status(201).json({
-      message: "User created successfully",
-      token,
-      user: {
-        id: user.id,
-        email: user.email,
-        first_name: user.first_name,
-        last_name: user.last_name,
-        middle_name: user.middle_name,
-        role: user.role,
-        phone: user.phone,
-        country: user.country,
-        state: user.state,
-        city: user.city,
-        age: user.age,
-        gender: user.gender,
-        marital_status: user.marital_status,
-        occupation: user.occupation,
-        identification_type: user.identification_type,
-        identification_number: user.identification_number,
-        has_passcode: !!user.passcode_hash,
-        face_verified: user.face_verified,
-        face_images_count: face_images ? face_images.length : 0,
-      },
-    });
-  } catch (error) {
-    console.error("Registration error:", error);
-    res.status(500).json({ error: "Registration failed: " + error.message });
-  }
-});*/
-
-// In index.js, replace the existing registration endpoint with this:
-
-// Register - Fixed with proper face image storage (NO ID DOCUMENTS)
 app.post("/api/auth/register", async (req, res) => {
   try {
     const {

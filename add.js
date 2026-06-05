@@ -1,82 +1,51 @@
-// index.js - REPLACE the forgot-password endpoint
+// In index.js - UPDATE Socket.IO configuration
 
-app.post("/api/auth/forgot-password", async (req, res) => {
-  const { email } = req.body;
-
-  if (!email) {
-    return res.status(400).json({ error: "Email required" });
-  }
-
-  const normalizedEmail = email.trim().toLowerCase();
-
-  console.log(`📧 Password reset requested for: ${normalizedEmail}`);
-
-  try {
-    // STEP 1: Check if user exists FIRST
-    const { data: user, error: userError } = await supabase
-      .from("users")
-      .select("id, email, first_name")
-      .eq("email", normalizedEmail)
-      .maybeSingle();
-
-    // IMPORTANT: If user doesn't exist, return generic message (don't reveal that email doesn't exist)
-    if (!user) {
-      console.log(`User not found: ${normalizedEmail}`);
-      // Still return success to prevent email enumeration
-      return res.json({
-        success: true,
-        message: "If your email is registered, you will receive a reset code.",
+const io = socketIo(server, {
+  cors: {
+    origin: (origin, callback) => {
+      const allowedOrigins = [
+        "http://127.0.0.1:5500",
+        "http://127.0.0.1:5501",
+        "http://localhost:5500",
+        "http://localhost:5501",
+        "https://bank-backend-blush.vercel.app",
+        "https://zivarabank.vercel.app",
+        "https://paystora.com",
+        "capacitor://localhost",
+        "capacitor://localhost:8080",
+        "ionic://localhost",
+        "http://localhost",
+        "http://localhost:8080",
+        "http://localhost:3000",
+        /\.vercel\.app$/,
+        /^http:\/\/localhost:\d+$/,
+        /^capacitor:\/\/localhost:\d*$/,
+      ];
+      
+      // Allow if no origin (Capacitor sometimes sends null)
+      if (!origin) {
+        callback(null, true);
+        return;
+      }
+      
+      const isAllowed = allowedOrigins.some(allowed => {
+        if (allowed instanceof RegExp) {
+          return allowed.test(origin);
+        }
+        return allowed === origin;
       });
-    }
-
-    // STEP 2: User exists - generate OTP
-    const otp = Math.floor(100000 + Math.random() * 900000).toString();
-    const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
-
-    console.log(`Generated OTP ${otp} for user ${user.id}`);
-
-    // Mark any existing OTPs as used
-    await supabase
-      .from("password_resets")
-      .update({ used: true })
-      .eq("email", normalizedEmail)
-      .eq("used", false);
-
-    // Insert new OTP
-    const { error: insertError } = await supabase
-      .from("password_resets")
-      .insert({
-        email: normalizedEmail,
-        otp: otp,
-        expires_at: expiresAt.toISOString(),
-        used: false,
-        created_at: new Date().toISOString(),
-      });
-
-    if (insertError) {
-      console.error("Insert OTP error:", insertError);
-      return res.status(500).json({ error: "Failed to generate reset code" });
-    }
-
-    // STEP 3: Send email with OTP
-    const emailSent = await sendOTPEmail(normalizedEmail, otp, "reset");
-
-    if (!emailSent) {
-      console.error(`Failed to send email to ${normalizedEmail}`);
-      // Still return success to user (don't reveal email failure)
-      return res.json({
-        success: true,
-        message: "If your email is registered, you will receive a reset code.",
-      });
-    }
-
-    console.log(`✅ Reset email sent to ${normalizedEmail}`);
-    res.json({
-      success: true,
-      message: "Reset code sent to your email. Please check your inbox and spam folder.",
-    });
-  } catch (error) {
-    console.error("Forgot password error:", error);
-    res.status(500).json({ error: "Something went wrong. Please try again." });
-  }
+      
+      if (isAllowed) {
+        callback(null, true);
+      } else {
+        console.log(`Socket.IO CORS blocked origin: ${origin}`);
+        // Still allow to prevent connection issues
+        callback(null, true);
+      }
+    },
+    credentials: true,
+    methods: ["GET", "POST"],
+    transports: ['websocket', 'polling'],
+    allowEIO3: true, // Allow Engine.IO v3 clients (Capacitor)
+  },
 });
