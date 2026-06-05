@@ -515,7 +515,7 @@ async function getUserTransferThreshold(userId, deviceFingerprint) {
       .single();
 
     if (!device) {
-      return { threshold: 500000, reason: "new_device", level: "new" };
+      return { threshold: 50000, reason: "new_device", level: "new" };
     }
 
     const deviceAge = Math.floor(
@@ -2244,7 +2244,7 @@ app.post("/api/auth/login", authLimiter, async (req, res) => {
 
       // Send notifications for each old session
       for (const oldSession of existingSessions) {
-        await supabase
+        /*await supabase
           .from("notifications")
           .insert({
             user_id: user.id,
@@ -2253,7 +2253,20 @@ app.post("/api/auth/login", authLimiter, async (req, res) => {
             type: "security",
             created_at: new Date().toISOString(),
           })
-          .catch((e) => console.error("Notification error:", e));
+          .catch((e) => console.error("Notification error:", e));*/
+        // REPLACE that block with this:
+        try {
+          await supabase.from("notifications").insert({
+            user_id: user.id,
+            title: "New Device Login",
+            message: `Your account was accessed from: ${deviceInfo.device_name}. Your session on ${oldSession.device_name || "another device"} was terminated. If this wasn't you, log in and change your password immediately.`,
+            type: "security",
+            created_at: new Date().toISOString(),
+          });
+        } catch (err) {
+          console.error("Notification error:", err);
+          // Don't throw - notification failure shouldn't break login
+        }
       }
     }
 
@@ -3189,7 +3202,7 @@ app.post("/api/auth/verify-passcode", async (req, res) => {
         issuedAt: Date.now(),
       },
       process.env.JWT_SECRET,
-      { expiresIn: process.env.JWT_EXPIRE || "7d" }
+      { expiresIn: process.env.JWT_EXPIRE || "7d" },
     );
 
     const expiresAt = new Date();
@@ -3233,11 +3246,11 @@ app.post("/api/auth/verify-passcode", async (req, res) => {
     // STEP 5: Invalidate ALL existing sessions (excluding the new one)
     if (existingSessions && existingSessions.length > 0) {
       console.log(
-        `[Passcode Login] Invalidating ${existingSessions.length} old session(s) for user ${user.id}`
+        `[Passcode Login] Invalidating ${existingSessions.length} old session(s) for user ${user.id}`,
       );
 
       // Get the IDs of sessions to invalidate
-      const oldSessionIds = existingSessions.map(s => s.id);
+      const oldSessionIds = existingSessions.map((s) => s.id);
 
       await supabase
         .from("user_sessions")
@@ -3251,7 +3264,7 @@ app.post("/api/auth/verify-passcode", async (req, res) => {
 
       // Send notifications for each old session
       for (const oldSession of existingSessions) {
-        await supabase
+        /*await supabase
           .from("notifications")
           .insert({
             user_id: user.id,
@@ -3260,7 +3273,20 @@ app.post("/api/auth/verify-passcode", async (req, res) => {
             type: "security",
             created_at: new Date().toISOString(),
           })
-          .catch(e => console.error("Notification error:", e));
+          .catch((e) => console.error("Notification error:", e));*/
+        // REPLACE that block with this:
+        try {
+          await supabase.from("notifications").insert({
+            user_id: user.id,
+            title: "New Device Login",
+            message: `Your account was accessed from: ${deviceInfo.device_name}. Your session on ${oldSession.device_name || "another device"} was terminated. If this wasn't you, log in and change your password immediately.`,
+            type: "security",
+            created_at: new Date().toISOString(),
+          });
+        } catch (err) {
+          console.error("Notification error:", err);
+          // Don't throw - notification failure shouldn't break login
+        }
       }
     }
 
