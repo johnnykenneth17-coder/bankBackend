@@ -44,7 +44,6 @@ const authenticate = async (req, res, next) => {
     req.token = token;
     req.userRole = user.role; // Add this for easier access
 
-    
     next();
   } catch (error) {
     console.error("Authentication error:", error.message);
@@ -65,12 +64,12 @@ const authorizeAdmin = async (req, res, next) => {
   if (req.user.role === "super_admin") {
     return next();
   }
-  
+
   // Regular admin
   if (req.user.role === "admin") {
     return next();
   }
-  
+
   return res.status(403).json({ error: "Access denied. Admin only." });
 };
 
@@ -449,8 +448,7 @@ async function createUserSession(userId, token, deviceInfo) {
 
 // ==================== FIXED: MIDDLEWARE - Check Single Device Session ====================
 
-// REPLACE the entire checkSingleDeviceSession function in auth.js with this:
-const checkSingleDeviceSession = async (req, res, next) => {
+/*const checkSingleDeviceSession = async (req, res, next) => {
   try {
     const authHeader = req.header("Authorization");
     const token = authHeader?.replace("Bearer ", "");
@@ -515,6 +513,120 @@ const checkSingleDeviceSession = async (req, res, next) => {
         .eq("session_token", token)
         .eq("is_active", true);
     }
+
+    req.user = user;
+    req.token = token;
+    req.sessionId = decoded.sessionId;
+    next();
+  } catch (error) {
+    console.error("[Session Middleware] Error:", error.message);
+    res.status(401).json({ error: "Please authenticate" });
+  }
+};*/
+
+// auth.js - REPLACE the entire checkSingleDeviceSession function
+
+const checkSingleDeviceSession = async (req, res, next) => {
+  try {
+    const authHeader = req.header("Authorization");
+    const token = authHeader?.replace("Bearer ", "");
+
+    if (!token) {
+      return res.status(401).json({ error: "Please authenticate" });
+    }
+
+    let decoded;
+    try {
+      decoded = jwt.verify(token, process.env.JWT_SECRET);
+    } catch (jwtError) {
+      return res.status(401).json({ error: "Invalid token" });
+    }
+
+    // Get user with active session info
+    const { data: user, error: userError } = await supabase
+      .from("users")
+      .select(
+        "id, active_session_id, is_active, is_frozen, last_active_device, session_version",
+      )
+      .eq("id", decoded.userId)
+      .single();
+
+    if (userError || !user) {
+      return res.status(401).json({ error: "User not found" });
+    }
+
+    if (!user.is_active) {
+      return res.status(401).json({ error: "Account deactivated" });
+    }
+
+    // Get the session record from database
+    const { data: dbSession, error: sessionError } = await supabase
+      .from("user_sessions")
+      .select("id, session_id, is_active, session_version")
+      .eq("session_token", token)
+      .single();
+
+    // STRICT CHECK: Compare database session_id with token's sessionId
+    if (!dbSession || !dbSession.is_active) {
+      // Session doesn't exist or is inactive in database
+      console.log(
+        `[Session] Session not found or inactive for user ${user.id}`,
+      );
+      return res.status(401).json({
+        error: "session_expired",
+        message: "Your session has expired. Please log in again.",
+        code: "SESSION_EXPIRED",
+      });
+    }
+
+    // CRITICAL: Compare session_id from token with database
+    if (dbSession.session_id !== decoded.sessionId) {
+      console.log(
+        `[Session] MISMATCH: DB=${dbSession.session_id}, Token=${decoded.sessionId}`,
+      );
+
+      // Invalidate this token's session
+      await supabase
+        .from("user_sessions")
+        .update({
+          is_active: false,
+          invalidated_reason:
+            "Session token mismatch - another device logged in",
+          expires_at: new Date().toISOString(),
+        })
+        .eq("session_token", token);
+
+      return res.status(401).json({
+        error: "session_expired",
+        message:
+          "You have been logged out because a new login was detected on another device.",
+        code: "SESSION_REPLACED",
+        device_name: user.last_active_device || "Another device",
+      });
+    }
+
+    // Check if user's active_session_id points to this session
+    if (
+      user.active_session_id &&
+      user.active_session_id !== dbSession.session_id
+    ) {
+      console.log(
+        `[Session] User.active_session_id mismatch: ${user.active_session_id} vs ${dbSession.session_id}`,
+      );
+
+      return res.status(401).json({
+        error: "session_expired",
+        message: "Another device has taken over this session.",
+        code: "SESSION_REPLACED",
+        device_name: user.last_active_device || "Another device",
+      });
+    }
+
+    // Update last activity
+    await supabase
+      .from("user_sessions")
+      .update({ last_activity: new Date().toISOString() })
+      .eq("session_token", token);
 
     req.user = user;
     req.token = token;

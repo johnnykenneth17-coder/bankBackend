@@ -1,11 +1,16 @@
-// Verify passcode login - FIXED VERSION
+// index.js - REPLACE the entire /api/auth/verify-passcode endpoint
+
 app.post("/api/auth/verify-passcode", async (req, res) => {
   try {
     const { user_id, passcode } = req.body;
-    
+
     // Get IP address properly
-    const ip = req.ip || req.connection?.remoteAddress || req.headers['x-forwarded-for'] || 'unknown';
-    const userAgent = req.headers['user-agent'] || 'unknown';
+    const ip =
+      req.ip ||
+      req.connection?.remoteAddress ||
+      req.headers["x-forwarded-for"] ||
+      "unknown";
+    const userAgent = req.headers["user-agent"] || "unknown";
 
     if (!passcode || passcode.length !== 6 || !/^\d{6}$/.test(passcode)) {
       return res.status(400).json({ error: "Invalid passcode format" });
@@ -20,11 +25,11 @@ app.post("/api/auth/verify-passcode", async (req, res) => {
     if (error || !user) {
       return res.status(404).json({ error: "User not found" });
     }
-    
+
     if (!user.is_active) {
       return res.status(403).json({ error: "Account is deactivated" });
     }
-    
+
     if (user.is_frozen) {
       return res.status(403).json({ error: "Account is frozen" });
     }
@@ -73,14 +78,19 @@ app.post("/api/auth/verify-passcode", async (req, res) => {
       })
       .eq("id", user_id);
 
-    // ========== SESSION MANAGEMENT ==========
+    // ========== STRICT SESSION MANAGEMENT (SAME AS EMAIL LOGIN) ==========
     const deviceInfo = getDeviceInfo(req);
-    const sessionVersion = Math.floor(Date.now() / 1000); // ← FIX: Use seconds instead of milliseconds (fits in integer)
-    
-    // Generate session ID
+    const sessionVersion = Math.floor(Date.now() / 1000);
     const sessionId = generateSessionId();
 
-    // Build JWT with session info embedded
+    // STEP 1: Get ALL existing active sessions for this user
+    const { data: existingSessions } = await supabase
+      .from("user_sessions")
+      .select("id, session_id, device_name, session_token")
+      .eq("user_id", user.id)
+      .eq("is_active", true);
+
+    // STEP 2: Generate new token with session info
     const token = jwt.sign(
       {
         userId: user.id,
@@ -91,13 +101,13 @@ app.post("/api/auth/verify-passcode", async (req, res) => {
         issuedAt: Date.now(),
       },
       process.env.JWT_SECRET,
-      { expiresIn: process.env.JWT_EXPIRE || "7d" },
+      { expiresIn: process.env.JWT_EXPIRE || "7d" }
     );
 
     const expiresAt = new Date();
     expiresAt.setDate(expiresAt.getDate() + 7);
 
-    // STEP 1: Insert the new session row FIRST
+    // STEP 3: Insert the new session
     const { error: sessionError } = await supabase
       .from("user_sessions")
       .insert({
@@ -111,17 +121,16 @@ app.post("/api/auth/verify-passcode", async (req, res) => {
         expires_at: expiresAt.toISOString(),
         is_active: true,
         is_current: true,
-        session_version: sessionVersion, // ← Now stores a valid integer (e.g., 1734567890)
+        session_version: sessionVersion,
         created_at: new Date().toISOString(),
         last_activity: new Date().toISOString(),
       });
 
     if (sessionError) {
       console.error("Session insert error:", sessionError);
-      // Non-fatal — continue
     }
 
-    // STEP 2: Update the user record to point to the NEW session
+    // STEP 4: Update user record with new active session
     await supabase
       .from("users")
       .update({
@@ -133,44 +142,42 @@ app.post("/api/auth/verify-passcode", async (req, res) => {
       })
       .eq("id", user.id);
 
-    // STEP 3: Invalidate all OLD sessions
-    const { data: oldSessions } = await supabase
-      .from("user_sessions")
-      .select("id, session_id, device_name")
-      .eq("user_id", user.id)
-      .eq("is_active", true)
-      .neq("session_id", sessionId);
+    // STEP 5: Invalidate ALL existing sessions (excluding the new one)
+    if (existingSessions && existingSessions.length > 0) {
+      console.log(
+        `[Passcode Login] Invalidating ${existingSessions.length} old session(s) for user ${user.id}`
+      );
 
-    if (oldSessions && oldSessions.length > 0) {
+      // Get the IDs of sessions to invalidate
+      const oldSessionIds = existingSessions.map(s => s.id);
+
       await supabase
         .from("user_sessions")
         .update({
           is_active: false,
           is_current: false,
-          invalidated_reason: "New login from another device",
+          invalidated_reason: `New passcode login from ${deviceInfo.device_name}`,
           expires_at: new Date().toISOString(),
         })
-        .eq("user_id", user.id)
-        .eq("is_active", true)
-        .neq("session_id", sessionId);
+        .in("id", oldSessionIds);
 
-      // Send notifications for displaced sessions
-      for (const old of oldSessions) {
+      // Send notifications for each old session
+      for (const oldSession of existingSessions) {
         await supabase
           .from("notifications")
           .insert({
             user_id: user.id,
-            title: "New Device Login",
-            message: `Your account was accessed from: ${deviceInfo.device_name}. Your session on ${old.device_name || "another device"} was terminated. If this wasn't you, log in and change your password immediately.`,
+            title: "New Device Login (Passcode)",
+            message: `Your account was accessed via passcode from: ${deviceInfo.device_name}. Your session on ${oldSession.device_name || "another device"} was terminated. If this wasn't you, log in and change your password immediately.`,
             type: "security",
             created_at: new Date().toISOString(),
           })
-          .catch((e) => console.error("Notification error:", e));
+          .catch(e => console.error("Notification error:", e));
       }
     }
 
     // Log successful login
-    await logSecurityEvent(user.id, "successful_login", {
+    await logSecurityEvent(user.id, "successful_passcode_login", {
       ip,
       device: deviceInfo.device_name,
       session_id: sessionId,

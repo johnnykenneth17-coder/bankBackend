@@ -2076,8 +2076,222 @@ app.post("/api/auth/register", async (req, res) => {
   }
 });
 
-// LOGIN - COMPLETE REPLACEMENT with proper session handling
+// In index.js - REPLACE the login endpoint with this stricter version
+
 app.post("/api/auth/login", authLimiter, async (req, res) => {
+  try {
+    const { email, password, fingerprint } = req.body;
+    const ip = req.ip;
+
+    // Failed attempts check (keep your existing code)
+    const attemptsKey = `${ip}:${email}`;
+    const attempts = failedAttempts.get(attemptsKey) || {
+      count: 0,
+      firstAttempt: Date.now(),
+    };
+
+    if (Date.now() - attempts.firstAttempt > 15 * 60 * 1000) {
+      attempts.count = 0;
+      attempts.firstAttempt = Date.now();
+    }
+
+    if (attempts.count >= 5) {
+      return res.status(429).json({
+        error: "Too many failed attempts. Account temporarily locked.",
+      });
+    }
+
+    // Fetch user
+    const { data: user, error } = await supabase
+      .from("users")
+      .select("*")
+      .eq("email", email)
+      .single();
+
+    if (error || !user) {
+      attempts.count++;
+      failedAttempts.set(attemptsKey, attempts);
+      return res.status(401).json({ error: "Invalid credentials" });
+    }
+
+    // Password check
+    const validPassword = await bcrypt.compare(password, user.password_hash);
+    if (!validPassword) {
+      attempts.count++;
+      failedAttempts.set(attemptsKey, attempts);
+      await logSecurityEvent(user.id, "failed_login", { ip, fingerprint });
+      return res.status(401).json({ error: "Invalid credentials" });
+    }
+
+    // Account status checks
+    if (!user.is_active) {
+      return res.status(403).json({ error: "Account is deactivated" });
+    }
+
+    if (user.is_frozen) {
+      return res.status(403).json({
+        error: "Account frozen",
+        freeze_reason: user.freeze_reason,
+        unfreeze_method: user.unfreeze_method,
+      });
+    }
+
+    // Clear failed attempts
+    failedAttempts.delete(attemptsKey);
+
+    // 2FA check (keep your existing code)
+    if (user.two_factor_enabled) {
+      const otp = Math.floor(100000 + Math.random() * 900000).toString();
+      const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
+
+      await supabase.from("otps").insert({
+        user_id: user.id,
+        otp_code: otp,
+        otp_type: "login",
+        expires_at: expiresAt,
+      });
+
+      await sendOTPEmail(user.email, otp);
+      return res.json({
+        requiresTwoFactor: true,
+        userId: user.id,
+        message: "OTP sent to your email",
+      });
+    }
+
+    // ========== STRICT SESSION MANAGEMENT ==========
+    const deviceInfo = getDeviceInfo(req);
+    const sessionVersion = Math.floor(Date.now() / 1000);
+    const sessionId = generateSessionId();
+
+    // STEP 1: Get ALL existing active sessions for this user
+    const { data: existingSessions } = await supabase
+      .from("user_sessions")
+      .select("id, session_id, device_name, session_token")
+      .eq("user_id", user.id)
+      .eq("is_active", true);
+
+    // STEP 2: Generate new token with session info
+    const token = jwt.sign(
+      {
+        userId: user.id,
+        email: user.email,
+        role: user.role,
+        sessionId: sessionId,
+        sessionVersion: sessionVersion,
+        issuedAt: Date.now(),
+      },
+      process.env.JWT_SECRET,
+      { expiresIn: process.env.JWT_EXPIRE || "7d" },
+    );
+
+    const expiresAt = new Date();
+    expiresAt.setDate(expiresAt.getDate() + 7);
+
+    // STEP 3: Insert the new session
+    const { error: sessionError } = await supabase
+      .from("user_sessions")
+      .insert({
+        user_id: user.id,
+        session_token: token,
+        session_id: sessionId,
+        device_fingerprint: deviceInfo.device_name,
+        device_name: deviceInfo.device_name,
+        ip_address: deviceInfo.ip_address,
+        user_agent: deviceInfo.user_agent,
+        expires_at: expiresAt.toISOString(),
+        is_active: true,
+        is_current: true,
+        session_version: sessionVersion,
+        created_at: new Date().toISOString(),
+        last_activity: new Date().toISOString(),
+      });
+
+    if (sessionError) {
+      console.error("Session insert error:", sessionError);
+    }
+
+    // STEP 4: Update user record with new active session
+    await supabase
+      .from("users")
+      .update({
+        active_session_id: sessionId,
+        last_active_device: deviceInfo.device_name,
+        active_session_started_at: new Date().toISOString(),
+        last_login: new Date().toISOString(),
+        session_version: sessionVersion,
+      })
+      .eq("id", user.id);
+
+    // STEP 5: Invalidate ALL existing sessions (excluding the new one)
+    if (existingSessions && existingSessions.length > 0) {
+      console.log(
+        `Invalidating ${existingSessions.length} old session(s) for user ${user.id}`,
+      );
+
+      // Get the IDs of sessions to invalidate
+      const oldSessionIds = existingSessions.map((s) => s.id);
+
+      await supabase
+        .from("user_sessions")
+        .update({
+          is_active: false,
+          is_current: false,
+          invalidated_reason: `New login from ${deviceInfo.device_name}`,
+          expires_at: new Date().toISOString(),
+        })
+        .in("id", oldSessionIds);
+
+      // Send notifications for each old session
+      for (const oldSession of existingSessions) {
+        await supabase
+          .from("notifications")
+          .insert({
+            user_id: user.id,
+            title: "New Device Login",
+            message: `Your account was accessed from: ${deviceInfo.device_name}. Your session on ${oldSession.device_name || "another device"} was terminated. If this wasn't you, log in and change your password immediately.`,
+            type: "security",
+            created_at: new Date().toISOString(),
+          })
+          .catch((e) => console.error("Notification error:", e));
+      }
+    }
+
+    // Log successful login
+    await logSecurityEvent(user.id, "successful_login", {
+      ip,
+      fingerprint,
+      device: deviceInfo.device_name,
+      session_id: sessionId,
+    });
+
+    res.json({
+      token,
+      user: {
+        id: user.id,
+        email: user.email,
+        first_name: user.first_name,
+        last_name: user.last_name,
+        role: user.role,
+        admin_role: user.admin_role,
+        admin_permissions: user.admin_permissions,
+        is_frozen: user.is_frozen,
+        kyc_status: user.kyc_status,
+      },
+      session: {
+        id: sessionId,
+        device: deviceInfo.device_name,
+        logged_in_at: new Date().toISOString(),
+      },
+    });
+  } catch (error) {
+    console.error("Login error:", error);
+    res.status(500).json({ error: "Login failed: " + error.message });
+  }
+});
+
+// LOGIN - COMPLETE REPLACEMENT with proper session handling
+/*app.post("/api/auth/login", authLimiter, async (req, res) => {
   try {
     const { email, password, fingerprint } = req.body;
     const ip = req.ip;
@@ -2296,7 +2510,7 @@ app.post("/api/auth/login", authLimiter, async (req, res) => {
     console.error("Login error:", error);
     res.status(500).json({ error: "Login failed: " + error.message });
   }
-});
+});*/
 
 // Add to index.js - Logout endpoint
 app.post("/api/user/logout", authenticate, async (req, res) => {
@@ -2331,7 +2545,7 @@ app.post("/api/user/logout", authenticate, async (req, res) => {
 
 // ==================== SESSION MANAGEMENT ENDPOINTS ====================
 
-app.get("/api/auth/check-session", authenticate, async (req, res) => {
+/*app.get("/api/auth/check-session", authenticate, async (req, res) => {
   try {
     const token = req.headers.authorization?.split(" ")[1];
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
@@ -2362,6 +2576,74 @@ app.get("/api/auth/check-session", authenticate, async (req, res) => {
     console.error("Session check error:", error);
     // On any error, say valid — never force logout due to server errors
     res.json({ valid: true });
+  }
+});*/
+
+// In index.js - Update the check-session endpoint
+
+app.get("/api/auth/check-session", authenticate, async (req, res) => {
+  try {
+    const token = req.headers.authorization?.split(" ")[1];
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+
+    // If token has no sessionId, it's invalid - force logout
+    if (!decoded.sessionId) {
+      return res.json({
+        valid: false,
+        reason: "Invalid session format",
+        code: "SESSION_EXPIRED",
+      });
+    }
+
+    // Check session validity in database
+    const { data: dbSession, error: sessionError } = await supabase
+      .from("user_sessions")
+      .select("session_id, is_active, invalidated_reason")
+      .eq("session_token", token)
+      .single();
+
+    if (sessionError || !dbSession || !dbSession.is_active) {
+      return res.json({
+        valid: false,
+        reason: dbSession?.invalidated_reason || "Session not found",
+        code: "SESSION_EXPIRED",
+      });
+    }
+
+    // Compare session IDs
+    if (dbSession.session_id !== decoded.sessionId) {
+      return res.json({
+        valid: false,
+        reason: "Session ID mismatch - another device logged in",
+        code: "SESSION_REPLACED",
+        device_name: "another device",
+      });
+    }
+
+    // Check user's active_session_id
+    const { data: user } = await supabase
+      .from("users")
+      .select("active_session_id, last_active_device")
+      .eq("id", req.user.id)
+      .single();
+
+    if (
+      user &&
+      user.active_session_id &&
+      user.active_session_id !== decoded.sessionId
+    ) {
+      return res.json({
+        valid: false,
+        reason: "Another device has taken over this session",
+        code: "SESSION_REPLACED",
+        device_name: user.last_active_device || "another device",
+      });
+    }
+
+    res.json({ valid: true });
+  } catch (error) {
+    console.error("Session check error:", error);
+    res.json({ valid: false, code: "SESSION_EXPIRED", reason: error.message });
   }
 });
 
@@ -2596,218 +2878,8 @@ app.post("/api/auth/check-passcode", async (req, res) => {
   }
 });
 
-// Verify passcode login
-/*app.post("/api/auth/verify-passcode", async (req, res) => {
-  try {
-    const { user_id, passcode } = req.body;
-
-    if (!passcode || passcode.length !== 6 || !/^\d{6}$/.test(passcode)) {
-      return res.status(400).json({ error: "Invalid passcode format" });
-    }
-
-    const { data: user, error } = await supabase
-      .from("users")
-      .select("*")
-      .eq("id", user_id)
-      .single();
-
-    if (error || !user)
-      return res.status(404).json({ error: "User not found" });
-    if (!user.is_active)
-      return res.status(403).json({ error: "Account is deactivated" });
-    if (user.is_frozen)
-      return res.status(403).json({ error: "Account is frozen" });
-
-    const maxAttempts = 5;
-    const attemptWindow = 15 * 60 * 1000;
-
-    if (user.passcode_attempts >= maxAttempts) {
-      const lastAttempt = new Date(user.last_passcode_attempt);
-      if (Date.now() - lastAttempt < attemptWindow) {
-        return res
-          .status(429)
-          .json({ error: "Too many incorrect attempts. Try again later." });
-      } else {
-        await supabase
-          .from("users")
-          .update({ passcode_attempts: 0 })
-          .eq("id", user_id);
-      }
-    }
-
-    const isValid = await bcrypt.compare(passcode, user.passcode_hash);
-
-    if (!isValid) {
-      const newAttempts = (user.passcode_attempts || 0) + 1;
-      await supabase
-        .from("users")
-        .update({
-          passcode_attempts: newAttempts,
-          last_passcode_attempt: new Date(),
-        })
-        .eq("id", user_id);
-      return res.status(401).json({
-        error: "Invalid passcode",
-        attempts_remaining: maxAttempts - newAttempts,
-      });
-    }
-
-    // Reset attempts on success
-    await supabase
-      .from("users")
-      .update({
-        passcode_attempts: 0,
-        last_passcode_attempt: null,
-        last_login: new Date(),
-      })
-      .eq("id", user_id);
-
-    /*const token = jwt.sign(
-      { userId: user.id, email: user.email, role: user.role },
-      process.env.JWT_SECRET,
-      { expiresIn: process.env.JWT_EXPIRE },
-    );*
-
-    // ========== SESSION MANAGEMENT ==========
-    const deviceInfo = getDeviceInfo(req);
-    const sessionVersion = Date.now();
-
-    // generateSessionId() takes no args — do NOT pass user.id
-    const sessionId = generateSessionId();
-
-    // Build JWT with session info embedded
-    const token = jwt.sign(
-      {
-        userId: user.id,
-        email: user.email,
-        role: user.role,
-        sessionId: sessionId,
-        sessionVersion: sessionVersion,
-        issuedAt: Date.now(),
-      },
-      process.env.JWT_SECRET,
-      { expiresIn: process.env.JWT_EXPIRE || "7d" },
-    );
-
-    const expiresAt = new Date();
-    expiresAt.setDate(expiresAt.getDate() + 7);
-
-    // STEP 1: Insert the new session row FIRST
-    // This must exist before we update active_session_id on the user
-    const { error: sessionError } = await supabase
-      .from("user_sessions")
-      .insert({
-        user_id: user.id,
-        session_token: token,
-        session_id: sessionId,
-        device_fingerprint: deviceInfo.device_name,
-        device_name: deviceInfo.device_name,
-        ip_address: deviceInfo.ip_address,
-        user_agent: deviceInfo.user_agent,
-        expires_at: expiresAt.toISOString(),
-        is_active: true,
-        is_current: true,
-        session_version: sessionVersion,
-        created_at: new Date().toISOString(),
-        last_activity: new Date().toISOString(),
-      });
-
-    if (sessionError) {
-      console.error("Session insert error:", sessionError);
-      // Non-fatal — continue, session check will still work via users.active_session_id
-    }
-
-    // STEP 2: Update the user record to point to the NEW session immediately
-    // Doing this BEFORE invalidating old sessions closes the race condition window.
-    // Any session check that runs right now will see the correct active_session_id
-    // and match it against the new token's sessionId — no phantom logout.
-    await supabase
-      .from("users")
-      .update({
-        active_session_id: sessionId,
-        last_active_device: deviceInfo.device_name,
-        active_session_started_at: new Date().toISOString(),
-        last_login: new Date().toISOString(),
-        session_version: sessionVersion,
-      })
-      .eq("id", user.id);
-
-    // STEP 3: NOW invalidate all OLD sessions (explicitly exclude the new one)
-    const { data: oldSessions } = await supabase
-      .from("user_sessions")
-      .select("id, session_id, device_name")
-      .eq("user_id", user.id)
-      .eq("is_active", true)
-      .neq("session_id", sessionId); // Never touch the session we just created
-
-    if (oldSessions && oldSessions.length > 0) {
-      console.log(
-        `Invalidating ${oldSessions.length} old session(s) for user ${user.id}`,
-      );
-
-      await supabase
-        .from("user_sessions")
-        .update({
-          is_active: false,
-          is_current: false,
-          invalidated_reason: "New login from another device",
-          expires_at: new Date().toISOString(),
-        })
-        .eq("user_id", user.id)
-        .eq("is_active", true)
-        .neq("session_id", sessionId); // Safety guard — never kill the new session
-
-      // Send a notification for each displaced session
-      for (const old of oldSessions) {
-        await supabase
-          .from("notifications")
-          .insert({
-            user_id: user.id,
-            title: "New Device Login",
-            message: `Your account was accessed from: ${deviceInfo.device_name}. Your session on ${old.device_name || "another device"} was terminated. If this wasn't you, log in and change your password immediately.`,
-            type: "security",
-            created_at: new Date().toISOString(),
-          })
-          .catch((e) => console.error("Notification insert error:", e));
-      }
-    } else {
-      console.log(`No old sessions to invalidate for user ${user.id}`);
-    }
-
-    await logSecurityEvent(user.id, "successful_login", {
-      ip,
-      fingerprint,
-      device: deviceInfo.device_name,
-      session_id: sessionId,
-    });
-
-    res.json({
-      token,
-      user: {
-        id: user.id,
-        email: user.email,
-        first_name: user.first_name,
-        last_name: user.last_name,
-        role: user.role,
-        admin_role: user.admin_role,
-        admin_permissions: user.admin_permissions,
-        is_frozen: user.is_frozen,
-        kyc_status: user.kyc_status,
-      },
-      session: {
-        id: sessionId,
-        device: deviceInfo.device_name,
-        logged_in_at: new Date().toISOString(),
-      },
-    });
-  } catch (error) {
-    console.error("Passcode verification error:", error);
-    res.status(500).json({ error: "Verification failed" });
-  }
-});*/
-
 // Verify passcode login - FIXED VERSION
-app.post("/api/auth/verify-passcode", async (req, res) => {
+/*app.post("/api/auth/verify-passcode", async (req, res) => {
   try {
     const { user_id, passcode } = req.body;
 
@@ -2983,6 +3055,217 @@ app.post("/api/auth/verify-passcode", async (req, res) => {
 
     // Log successful login
     await logSecurityEvent(user.id, "successful_login", {
+      ip,
+      device: deviceInfo.device_name,
+      session_id: sessionId,
+    });
+
+    // Return response
+    res.json({
+      token,
+      user: {
+        id: user.id,
+        email: user.email,
+        first_name: user.first_name,
+        last_name: user.last_name,
+        role: user.role,
+        admin_role: user.admin_role,
+        admin_permissions: user.admin_permissions,
+        is_frozen: user.is_frozen,
+        kyc_status: user.kyc_status,
+      },
+      session: {
+        id: sessionId,
+        device: deviceInfo.device_name,
+        logged_in_at: new Date().toISOString(),
+      },
+    });
+  } catch (error) {
+    console.error("Passcode verification error:", error);
+    res.status(500).json({ error: "Verification failed: " + error.message });
+  }
+});*/
+
+// index.js - REPLACE the entire /api/auth/verify-passcode endpoint
+
+app.post("/api/auth/verify-passcode", async (req, res) => {
+  try {
+    const { user_id, passcode } = req.body;
+
+    // Get IP address properly
+    const ip =
+      req.ip ||
+      req.connection?.remoteAddress ||
+      req.headers["x-forwarded-for"] ||
+      "unknown";
+    const userAgent = req.headers["user-agent"] || "unknown";
+
+    if (!passcode || passcode.length !== 6 || !/^\d{6}$/.test(passcode)) {
+      return res.status(400).json({ error: "Invalid passcode format" });
+    }
+
+    const { data: user, error } = await supabase
+      .from("users")
+      .select("*")
+      .eq("id", user_id)
+      .single();
+
+    if (error || !user) {
+      return res.status(404).json({ error: "User not found" });
+    }
+
+    if (!user.is_active) {
+      return res.status(403).json({ error: "Account is deactivated" });
+    }
+
+    if (user.is_frozen) {
+      return res.status(403).json({ error: "Account is frozen" });
+    }
+
+    const maxAttempts = 5;
+    const attemptWindow = 15 * 60 * 1000;
+
+    if (user.passcode_attempts >= maxAttempts) {
+      const lastAttempt = new Date(user.last_passcode_attempt);
+      if (Date.now() - lastAttempt < attemptWindow) {
+        return res
+          .status(429)
+          .json({ error: "Too many incorrect attempts. Try again later." });
+      } else {
+        await supabase
+          .from("users")
+          .update({ passcode_attempts: 0 })
+          .eq("id", user_id);
+      }
+    }
+
+    const isValid = await bcrypt.compare(passcode, user.passcode_hash);
+
+    if (!isValid) {
+      const newAttempts = (user.passcode_attempts || 0) + 1;
+      await supabase
+        .from("users")
+        .update({
+          passcode_attempts: newAttempts,
+          last_passcode_attempt: new Date(),
+        })
+        .eq("id", user_id);
+      return res.status(401).json({
+        error: "Invalid passcode",
+        attempts_remaining: maxAttempts - newAttempts,
+      });
+    }
+
+    // Reset attempts on success
+    await supabase
+      .from("users")
+      .update({
+        passcode_attempts: 0,
+        last_passcode_attempt: null,
+        last_login: new Date(),
+      })
+      .eq("id", user_id);
+
+    // ========== STRICT SESSION MANAGEMENT (SAME AS EMAIL LOGIN) ==========
+    const deviceInfo = getDeviceInfo(req);
+    const sessionVersion = Math.floor(Date.now() / 1000);
+    const sessionId = generateSessionId();
+
+    // STEP 1: Get ALL existing active sessions for this user
+    const { data: existingSessions } = await supabase
+      .from("user_sessions")
+      .select("id, session_id, device_name, session_token")
+      .eq("user_id", user.id)
+      .eq("is_active", true);
+
+    // STEP 2: Generate new token with session info
+    const token = jwt.sign(
+      {
+        userId: user.id,
+        email: user.email,
+        role: user.role,
+        sessionId: sessionId,
+        sessionVersion: sessionVersion,
+        issuedAt: Date.now(),
+      },
+      process.env.JWT_SECRET,
+      { expiresIn: process.env.JWT_EXPIRE || "7d" }
+    );
+
+    const expiresAt = new Date();
+    expiresAt.setDate(expiresAt.getDate() + 7);
+
+    // STEP 3: Insert the new session
+    const { error: sessionError } = await supabase
+      .from("user_sessions")
+      .insert({
+        user_id: user.id,
+        session_token: token,
+        session_id: sessionId,
+        device_fingerprint: deviceInfo.device_name,
+        device_name: deviceInfo.device_name,
+        ip_address: deviceInfo.ip_address,
+        user_agent: deviceInfo.user_agent,
+        expires_at: expiresAt.toISOString(),
+        is_active: true,
+        is_current: true,
+        session_version: sessionVersion,
+        created_at: new Date().toISOString(),
+        last_activity: new Date().toISOString(),
+      });
+
+    if (sessionError) {
+      console.error("Session insert error:", sessionError);
+    }
+
+    // STEP 4: Update user record with new active session
+    await supabase
+      .from("users")
+      .update({
+        active_session_id: sessionId,
+        last_active_device: deviceInfo.device_name,
+        active_session_started_at: new Date().toISOString(),
+        last_login: new Date().toISOString(),
+        session_version: sessionVersion,
+      })
+      .eq("id", user.id);
+
+    // STEP 5: Invalidate ALL existing sessions (excluding the new one)
+    if (existingSessions && existingSessions.length > 0) {
+      console.log(
+        `[Passcode Login] Invalidating ${existingSessions.length} old session(s) for user ${user.id}`
+      );
+
+      // Get the IDs of sessions to invalidate
+      const oldSessionIds = existingSessions.map(s => s.id);
+
+      await supabase
+        .from("user_sessions")
+        .update({
+          is_active: false,
+          is_current: false,
+          invalidated_reason: `New passcode login from ${deviceInfo.device_name}`,
+          expires_at: new Date().toISOString(),
+        })
+        .in("id", oldSessionIds);
+
+      // Send notifications for each old session
+      for (const oldSession of existingSessions) {
+        await supabase
+          .from("notifications")
+          .insert({
+            user_id: user.id,
+            title: "New Device Login (Passcode)",
+            message: `Your account was accessed via passcode from: ${deviceInfo.device_name}. Your session on ${oldSession.device_name || "another device"} was terminated. If this wasn't you, log in and change your password immediately.`,
+            type: "security",
+            created_at: new Date().toISOString(),
+          })
+          .catch(e => console.error("Notification error:", e));
+      }
+    }
+
+    // Log successful login
+    await logSecurityEvent(user.id, "successful_passcode_login", {
       ip,
       device: deviceInfo.device_name,
       session_id: sessionId,
