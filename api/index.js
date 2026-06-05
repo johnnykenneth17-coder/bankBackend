@@ -2139,12 +2139,12 @@ app.post("/api/auth/login", authLimiter, async (req, res) => {
     // Clear failed attempts
     failedAttempts.delete(attemptsKey);
 
-     // ========== CHECK IF 2FA IS ENABLED ==========
+    // ========== CHECK IF 2FA IS ENABLED ==========
     if (user.two_factor_enabled) {
       // Generate OTP
       const otpCode = Math.floor(100000 + Math.random() * 900000).toString();
       const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
-      
+
       // Store OTP with user_id
       await supabase.from("otps").insert({
         user_id: user.id,
@@ -2153,24 +2153,24 @@ app.post("/api/auth/login", authLimiter, async (req, res) => {
         expires_at: expiresAt,
         is_used: false,
       });
-      
+
       // Send email
       await sendOTPEmail(user.email, otpCode, "2fa");
-      
+
       // Generate TEMPORARY token (short-lived, only for 2FA verification)
       const tempToken = jwt.sign(
         {
           userId: user.id,
           email: user.email,
           role: user.role,
-          tempAuth: true,  // Flag to indicate this is a temporary token
+          tempAuth: true, // Flag to indicate this is a temporary token
           purpose: "2fa_verification",
           issuedAt: Date.now(),
         },
         process.env.JWT_SECRET,
-        { expiresIn: "15m" }  // Short expiry for 2FA step
+        { expiresIn: "15m" }, // Short expiry for 2FA step
       );
-      
+
       return res.json({
         requiresTwoFactor: true,
         tempToken: tempToken,
@@ -2325,7 +2325,6 @@ app.post("/api/auth/login", authLimiter, async (req, res) => {
 
 // ==================== TWO-FACTOR AUTHENTICATION ROUTES ====================
 
-
 // Get 2FA status
 app.get("/api/user/2fa/status", authenticate, async (req, res) => {
   try {
@@ -2334,9 +2333,9 @@ app.get("/api/user/2fa/status", authenticate, async (req, res) => {
       .select("two_factor_enabled")
       .eq("id", req.user.id)
       .single();
-    
+
     if (error) throw error;
-    
+
     res.json({ enabled: user?.two_factor_enabled || false });
   } catch (error) {
     console.error("2FA status error:", error);
@@ -2350,7 +2349,7 @@ app.post("/api/user/2fa/send-setup-otp", authenticate, async (req, res) => {
     const otpCode = Math.floor(100000 + Math.random() * 900000).toString();
     const requestId = uuidv4();
     const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
-    
+
     await supabase.from("otps").insert({
       id: requestId,
       user_id: req.user.id,
@@ -2359,9 +2358,9 @@ app.post("/api/user/2fa/send-setup-otp", authenticate, async (req, res) => {
       expires_at: expiresAt,
       is_used: false,
     });
-    
+
     await sendOTPEmail(req.user.email, otpCode, "2fa");
-    
+
     res.json({ success: true, request_id: requestId });
   } catch (error) {
     console.error("Send setup OTP error:", error);
@@ -2373,17 +2372,14 @@ app.post("/api/user/2fa/send-setup-otp", authenticate, async (req, res) => {
 app.post("/api/user/2fa/resend-setup-otp", authenticate, async (req, res) => {
   try {
     const { request_id } = req.body;
-    
+
     // Mark old OTP as used
-    await supabase
-      .from("otps")
-      .update({ is_used: true })
-      .eq("id", request_id);
-    
+    await supabase.from("otps").update({ is_used: true }).eq("id", request_id);
+
     const otpCode = Math.floor(100000 + Math.random() * 900000).toString();
     const newRequestId = uuidv4();
     const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
-    
+
     await supabase.from("otps").insert({
       id: newRequestId,
       user_id: req.user.id,
@@ -2392,9 +2388,9 @@ app.post("/api/user/2fa/resend-setup-otp", authenticate, async (req, res) => {
       expires_at: expiresAt,
       is_used: false,
     });
-    
+
     await sendOTPEmail(req.user.email, otpCode, "2fa");
-    
+
     res.json({ success: true, request_id: newRequestId });
   } catch (error) {
     console.error("Resend setup OTP error:", error);
@@ -2406,7 +2402,7 @@ app.post("/api/user/2fa/resend-setup-otp", authenticate, async (req, res) => {
 app.post("/api/user/2fa/enable", authenticate, async (req, res) => {
   try {
     const { otp_code, request_id } = req.body;
-    
+
     // Verify OTP
     const { data: otpRecord, error: otpError } = await supabase
       .from("otps")
@@ -2417,27 +2413,24 @@ app.post("/api/user/2fa/enable", authenticate, async (req, res) => {
       .eq("otp_type", "2fa_setup")
       .eq("is_used", false)
       .single();
-    
+
     if (otpError || !otpRecord) {
       return res.status(401).json({ error: "Invalid verification code" });
     }
-    
+
     if (new Date(otpRecord.expires_at) < new Date()) {
       return res.status(401).json({ error: "Code has expired" });
     }
-    
+
     // Mark OTP as used
-    await supabase
-      .from("otps")
-      .update({ is_used: true })
-      .eq("id", request_id);
-    
+    await supabase.from("otps").update({ is_used: true }).eq("id", request_id);
+
     // Enable 2FA
     await supabase
       .from("users")
       .update({ two_factor_enabled: true })
       .eq("id", req.user.id);
-    
+
     res.json({ success: true, message: "2FA enabled successfully" });
   } catch (error) {
     console.error("Enable 2FA error:", error);
@@ -2452,7 +2445,7 @@ app.post("/api/user/2fa/disable", authenticate, async (req, res) => {
       .from("users")
       .update({ two_factor_enabled: false })
       .eq("id", req.user.id);
-    
+
     res.json({ success: true, message: "2FA disabled" });
   } catch (error) {
     console.error("Disable 2FA error:", error);
@@ -2468,45 +2461,48 @@ app.post("/api/auth/verify-2fa", async (req, res) => {
   try {
     const { tempToken, otp_code } = req.body;
     const ip = req.ip;
-    
+
     // Step 1: Verify the temporary token
     let decoded;
     try {
       decoded = jwt.verify(tempToken, process.env.JWT_SECRET);
     } catch (err) {
-      return res.status(401).json({ 
+      return res.status(401).json({
         error: "Invalid or expired session. Please login again.",
-        code: "SESSION_EXPIRED"
+        code: "SESSION_EXPIRED",
       });
     }
-    
+
     // Verify this is a temporary 2FA token
     if (!decoded.tempAuth || decoded.purpose !== "2fa_verification") {
-      return res.status(401).json({ 
+      return res.status(401).json({
         error: "Invalid verification session",
-        code: "INVALID_SESSION"
+        code: "INVALID_SESSION",
       });
     }
-    
+
     const userId = decoded.userId;
-    
+
     // Step 2: Check OTP attempts limit
     const attemptsKey = `${ip}:${userId}`;
-    const attempts = twoFactorAttempts.get(attemptsKey) || { count: 0, firstAttempt: Date.now() };
-    
+    const attempts = twoFactorAttempts.get(attemptsKey) || {
+      count: 0,
+      firstAttempt: Date.now(),
+    };
+
     // Reset attempts after 15 minutes
     if (Date.now() - attempts.firstAttempt > 15 * 60 * 1000) {
       attempts.count = 0;
       attempts.firstAttempt = Date.now();
     }
-    
+
     if (attempts.count >= 5) {
       return res.status(429).json({
         error: "Too many incorrect OTP attempts. Please login again.",
-        code: "TOO_MANY_ATTEMPTS"
+        code: "TOO_MANY_ATTEMPTS",
       });
     }
-    
+
     // Step 3: Verify OTP
     const { data: otpRecord, error: otpError } = await supabase
       .from("otps")
@@ -2516,53 +2512,53 @@ app.post("/api/auth/verify-2fa", async (req, res) => {
       .eq("otp_type", "login_2fa")
       .eq("is_used", false)
       .single();
-    
+
     if (otpError || !otpRecord) {
       // Increment failed attempts
       attempts.count++;
       twoFactorAttempts.set(attemptsKey, attempts);
-      
+
       const remaining = 5 - attempts.count;
       return res.status(401).json({
         error: "Invalid verification code",
         attempts_remaining: remaining,
-        code: "INVALID_OTP"
+        code: "INVALID_OTP",
       });
     }
-    
+
     // Check expiry
     if (new Date(otpRecord.expires_at) < new Date()) {
       return res.status(401).json({
         error: "Verification code has expired. Please login again.",
-        code: "OTP_EXPIRED"
+        code: "OTP_EXPIRED",
       });
     }
-    
+
     // Step 4: Mark OTP as used
     await supabase
       .from("otps")
       .update({ is_used: true })
       .eq("id", otpRecord.id);
-    
+
     // Step 5: Clear failed attempts on success
     twoFactorAttempts.delete(attemptsKey);
-    
+
     // Step 6: Get fresh user data
     const { data: user, error: userError } = await supabase
       .from("users")
       .select("*")
       .eq("id", userId)
       .single();
-    
+
     if (userError || !user) {
       return res.status(404).json({ error: "User not found" });
     }
-    
+
     // Step 7: CREATE FULL SESSION (same as successful login)
     const deviceInfo = getDeviceInfo(req);
     const sessionVersion = Math.floor(Date.now() / 1000);
     const sessionId = generateSessionId();
-    
+
     const token = jwt.sign(
       {
         userId: user.id,
@@ -2573,19 +2569,19 @@ app.post("/api/auth/verify-2fa", async (req, res) => {
         issuedAt: Date.now(),
       },
       process.env.JWT_SECRET,
-      { expiresIn: process.env.JWT_EXPIRE || "7d" }
+      { expiresIn: process.env.JWT_EXPIRE || "7d" },
     );
-    
+
     const expiresAt = new Date();
     expiresAt.setDate(expiresAt.getDate() + 7);
-    
+
     // Get existing sessions to invalidate
     const { data: existingSessions } = await supabase
       .from("user_sessions")
       .select("id, session_id, device_name")
       .eq("user_id", user.id)
       .eq("is_active", true);
-    
+
     // Insert new session
     await supabase.from("user_sessions").insert({
       user_id: user.id,
@@ -2602,7 +2598,7 @@ app.post("/api/auth/verify-2fa", async (req, res) => {
       created_at: new Date().toISOString(),
       last_activity: new Date().toISOString(),
     });
-    
+
     // Update user record
     await supabase
       .from("users")
@@ -2614,7 +2610,7 @@ app.post("/api/auth/verify-2fa", async (req, res) => {
         session_version: sessionVersion,
       })
       .eq("id", user.id);
-    
+
     // Invalidate old sessions
     if (existingSessions && existingSessions.length > 0) {
       await supabase
@@ -2625,27 +2621,42 @@ app.post("/api/auth/verify-2fa", async (req, res) => {
           invalidated_reason: `New 2FA login from ${deviceInfo.device_name}`,
           expires_at: new Date().toISOString(),
         })
-        .in("id", existingSessions.map(s => s.id));
-      
+        .in(
+          "id",
+          existingSessions.map((s) => s.id),
+        );
+
       // Send notifications
       for (const oldSession of existingSessions) {
-        await supabase.from("notifications").insert({
+        /*await supabase.from("notifications").insert({
           user_id: user.id,
           title: "New Device Login (2FA)",
           message: `Your account was accessed via 2FA from: ${deviceInfo.device_name}. Your session on ${oldSession.device_name || "another device"} was terminated.`,
           type: "security",
           created_at: new Date().toISOString(),
-        }).catch(e => console.error("Notification error:", e));
+        }).catch(e => console.error("Notification error:", e));*/
+        try {
+          await supabase.from("notifications").insert({
+            user_id: user.id,
+            title: "New Device Login",
+            message: `Your account was accessed from: ${deviceInfo.device_name}. Your session on ${oldSession.device_name || "another device"} was terminated.`,
+            type: "security",
+            created_at: new Date().toISOString(),
+          });
+        } catch (err) {
+          console.error("Notification error:", err);
+          // Don't throw - notification failure shouldn't break login
+        }
       }
     }
-    
+
     // Log successful 2FA verification
     await logSecurityEvent(user.id, "successful_2fa_verification", {
       ip,
       device: deviceInfo.device_name,
       session_id: sessionId,
     });
-    
+
     // Return full login response
     res.json({
       token,
@@ -2676,35 +2687,35 @@ app.post("/api/auth/verify-2fa", async (req, res) => {
 app.post("/api/auth/resend-2fa-otp", async (req, res) => {
   try {
     const { tempToken } = req.body;
-    
+
     // Verify temporary token
     let decoded;
     try {
       decoded = jwt.verify(tempToken, process.env.JWT_SECRET);
     } catch (err) {
-      return res.status(401).json({ 
+      return res.status(401).json({
         error: "Invalid session. Please login again.",
-        code: "SESSION_EXPIRED"
+        code: "SESSION_EXPIRED",
       });
     }
-    
+
     if (!decoded.tempAuth || decoded.purpose !== "2fa_verification") {
       return res.status(401).json({ error: "Invalid verification session" });
     }
-    
+
     const userId = decoded.userId;
-    
+
     // Get user email
     const { data: user } = await supabase
       .from("users")
       .select("email")
       .eq("id", userId)
       .single();
-    
+
     if (!user) {
       return res.status(404).json({ error: "User not found" });
     }
-    
+
     // Invalidate old OTPs
     await supabase
       .from("otps")
@@ -2712,11 +2723,11 @@ app.post("/api/auth/resend-2fa-otp", async (req, res) => {
       .eq("user_id", userId)
       .eq("otp_type", "login_2fa")
       .eq("is_used", false);
-    
+
     // Generate new OTP
     const otpCode = Math.floor(100000 + Math.random() * 900000).toString();
     const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
-    
+
     await supabase.from("otps").insert({
       user_id: userId,
       otp_code: otpCode,
@@ -2724,9 +2735,9 @@ app.post("/api/auth/resend-2fa-otp", async (req, res) => {
       expires_at: expiresAt,
       is_used: false,
     });
-    
+
     await sendOTPEmail(user.email, otpCode, "2fa");
-    
+
     res.json({ success: true, message: "New code sent to your email" });
   } catch (error) {
     console.error("Resend 2FA OTP error:", error);
@@ -2766,7 +2777,6 @@ app.post("/api/user/logout", authenticate, async (req, res) => {
 });
 
 // ==================== SESSION MANAGEMENT ENDPOINTS ====================
-
 
 // In index.js - Update the check-session endpoint
 
