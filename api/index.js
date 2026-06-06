@@ -2245,6 +2245,53 @@ app.post("/api/auth/login", authLimiter, async (req, res) => {
   }
 });
 
+// ==================== THEME PREFERENCE ROUTES ====================
+
+// Get user's theme preference
+app.get("/api/user/theme", authenticate, async (req, res) => {
+    try {
+        const { data: user, error } = await supabase
+            .from("users")
+            .select("theme_preference")
+            .eq("id", req.user.id)
+            .single();
+        
+        if (error) throw error;
+        
+        res.json({ theme_preference: user?.theme_preference || 'system' });
+    } catch (error) {
+        console.error("Get theme error:", error);
+        res.json({ theme_preference: 'system' });
+    }
+});
+
+// Update user's theme preference
+app.put("/api/user/theme", authenticate, async (req, res) => {
+    try {
+        const { theme_preference } = req.body;
+        
+        if (!['light', 'dark', 'system'].includes(theme_preference)) {
+            return res.status(400).json({ error: "Invalid theme preference" });
+        }
+        
+        const { error } = await supabase
+            .from("users")
+            .update({ 
+                theme_preference: theme_preference,
+                updated_at: new Date().toISOString()
+            })
+            .eq("id", req.user.id);
+        
+        if (error) throw error;
+        
+        res.json({ success: true, theme_preference });
+    } catch (error) {
+        console.error("Update theme error:", error);
+        res.status(500).json({ error: "Failed to update theme preference" });
+    }
+});
+
+
 // ==================== TWO-FACTOR AUTHENTICATION ROUTES ====================
 
 // Get 2FA status
@@ -6854,51 +6901,6 @@ app.get("/api/accounts/recipient", authenticate, async (req, res) => {
   }
 });
 
-// ==================== THEME PREFERENCE ROUTES ====================
-
-// Get user's theme preference
-app.get("/api/user/theme", authenticate, async (req, res) => {
-    try {
-        const { data: user, error } = await supabase
-            .from("users")
-            .select("theme_preference")
-            .eq("id", req.user.id)
-            .single();
-        
-        if (error) throw error;
-        
-        res.json({ theme_preference: user?.theme_preference || 'system' });
-    } catch (error) {
-        console.error("Get theme error:", error);
-        res.json({ theme_preference: 'system' });
-    }
-});
-
-// Update user's theme preference
-app.put("/api/user/theme", authenticate, async (req, res) => {
-    try {
-        const { theme_preference } = req.body;
-        
-        if (!['light', 'dark', 'system'].includes(theme_preference)) {
-            return res.status(400).json({ error: "Invalid theme preference" });
-        }
-        
-        const { error } = await supabase
-            .from("users")
-            .update({ 
-                theme_preference: theme_preference,
-                updated_at: new Date().toISOString()
-            })
-            .eq("id", req.user.id);
-        
-        if (error) throw error;
-        
-        res.json({ success: true, theme_preference });
-    } catch (error) {
-        console.error("Update theme error:", error);
-        res.status(500).json({ error: "Failed to update theme preference" });
-    }
-});
 
 // Get available fintech providers
 app.get("/api/external/providers", authenticate, async (req, res) => {
