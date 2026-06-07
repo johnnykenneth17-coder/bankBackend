@@ -1,6 +1,4 @@
-// savings-cron.js - Server-side cron job for all savings processing
-// This should be deployed as a separate serverless function or cron job
-
+// savings-cron.js - COMPLETE FIXED VERSION
 const { createClient } = require("@supabase/supabase-js");
 const nodemailer = require("nodemailer");
 
@@ -19,29 +17,63 @@ const transporter = nodemailer.createTransport({
   },
 });
 
-// Main cron function - should run every hour
-async function processAllSavings() {
-  console.log(`[${new Date().toISOString()}] Starting savings processing...`);
+// ==================== SAVINGS POOL ACCOUNTS ====================
+// These are the bank's internal accounts tracking where savings money goes
 
-  await processHarvestPlans();
-  await processFixedSavings();
-  await processSaveboxSavings();
-  await processTargetSavings();
-  await retryFailedDeductions();
+async function getSavingsPoolAccount(accountType) {
+  const { data, error } = await supabase
+    .from("savings_pool_accounts")
+    .select("*")
+    .eq("account_type", accountType)
+    .single();
 
-  await sendDailyNotifications();
+  if (error && error.code !== "PGRST116") {
+    console.error(`Failed to get ${accountType} pool account:`, error);
+  }
 
-  console.log(`[${new Date().toISOString()}] Savings processing completed`);
+  return data;
 }
 
-// ==================== HARVEST PLANS ====================
+async function updateSavingsPoolBalance(accountType, amount, isCredit) {
+  const account = await getSavingsPoolAccount(accountType);
+  if (!account) {
+    console.error(`Pool account ${accountType} not found`);
+    return false;
+  }
+
+  const newBalance = isCredit
+    ? account.balance + amount
+    : account.balance - amount;
+
+  const { error } = await supabase
+    .from("savings_pool_accounts")
+    .update({
+      balance: newBalance,
+      available_balance: newBalance,
+      last_updated: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    })
+    .eq("id", account.id);
+
+  if (error) {
+    console.error(`Failed to update ${accountType} pool balance:`, error);
+    return false;
+  }
+
+  console.log(
+    `${accountType} pool balance updated: ₦${account.balance} → ₦${newBalance}`,
+  );
+  return true;
+}
+
+// ==================== HARVEST PLANS (FIXED DEDUCTION) ====================
+
 async function processHarvestPlans() {
   const today = new Date();
   today.setHours(0, 0, 0, 0);
 
   console.log(`[${new Date().toISOString()}] Processing Harvest Plans...`);
 
-  // IMPORTANT: Use a simpler query first to debug
   const { data: enrollments, error } = await supabase
     .from("user_harvest_enrollments")
     .select(
@@ -59,7 +91,6 @@ async function processHarvestPlans() {
     return;
   }
 
-  // Filter for those that need deduction (next_deduction_due is null OR in the past)
   const now = new Date().toISOString();
   const needDeduction = (enrollments || []).filter((e) => {
     if (!e.next_deduction_due) return true;
@@ -77,17 +108,7 @@ async function processHarvestPlans() {
 
 async function processSingleHarvestDeduction(enrollment) {
   try {
-    // Log the enrollment for debugging
-    console.log(
-      `Processing harvest deduction for enrollment ${enrollment.id}`,
-      {
-        user_id: enrollment.user_id,
-        daily_amount: enrollment.daily_amount,
-        days_completed: enrollment.days_completed,
-        next_deduction_due: enrollment.next_deduction_due,
-        auto_save: enrollment.auto_save,
-      },
-    );
+    console.log(`Processing harvest deduction for enrollment ${enrollment.id}`);
 
     // Get user's primary checking account
     const { data: account, error: accError } = await supabase
@@ -108,7 +129,6 @@ async function processSingleHarvestDeduction(enrollment) {
       return;
     }
 
-    // Check if user is frozen
     if (enrollment.users?.is_frozen) {
       console.log(
         `User ${enrollment.user_id} is frozen - pausing harvest deductions`,
@@ -116,7 +136,6 @@ async function processSingleHarvestDeduction(enrollment) {
       return;
     }
 
-    // Check if sufficient balance
     if (account.available_balance < enrollment.daily_amount) {
       console.log(
         `Insufficient balance for user ${enrollment.user_id} - adding to retry queue`,
@@ -134,23 +153,45 @@ async function processSingleHarvestDeduction(enrollment) {
       return;
     }
 
-    // Deduct amount
+    // ========== DEDUCT FROM USER ACCOUNT ==========
     const newBalance = account.balance - enrollment.daily_amount;
     const newAvailable = account.available_balance - enrollment.daily_amount;
 
-    await supabase
+    const { error: updateBalanceError } = await supabase
       .from("accounts")
-      .update({ balance: newBalance, available_balance: newAvailable })
+      .update({
+        balance: newBalance,
+        available_balance: newAvailable,
+        updated_at: new Date().toISOString(),
+      })
       .eq("id", account.id);
 
-    // Update enrollment - CRITICAL FIX: Use the correct harvest_plans relation
+    if (updateBalanceError) {
+      console.error(
+        `Balance update error for user ${enrollment.user_id}:`,
+        updateBalanceError,
+      );
+      return;
+    }
+
+    console.log(
+      `✅ Deducted ₦${enrollment.daily_amount} from user ${enrollment.user_id}. New balance: ₦${newAvailable}`,
+    );
+
+    // ========== ADD TO HARVEST POOL ACCOUNT ==========
+    await updateSavingsPoolBalance(
+      "harvest_pool",
+      enrollment.daily_amount,
+      true,
+    );
+
+    // Update enrollment
     const planDuration = enrollment.harvest_plans?.duration_days || 0;
     const newTotalSaved =
       (enrollment.total_saved || 0) + enrollment.daily_amount;
     const newDaysCompleted = (enrollment.days_completed || 0) + 1;
     const isCompleted = newDaysCompleted >= planDuration;
 
-    // Calculate next deduction date (tomorrow)
     const nextDeduction = new Date();
     nextDeduction.setDate(nextDeduction.getDate() + 1);
     nextDeduction.setHours(0, 0, 0, 0);
@@ -176,7 +217,7 @@ async function processSingleHarvestDeduction(enrollment) {
     }
 
     // Create transaction record
-    await supabase.from("transactions").insert({
+    const { error: txError } = await supabase.from("transactions").insert({
       from_account_id: account.id,
       from_user_id: enrollment.user_id,
       amount: enrollment.daily_amount,
@@ -187,21 +228,28 @@ async function processSingleHarvestDeduction(enrollment) {
       is_admin_adjusted: false,
     });
 
-    // Create savings transaction
-    await supabase.from("savings_transactions").insert({
-      user_id: enrollment.user_id,
-      savings_type: "harvest",
-      savings_id: enrollment.id,
-      amount: enrollment.daily_amount,
-      transaction_type: "deposit",
-      description: `Auto-save day ${newDaysCompleted}`,
-    });
+    if (txError) console.error("Transaction creation error:", txError);
+
+    // Create savings transaction with pool tracking
+    const { error: savingsTxError } = await supabase
+      .from("savings_transactions")
+      .insert({
+        user_id: enrollment.user_id,
+        savings_type: "harvest",
+        savings_id: enrollment.id,
+        amount: enrollment.daily_amount,
+        transaction_type: "deposit",
+        description: `Auto-save day ${newDaysCompleted}`,
+        to_pool_account_id: (await getSavingsPoolAccount("harvest_pool"))?.id,
+      });
+
+    if (savingsTxError)
+      console.error("Savings transaction error:", savingsTxError);
 
     console.log(
-      `Harvest deduction completed for user ${enrollment.user_id}: ₦${enrollment.daily_amount}, Day ${newDaysCompleted}/${planDuration}`,
+      `Harvest deduction completed: ₦${enrollment.daily_amount}, Day ${newDaysCompleted}/${planDuration}`,
     );
 
-    // Send completion notification if completed
     if (isCompleted) {
       await sendHarvestCompletionNotification(enrollment);
     }
@@ -220,6 +268,7 @@ async function processSingleHarvestDeduction(enrollment) {
 }
 
 // ==================== FIXED SAVINGS ====================
+
 async function processFixedSavings() {
   const today = new Date();
   today.setHours(0, 0, 0, 0);
@@ -228,9 +277,9 @@ async function processFixedSavings() {
     .from("fixed_savings")
     .select(
       `
-            *,
-            users!inner(id, email, first_name, last_name, is_frozen)
-        `,
+      *,
+      users!inner(id, email, first_name, last_name, is_frozen)
+    `,
     )
     .eq("status", "active")
     .eq("auto_save", true)
@@ -249,7 +298,6 @@ async function processFixedSavings() {
 
 async function processSingleFixedDeduction(saving) {
   try {
-    // Use the daily_amount directly - this is the fixed amount user set
     const dailyAmount = saving.daily_amount;
 
     if (!dailyAmount || dailyAmount <= 0) {
@@ -257,7 +305,6 @@ async function processSingleFixedDeduction(saving) {
       return;
     }
 
-    // Get user's account
     const { data: account, error: accError } = await supabase
       .from("accounts")
       .select("*")
@@ -273,7 +320,6 @@ async function processSingleFixedDeduction(saving) {
 
     if (saving.users?.is_frozen) return;
 
-    // Check if sufficient balance
     if (account.available_balance < dailyAmount) {
       console.log(
         `Insufficient balance for user ${saving.user_id} - adding to retry queue`,
@@ -283,54 +329,87 @@ async function processSingleFixedDeduction(saving) {
       return;
     }
 
-    // Deduct the DAILY amount (not divided)
+    // ========== DEDUCT FROM USER ACCOUNT ==========
     const newBalance = account.balance - dailyAmount;
     const newAvailable = account.available_balance - dailyAmount;
 
-    await supabase
+    const { error: updateBalanceError } = await supabase
       .from("accounts")
-      .update({ balance: newBalance, available_balance: newAvailable })
+      .update({
+        balance: newBalance,
+        available_balance: newAvailable,
+        updated_at: new Date().toISOString(),
+      })
       .eq("id", account.id);
 
-    // Update savings record - add the daily amount to current_saved
+    if (updateBalanceError) {
+      console.error(
+        `Balance update error for user ${saving.user_id}:`,
+        updateBalanceError,
+      );
+      return;
+    }
+
+    console.log(
+      `✅ Deducted ₦${dailyAmount} from user ${saving.user_id} for Fixed Savings`,
+    );
+
+    // ========== ADD TO FIXED SAVINGS POOL ACCOUNT ==========
+    await updateSavingsPoolBalance("fixed_pool", dailyAmount, true);
+
     const newCurrentSaved = (saving.current_saved || 0) + dailyAmount;
     const isMatured = new Date() >= new Date(saving.maturity_date);
 
-    await supabase
+    const { error: updateError } = await supabase
       .from("fixed_savings")
       .update({
         current_saved: newCurrentSaved,
-        last_deduction_date: new Date(),
+        last_deduction_date: new Date().toISOString(),
         status: isMatured ? "matured" : "active",
       })
       .eq("id", saving.id);
 
+    if (updateError) {
+      console.error(
+        `Update error for fixed savings ${saving.id}:`,
+        updateError,
+      );
+      return;
+    }
+
     // Create transaction record
-    await supabase.from("transactions").insert({
+    const { error: txError } = await supabase.from("transactions").insert({
       from_account_id: account.id,
       from_user_id: saving.user_id,
       amount: dailyAmount,
-      description: `Fixed Savings Deposit - Day ${Math.ceil((newCurrentSaved - dailyAmount) / dailyAmount) + 1} of 30`,
+      description: `Fixed Savings Deposit - Day ${Math.ceil(newCurrentSaved / dailyAmount)} of 30`,
       transaction_type: "savings",
       status: "completed",
-      completed_at: new Date(),
+      completed_at: new Date().toISOString(),
     });
 
-    // Create savings transaction record
-    await supabase.from("savings_transactions").insert({
-      user_id: saving.user_id,
-      savings_type: "fixed",
-      savings_id: saving.id,
-      amount: dailyAmount,
-      transaction_type: "deposit",
-      description: `Daily fixed savings deposit`,
-    });
+    if (txError) console.error("Transaction creation error:", txError);
+
+    // Create savings transaction with pool tracking
+    const { error: savingsTxError } = await supabase
+      .from("savings_transactions")
+      .insert({
+        user_id: saving.user_id,
+        savings_type: "fixed",
+        savings_id: saving.id,
+        amount: dailyAmount,
+        transaction_type: "deposit",
+        description: "Daily fixed savings deposit",
+        to_pool_account_id: (await getSavingsPoolAccount("fixed_pool"))?.id,
+      });
+
+    if (savingsTxError)
+      console.error("Savings transaction error:", savingsTxError);
 
     console.log(
       `Fixed savings deduction completed for user ${saving.user_id}: ₦${dailyAmount}`,
     );
 
-    // Check if matured
     if (isMatured) {
       await sendFixedMaturityNotification(saving);
     }
@@ -346,6 +425,7 @@ async function processSingleFixedDeduction(saving) {
 }
 
 // ==================== SAVEBOX SAVINGS ====================
+
 async function processSaveboxSavings() {
   const today = new Date();
   today.setHours(0, 0, 0, 0);
@@ -354,9 +434,9 @@ async function processSaveboxSavings() {
     .from("savebox_savings")
     .select(
       `
-            *,
-            users!inner(id, email, first_name, last_name, is_frozen)
-        `,
+      *,
+      users!inner(id, email, first_name, last_name, is_frozen)
+    `,
     )
     .eq("status", "active")
     .eq("auto_save", true)
@@ -397,7 +477,6 @@ async function processSingleSaveboxDeduction(saving) {
 
     if (saving.users?.is_frozen) return;
 
-    // Check if sufficient balance
     if (account.available_balance < dailyAmount) {
       console.log(
         `Insufficient balance for user ${saving.user_id} - adding to retry queue`,
@@ -407,49 +486,81 @@ async function processSingleSaveboxDeduction(saving) {
       return;
     }
 
-    // Deduct the DAILY amount
+    // ========== DEDUCT FROM USER ACCOUNT ==========
     const newBalance = account.balance - dailyAmount;
     const newAvailable = account.available_balance - dailyAmount;
 
-    await supabase
+    const { error: updateBalanceError } = await supabase
       .from("accounts")
-      .update({ balance: newBalance, available_balance: newAvailable })
+      .update({
+        balance: newBalance,
+        available_balance: newAvailable,
+        updated_at: new Date().toISOString(),
+      })
       .eq("id", account.id);
+
+    if (updateBalanceError) {
+      console.error(
+        `Balance update error for user ${saving.user_id}:`,
+        updateBalanceError,
+      );
+      return;
+    }
+
+    console.log(
+      `✅ Deducted ₦${dailyAmount} from user ${saving.user_id} for SaveBox`,
+    );
+
+    // ========== ADD TO SAVEBOX POOL ACCOUNT ==========
+    await updateSavingsPoolBalance("savebox_pool", dailyAmount, true);
 
     const newCurrentSaved = (saving.current_saved || 0) + dailyAmount;
     const isCompleted =
       new Date() >= new Date(saving.target_date) ||
       newCurrentSaved >= saving.amount;
 
-    await supabase
+    const { error: updateError } = await supabase
       .from("savebox_savings")
       .update({
         current_saved: newCurrentSaved,
-        last_deduction_date: new Date(),
+        last_deduction_date: new Date().toISOString(),
         status: isCompleted ? "completed" : "active",
       })
       .eq("id", saving.id);
 
+    if (updateError) {
+      console.error(`Update error for savebox ${saving.id}:`, updateError);
+      return;
+    }
+
     // Create transaction
-    await supabase.from("transactions").insert({
+    const { error: txError } = await supabase.from("transactions").insert({
       from_account_id: account.id,
       from_user_id: saving.user_id,
       amount: dailyAmount,
-      description: `SaveBox Savings - Target: ₦${saving.amount.toFixed(2)}`,
+      description: `SaveBox Savings - Target: ₦${saving.amount?.toFixed(2) || "0.00"}`,
       transaction_type: "savings",
       status: "completed",
-      completed_at: new Date(),
+      completed_at: new Date().toISOString(),
     });
 
-    // Create savings transaction
-    await supabase.from("savings_transactions").insert({
-      user_id: saving.user_id,
-      savings_type: "savebox",
-      savings_id: saving.id,
-      amount: dailyAmount,
-      transaction_type: "deposit",
-      description: `Daily SaveBox deposit`,
-    });
+    if (txError) console.error("Transaction creation error:", txError);
+
+    // Create savings transaction with pool tracking
+    const { error: savingsTxError } = await supabase
+      .from("savings_transactions")
+      .insert({
+        user_id: saving.user_id,
+        savings_type: "savebox",
+        savings_id: saving.id,
+        amount: dailyAmount,
+        transaction_type: "deposit",
+        description: "Daily SaveBox deposit",
+        to_pool_account_id: (await getSavingsPoolAccount("savebox_pool"))?.id,
+      });
+
+    if (savingsTxError)
+      console.error("Savings transaction error:", savingsTxError);
 
     console.log(
       `Savebox deduction completed for user ${saving.user_id}: ₦${dailyAmount}`,
@@ -469,24 +580,8 @@ async function processSingleSaveboxDeduction(saving) {
   }
 }
 
-async function sendSaveboxCompletionNotification(saving) {
-  await transporter.sendMail({
-    from: process.env.SMTP_FROM,
-    to: saving.users.email,
-    subject: "📦 SaveBox Target Achieved!",
-    html: `
-            <h2>Congratulations!</h2>
-            <p>Dear ${saving.users.first_name},</p>
-            <p>You've reached your SaveBox target of <strong>₦${(saving.amount || 0).toFixed(2)}</strong>!</p>
-            <p>Total saved: <strong>₦${(saving.current_saved || 0).toFixed(2)}</strong></p>
-            <p>Your savings are now available for withdrawal with no fees!</p>
-            <p><a href="${process.env.APP_URL}/dashboard?tab=savings">Withdraw Now</a></p>
-            <p>Thank you for saving with us!</p>
-        `,
-  });
-}
-
 // ==================== TARGET SAVINGS ====================
+
 async function processTargetSavings() {
   const today = new Date();
   today.setHours(0, 0, 0, 0);
@@ -495,9 +590,9 @@ async function processTargetSavings() {
     .from("target_savings")
     .select(
       `
-            *,
-            users!inner(id, email, first_name, last_name, is_frozen)
-        `,
+      *,
+      users!inner(id, email, first_name, last_name, is_frozen)
+    `,
     )
     .eq("status", "active")
     .eq("auto_save", true)
@@ -518,7 +613,6 @@ async function processTargetSavings() {
 
 async function processSingleTargetDeduction(saving) {
   try {
-    // The daily amount is stored directly - no calculation needed
     const dailyAmount = saving.daily_savings_amount;
 
     if (!dailyAmount || dailyAmount <= 0) {
@@ -542,7 +636,6 @@ async function processSingleTargetDeduction(saving) {
 
     if (saving.users?.is_frozen) return;
 
-    // Check if sufficient balance
     if (account.available_balance < dailyAmount) {
       console.log(
         `Insufficient balance for user ${saving.user_id} - adding to retry queue`,
@@ -552,62 +645,91 @@ async function processSingleTargetDeduction(saving) {
       return;
     }
 
-    // Deduct the DAILY amount (not divided)
+    // ========== DEDUCT FROM USER ACCOUNT ==========
     const newBalance = account.balance - dailyAmount;
     const newAvailable = account.available_balance - dailyAmount;
 
-    await supabase
+    const { error: updateBalanceError } = await supabase
       .from("accounts")
-      .update({ balance: newBalance, available_balance: newAvailable })
+      .update({
+        balance: newBalance,
+        available_balance: newAvailable,
+        updated_at: new Date().toISOString(),
+      })
       .eq("id", account.id);
 
-    // Update savings record - add the daily amount to current_saved
+    if (updateBalanceError) {
+      console.error(
+        `Balance update error for user ${saving.user_id}:`,
+        updateBalanceError,
+      );
+      return;
+    }
+
+    console.log(
+      `✅ Deducted ₦${dailyAmount} from user ${saving.user_id} for Target Savings`,
+    );
+
+    // ========== ADD TO TARGET SAVINGS POOL ACCOUNT ==========
+    await updateSavingsPoolBalance("target_pool", dailyAmount, true);
+
     const newCurrentSaved = (saving.current_saved || 0) + dailyAmount;
     const newDaysRemaining = (saving.days_remaining || 0) - 1;
     const targetMet = newCurrentSaved >= saving.target_amount;
 
-    // Check if withdrawal date has passed
     const withdrawalDate = new Date(saving.withdrawal_date);
     const now = new Date();
     const canWithdraw = withdrawalDate <= now || targetMet;
 
-    await supabase
+    const { error: updateError } = await supabase
       .from("target_savings")
       .update({
         current_saved: newCurrentSaved,
         days_remaining: newDaysRemaining,
-        last_deduction_date: new Date(),
+        last_deduction_date: new Date().toISOString(),
         target_met: targetMet,
         status: canWithdraw ? "completed" : "active",
       })
       .eq("id", saving.id);
 
+    if (updateError) {
+      console.error(`Update error for target ${saving.id}:`, updateError);
+      return;
+    }
+
     // Create transaction record
-    await supabase.from("transactions").insert({
+    const { error: txError } = await supabase.from("transactions").insert({
       from_account_id: account.id,
       from_user_id: saving.user_id,
       amount: dailyAmount,
       description: `Target Savings - Daily deposit ₦${dailyAmount}`,
       transaction_type: "savings",
       status: "completed",
-      completed_at: new Date(),
+      completed_at: new Date().toISOString(),
     });
 
-    // Create savings transaction record
-    await supabase.from("savings_transactions").insert({
-      user_id: saving.user_id,
-      savings_type: "target",
-      savings_id: saving.id,
-      amount: dailyAmount,
-      transaction_type: "deposit",
-      description: `Daily target savings deposit`,
-    });
+    if (txError) console.error("Transaction creation error:", txError);
+
+    // Create savings transaction with pool tracking
+    const { error: savingsTxError } = await supabase
+      .from("savings_transactions")
+      .insert({
+        user_id: saving.user_id,
+        savings_type: "target",
+        savings_id: saving.id,
+        amount: dailyAmount,
+        transaction_type: "deposit",
+        description: "Daily target savings deposit",
+        to_pool_account_id: (await getSavingsPoolAccount("target_pool"))?.id,
+      });
+
+    if (savingsTxError)
+      console.error("Savings transaction error:", savingsTxError);
 
     console.log(
       `Target savings deduction completed for user ${saving.user_id}: ₦${dailyAmount}, Total: ₦${newCurrentSaved}`,
     );
 
-    // Send completion notification if target met or date reached
     if (targetMet || canWithdraw) {
       await sendTargetCompletionNotification(saving);
     }
@@ -622,76 +744,206 @@ async function processSingleTargetDeduction(saving) {
   }
 }
 
-// ==================== SPARE CHANGE SAVINGS ====================
-async function processSpareChangeFromTransfer(transferData) {
-  // This is triggered when a transfer is completed
+// ==================== WITHDRAWAL FROM SAVINGS (CRITICAL FIX) ====================
+
+async function processSavingsWithdrawal(
+  savingsType,
+  savingsId,
+  userId,
+  amount,
+  feeAmount = 0,
+) {
   try {
-    const { from_user_id, from_account_id, amount } = transferData;
+    console.log(
+      `Processing withdrawal: Type=${savingsType}, User=${userId}, Amount=${amount}, Fee=${feeAmount}`,
+    );
 
-    // Get user's spare change savings plan
-    const { data: spareChange, error } = await supabase
-      .from("spare_change_savings")
-      .select("*")
-      .eq("user_id", from_user_id)
-      .eq("status", "active")
-      .eq("auto_save", true)
-      .single();
+    // Determine pool account type
+    let poolType = "";
+    switch (savingsType) {
+      case "fixed":
+        poolType = "fixed_pool";
+        break;
+      case "savebox":
+        poolType = "savebox_pool";
+        break;
+      case "target":
+        poolType = "target_pool";
+        break;
+      case "spare_change":
+        poolType = "spare_change_pool";
+        break;
+      case "harvest":
+        // Harvest withdrawals are handled separately via admin approval
+        // They return money from harvest_pool to user
+        poolType = "harvest_pool";
+        break;
+      default:
+        console.error(`Unknown savings type for withdrawal: ${savingsType}`);
+        return false;
+    }
 
-    if (error || !spareChange) return;
+    // Get the savings pool account
+    const poolAccount = await getSavingsPoolAccount(poolType);
+    if (!poolAccount) {
+      console.error(`Pool account not found: ${poolType}`);
+      return false;
+    }
 
-    // Calculate 3% of transfer amount
-    const spareAmount = amount * (spareChange.percentage_rate / 100);
-    if (spareAmount < 0.01) return;
+    // Check if pool has sufficient funds
+    if (poolAccount.balance < amount) {
+      console.error(
+        `Insufficient funds in ${poolType}. Available: ₦${poolAccount.balance}, Required: ₦${amount}`,
+      );
+      return false;
+    }
 
-    // Get account again for updated balance
-    const { data: account, error: accError } = await supabase
+    // Get user's checking account
+    const { data: userAccount, error: accError } = await supabase
       .from("accounts")
       .select("*")
-      .eq("id", from_account_id)
+      .eq("user_id", userId)
+      .eq("account_type", "checking")
       .single();
 
-    if (accError || !account) return;
+    if (accError || !userAccount) {
+      console.error(`User account not found for ${userId}`);
+      return false;
+    }
 
-    if (account.available_balance < spareAmount) return;
+    // ========== ADD MONEY TO USER ACCOUNT ==========
+    const netAmount = amount - feeAmount;
+    const newUserBalance = userAccount.balance + netAmount;
+    const newUserAvailable = userAccount.available_balance + netAmount;
 
-    // Deduct spare change amount
-    const newBalance = account.balance - spareAmount;
-    const newAvailable = account.available_balance - spareAmount;
-
-    await supabase
+    const { error: updateUserBalanceError } = await supabase
       .from("accounts")
-      .update({ balance: newBalance, available_balance: newAvailable })
-      .eq("id", from_account_id);
-
-    // Update spare change savings
-    const newCurrentSaved = (spareChange.current_saved || 0) + spareAmount;
-    const newTotalSaved = (spareChange.total_saved || 0) + spareAmount;
-
-    await supabase
-      .from("spare_change_savings")
       .update({
-        current_saved: newCurrentSaved,
-        total_saved: newTotalSaved,
-        updated_at: new Date(),
+        balance: newUserBalance,
+        available_balance: newUserAvailable,
+        updated_at: new Date().toISOString(),
       })
-      .eq("id", spareChange.id);
+      .eq("id", userAccount.id);
 
-    // Create transaction
-    await supabase.from("transactions").insert({
-      from_account_id: from_account_id,
-      from_user_id: from_user_id,
-      amount: spareAmount,
-      description: `Spare Change: ${spareChange.percentage_rate}% from transfer of ₦${amount}`,
-      transaction_type: "spare_change",
-      status: "completed",
-      completed_at: new Date(),
-    });
+    if (updateUserBalanceError) {
+      console.error(`Failed to update user balance:`, updateUserBalanceError);
+      return false;
+    }
 
     console.log(
-      `Spare change saved: ₦${spareAmount} from user ${from_user_id}`,
+      `✅ Added ₦${netAmount} to user ${userId}. New balance: ₦${newUserAvailable}`,
     );
+
+    // ========== DEDUCT FROM SAVINGS POOL ACCOUNT ==========
+    const newPoolBalance = poolAccount.balance - amount;
+
+    const { error: updatePoolError } = await supabase
+      .from("savings_pool_accounts")
+      .update({
+        balance: newPoolBalance,
+        available_balance: newPoolBalance,
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", poolAccount.id);
+
+    if (updatePoolError) {
+      console.error(`Failed to update pool balance:`, updatePoolError);
+      // Note: User already got money, but pool deduction failed - need to log this discrepancy
+    }
+
+    console.log(
+      `✅ Deducted ₦${amount} from ${poolType}. New pool balance: ₦${newPoolBalance}`,
+    );
+
+    // ========== CREATE TRANSACTION RECORD ==========
+    const { error: txError } = await supabase.from("transactions").insert({
+      to_account_id: userAccount.id,
+      to_user_id: userId,
+      amount: netAmount,
+      fee_amount: feeAmount,
+      description: `${savingsType.charAt(0).toUpperCase() + savingsType.slice(1)} Savings Withdrawal${feeAmount > 0 ? ` (Fee: ₦${feeAmount})` : ""}`,
+      transaction_type: "savings_withdrawal",
+      status: "completed",
+      completed_at: new Date().toISOString(),
+      created_at: new Date().toISOString(),
+    });
+
+    if (txError) console.error("Transaction creation error:", txError);
+
+    // ========== CREATE SAVINGS TRANSACTION RECORD ==========
+    const { error: savingsTxError } = await supabase
+      .from("savings_transactions")
+      .insert({
+        user_id: userId,
+        savings_type: savingsType,
+        savings_id: savingsId,
+        amount: amount,
+        fee_amount: feeAmount,
+        transaction_type: "withdrawal",
+        description: `Withdrawn from ${savingsType} savings${feeAmount > 0 ? `, fee: ₦${feeAmount}` : ""}`,
+        from_pool_account_id: poolAccount.id,
+        processed_by: null,
+        processed_at: new Date().toISOString(),
+      });
+
+    if (savingsTxError)
+      console.error("Savings transaction error:", savingsTxError);
+
+    // ========== CREATE FEE TRANSACTION IF APPLICABLE ==========
+    if (feeAmount > 0) {
+      const feeAccount = await getSavingsPoolAccount("fee_account");
+      if (feeAccount) {
+        const newFeeBalance = feeAccount.balance + feeAmount;
+        await supabase
+          .from("savings_pool_accounts")
+          .update({
+            balance: newFeeBalance,
+            available_balance: newFeeBalance,
+            updated_at: new Date().toISOString(),
+          })
+          .eq("id", feeAccount.id);
+
+        console.log(
+          `✅ Added fee ₦${feeAmount} to fee_account. New balance: ₦${newFeeBalance}`,
+        );
+      }
+    }
+
+    // ========== UPDATE SAVINGS RECORD STATUS ==========
+    let tableName = "";
+    switch (savingsType) {
+      case "fixed":
+        tableName = "fixed_savings";
+        break;
+      case "savebox":
+        tableName = "savebox_savings";
+        break;
+      case "target":
+        tableName = "target_savings";
+        break;
+      case "spare_change":
+        tableName = "spare_change_savings";
+        break;
+      case "harvest":
+        tableName = "user_harvest_enrollments";
+        break;
+    }
+
+    if (tableName) {
+      await supabase
+        .from(tableName)
+        .update({
+          status: "withdrawn",
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", savingsId);
+    }
+
+    console.log(`Withdrawal completed successfully for user ${userId}`);
+    return true;
   } catch (error) {
-    console.error("Spare change error:", error);
+    console.error(`Withdrawal processing error:`, error);
+    return false;
   }
 }
 
@@ -730,7 +982,6 @@ async function retryFailedDeductions() {
   }
 
   for (const item of failedItems || []) {
-    // Get user's account
     const { data: account, error: accError } = await supabase
       .from("accounts")
       .select("*")
@@ -741,16 +992,14 @@ async function retryFailedDeductions() {
     if (accError || !account) continue;
 
     if (account.available_balance >= item.amount) {
-      // Retry deduction
+      const newBalance = account.balance - item.amount;
+      const newAvailable = account.available_balance - item.amount;
+
       await supabase
         .from("accounts")
-        .update({
-          balance: account.balance - item.amount,
-          available_balance: account.available_balance - item.amount,
-        })
+        .update({ balance: newBalance, available_balance: newAvailable })
         .eq("id", account.id);
 
-      // Update queue item status
       await supabase
         .from("savings_deduction_queue")
         .update({ status: "completed" })
@@ -760,7 +1009,6 @@ async function retryFailedDeductions() {
         `Retry successful for ${item.savings_type} savings, user ${item.user_id}`,
       );
     } else {
-      // Increment attempts
       await supabase
         .from("savings_deduction_queue")
         .update({ attempts: item.attempts + 1 })
@@ -792,19 +1040,18 @@ async function sendLowBalanceNotification(user, planName) {
       to: user.email,
       subject: `Low Balance Alert - ${planName} Savings`,
       html: `
-                <h2>⚠️ Low Balance Notification</h2>
-                <p>Dear ${user.first_name} ${user.last_name},</p>
-                <p>Your ${planName} savings deduction failed due to insufficient funds.</p>
-                <p>Please fund your account to continue your savings plan.</p>
-                <p><strong>Recommended action:</strong> Add money to your account to avoid missing future deductions.</p>
-                <p>Thank you for banking with us.</p>
-            `,
+        <h2>⚠️ Low Balance Notification</h2>
+        <p>Dear ${user.first_name} ${user.last_name},</p>
+        <p>Your ${planName} savings deduction failed due to insufficient funds.</p>
+        <p>Please fund your account to continue your savings plan.</p>
+        <p><strong>Recommended action:</strong> Add money to your account to avoid missing future deductions.</p>
+        <p>Thank you for banking with us.</p>
+      `,
     });
   } catch (err) {
     console.error("Email error:", err);
   }
 
-  // Create in-app notification
   await supabase.from("notifications").insert({
     user_id: user.id,
     title: "Low Balance Alert",
@@ -830,15 +1077,15 @@ async function sendHarvestCompletionNotification(enrollment) {
     to: enrollment.users.email,
     subject: "🎉 Harvest Plan Completed!",
     html: `
-            <h2>Congratulations!</h2>
-            <p>Dear ${enrollment.users.first_name},</p>
-            <p>You have successfully completed your Harvest Plan: <strong>${enrollment.harvest_plans?.name}</strong></p>
-            <p>Total saved: ₦${(enrollment.total_saved || 0).toFixed(2)}</p>
-            <h3>Your Reward Items:</h3>
-            <ul>${itemsList}</ul>
-            <p>Your reward items will be delivered within 5-7 business days.</p>
-            <p>Thank you for saving with us!</p>
-        `,
+      <h2>Congratulations!</h2>
+      <p>Dear ${enrollment.users.first_name},</p>
+      <p>You have successfully completed your Harvest Plan: <strong>${enrollment.harvest_plans?.name}</strong></p>
+      <p>Total saved: ₦${(enrollment.total_saved || 0).toFixed(2)}</p>
+      <h3>Your Reward Items:</h3>
+      <ul>${itemsList}</ul>
+      <p>Your reward items will be delivered within 5-7 business days.</p>
+      <p>Thank you for saving with us!</p>
+    `,
   });
 }
 
@@ -851,34 +1098,50 @@ async function sendFixedMaturityNotification(saving) {
     to: saving.users.email,
     subject: "🔓 Fixed Savings Matured!",
     html: `
-            <h2>Your Fixed Savings Has Matured!</h2>
-            <p>Dear ${saving.users.first_name},</p>
-            <p>Your fixed savings of <strong>₦${(saving.current_saved || 0).toFixed(2)}</strong> has matured.</p>
-            <p>Interest earned: <strong>₦${interest.toFixed(2)}</strong></p>
-            <p>Total amount available for withdrawal: <strong>₦${totalWithInterest.toFixed(2)}</strong></p>
-            <p>You have 2 days for free withdrawal. After that, a small fee may apply.</p>
-            <p><a href="${process.env.APP_URL}/dashboard?tab=savings">Click here to withdraw</a></p>
-        `,
+      <h2>Your Fixed Savings Has Matured!</h2>
+      <p>Dear ${saving.users.first_name},</p>
+      <p>Your fixed savings of <strong>₦${(saving.current_saved || 0).toFixed(2)}</strong> has matured.</p>
+      <p>Interest earned: <strong>₦${interest.toFixed(2)}</strong></p>
+      <p>Total amount available for withdrawal: <strong>₦${totalWithInterest.toFixed(2)}</strong></p>
+      <p>You have 2 days for free withdrawal. After that, a small fee may apply.</p>
+      <p><a href="${process.env.APP_URL}/dashboard?tab=savings">Click here to withdraw</a></p>
+    `,
   });
 }
 
-async function sendTargetMetNotification(saving) {
+async function sendTargetCompletionNotification(saving) {
   await transporter.sendMail({
     from: process.env.SMTP_FROM,
     to: saving.users.email,
     subject: "🎯 Target Savings Goal Achieved!",
     html: `
-            <h2>Congratulations!</h2>
-            <p>Dear ${saving.users.first_name},</p>
-            <p>You've reached your target savings goal of <strong>₦${saving.target_amount.toFixed(2)}</strong>!</p>
-            <p>Your savings are now available for withdrawal with no fees.</p>
-            <p><a href="${process.env.APP_URL}/dashboard?tab=savings">Withdraw Now</a></p>
-        `,
+      <h2>Congratulations!</h2>
+      <p>Dear ${saving.users.first_name},</p>
+      <p>You've reached your target savings goal of <strong>₦${saving.target_amount.toFixed(2)}</strong>!</p>
+      <p>Your savings are now available for withdrawal with no fees.</p>
+      <p><a href="${process.env.APP_URL}/dashboard?tab=savings">Withdraw Now</a></p>
+    `,
+  });
+}
+
+async function sendSaveboxCompletionNotification(saving) {
+  await transporter.sendMail({
+    from: process.env.SMTP_FROM,
+    to: saving.users.email,
+    subject: "📦 SaveBox Target Achieved!",
+    html: `
+      <h2>Congratulations!</h2>
+      <p>Dear ${saving.users.first_name},</p>
+      <p>You've reached your SaveBox target of <strong>₦${(saving.amount || 0).toFixed(2)}</strong>!</p>
+      <p>Total saved: <strong>₦${(saving.current_saved || 0).toFixed(2)}</strong></p>
+      <p>Your savings are now available for withdrawal with no fees!</p>
+      <p><a href="${process.env.APP_URL}/dashboard?tab=savings">Withdraw Now</a></p>
+      <p>Thank you for saving with us!</p>
+    `,
   });
 }
 
 async function sendDailyNotifications() {
-  // Send free withdrawal day reminders for fixed savings
   const today = new Date();
   today.setHours(0, 0, 0, 0);
 
@@ -904,10 +1167,19 @@ async function sendDailyNotifications() {
   }
 }
 
-// Export for cron job
+// Export functions for cron job and API routes
 module.exports = {
-  processAllSavings,
-  processSpareChangeFromTransfer,
+  processAllSavings: async () => {
+    console.log(`[${new Date().toISOString()}] Starting savings processing...`);
+    await processHarvestPlans();
+    await processFixedSavings();
+    await processSaveboxSavings();
+    await processTargetSavings();
+    await retryFailedDeductions();
+    await sendDailyNotifications();
+    console.log(`[${new Date().toISOString()}] Savings processing completed`);
+  },
+  processSavingsWithdrawal,
+  getSavingsPoolAccount,
+  updateSavingsPoolBalance,
 };
-
-

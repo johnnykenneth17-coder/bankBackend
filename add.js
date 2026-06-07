@@ -1,253 +1,189 @@
-// ==================== ENHANCED LIVE CHAT API (POLLING WITH UNREAD COUNTS) ====================
+// index.js - Update the harvest withdrawal approval endpoint
+app.post(
+  "/api/sys/harvest-withdrawal/:requestId/approve",
+  authenticate,
+  authorizeAdmin,
+  async (req, res) => {
+    const { requestId } = req.params;
 
-// IMPORTANT: Put SPECIFIC routes BEFORE parameterized routes
+    try {
+      console.log(`Admin ${req.user.id} approving withdrawal request ${requestId}`);
 
-// 1. Get unread counts (SPECIFIC route - no parameter)
-app.get("/api/sys/live-chat/unread-counts", authenticate, authorizeAdmin, async (req, res) => {
-  try {
-    console.log("[Chat] Getting unread counts");
-    
-    // Get unread counts per user
-    const { data: unreadData, error } = await supabase
-      .from("live_support_messages")
-      .select("user_id, status")
-      .eq("is_from_admin", false)
-      .eq("status", "sent");
-    
-    if (error) {
-      console.error("[Chat] Unread counts error:", error);
-      return res.status(500).json({ error: error.message });
-    }
-    
-    const unreadCounts = {};
-    for (const msg of unreadData || []) {
-      unreadCounts[msg.user_id] = (unreadCounts[msg.user_id] || 0) + 1;
-    }
-    
-    res.json({ unread_counts: unreadCounts });
-  } catch (error) {
-    console.error("Unread counts error:", error);
-    res.status(500).json({ error: "Failed to get unread counts" });
-  }
-});
+      // Get the request with all related data
+      const { data: request, error: fetchError } = await supabase
+        .from("harvest_withdrawal_requests")
+        .select(
+          `
+          *,
+          users:user_id (
+            id, 
+            email, 
+            first_name, 
+            last_name
+          ),
+          user_harvest_enrollments:enrollment_id (
+            id, 
+            total_saved,
+            user_id,
+            plan_id,
+            status
+          )
+        `,
+        )
+        .eq("id", requestId)
+        .single();
 
-// 2. Get conversation status (SPECIFIC route)
-app.get("/api/sys/live-chat/conversations/status", authenticate, authorizeAdmin, async (req, res) => {
-  try {
-    // Get last message times and unread counts for all users
-    const { data: lastMessages } = await supabase
-      .from("live_support_messages")
-      .select("user_id, created_at, is_from_admin")
-      .order("created_at", { ascending: false });
-    
-    const { data: unreadMessages } = await supabase
-      .from("live_support_messages")
-      .select("user_id")
-      .eq("is_from_admin", false)
-      .eq("status", "sent");
-    
-    const lastMessageTimes = {};
-    const unreadCounts = {};
-    
-    for (const msg of lastMessages || []) {
-      if (!lastMessageTimes[msg.user_id]) {
-        lastMessageTimes[msg.user_id] = {
-          time: msg.created_at,
-          is_from_admin: msg.is_from_admin
-        };
+      if (fetchError || !request) {
+        console.error("Request not found:", fetchError);
+        return res.status(404).json({ error: "Request not found" });
       }
-    }
-    
-    for (const msg of unreadMessages || []) {
-      unreadCounts[msg.user_id] = (unreadCounts[msg.user_id] || 0) + 1;
-    }
-    
-    res.json({
-      last_message_times: lastMessageTimes,
-      unread_counts: unreadCounts,
-      timestamp: new Date().toISOString()
-    });
-  } catch (error) {
-    console.error("Conversation status error:", error);
-    res.status(500).json({ error: "Failed to get status" });
-  }
-});
 
-// 3. Get all users with conversations (PARAMETERIZED - uses query, not path param)
-app.get("/api/sys/live-chat/users", authenticate, authorizeAdmin, async (req, res) => {
-  try {
-    console.log("[Chat] Getting users with conversations");
-    
-    // Get all users who have sent messages, with their latest message and unread count
-    const { data: conversations, error } = await supabase
-      .from("live_support_messages")
-      .select(`
-        user_id,
-        users:user_id (
-          id,
-          first_name,
-          last_name,
-          email,
-          last_chat_read_at
-        ),
-        message,
-        created_at,
-        is_from_admin,
-        status
-      `)
-      .order("created_at", { ascending: false });
-    
-    if (error) {
-      console.error("[Chat] Conversations fetch error:", error);
-      return res.status(500).json({ error: error.message });
-    }
-    
-    // Group by user and get latest message + unread count
-    const userMap = new Map();
-    
-    for (const msg of conversations || []) {
-      const userId = msg.user_id;
-      const user = msg.users;
-      
-      if (!userMap.has(userId)) {
-        // Get unread count for this user
-        const { count: unreadCount, error: countError } = await supabase
-          .from("live_support_messages")
-          .select("*", { count: "exact", head: true })
-          .eq("user_id", userId)
-          .eq("is_from_admin", false)
-          .eq("status", "sent");
-        
-        if (countError) {
-          console.error("[Chat] Unread count error for user", userId, countError);
-        }
-        
-        // Get last read time for admin
-        const lastReadAt = user?.last_chat_read_at || null;
-        
-        userMap.set(userId, {
-          user_id: userId,
-          user_name: user ? `${user.first_name || ""} ${user.last_name || ""}`.trim() : "Unknown User",
-          user_email: user?.email || "",
-          last_message: msg.message,
-          last_message_time: msg.created_at,
-          last_message_is_from_admin: msg.is_from_admin,
-          unread_count: unreadCount || 0,
-          last_read_at: lastReadAt,
-          has_unread: (unreadCount || 0) > 0,
-        });
+      if (request.status !== "pending") {
+        return res.status(400).json({ error: "Request already processed" });
       }
-    }
-    
-    // Convert to array and sort: unread first, then by last message time
-    const sortedUsers = Array.from(userMap.values())
-      .sort((a, b) => {
-        // Unread conversations first
-        if (a.has_unread && !b.has_unread) return -1;
-        if (!a.has_unread && b.has_unread) return 1;
-        // Then by last message time (newest first)
-        return new Date(b.last_message_time) - new Date(a.last_message_time);
+
+      // Get user's primary account
+      const { data: account, error: accError } = await supabase
+        .from("accounts")
+        .select("*")
+        .eq("user_id", request.user_id)
+        .eq("account_type", "checking")
+        .single();
+
+      if (accError || !account) {
+        console.error("User account not found:", accError);
+        return res.status(404).json({ error: "User account not found" });
+      }
+
+      // ========== REFUND THE AMOUNT TO USER'S ACCOUNT ==========
+      const refundAmount = request.amount || 0;
+      const newBalance = (account.balance || 0) + refundAmount;
+      const newAvailable = (account.available_balance || 0) + refundAmount;
+
+      const { error: updateBalanceError } = await supabase
+        .from("accounts")
+        .update({
+          balance: newBalance,
+          available_balance: newAvailable,
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", account.id);
+
+      if (updateBalanceError) {
+        console.error("Balance update error:", updateBalanceError);
+        return res.status(500).json({ error: "Failed to update balance" });
+      }
+
+      console.log(`✅ Refunded ₦${refundAmount} to user ${request.user_id}. New balance: ₦${newAvailable}`);
+
+      // ========== DEDUCT FROM HARVEST POOL ACCOUNT ==========
+      const { data: harvestPool } = await supabase
+        .from("savings_pool_accounts")
+        .select("*")
+        .eq("account_type", "harvest_pool")
+        .single();
+
+      if (harvestPool) {
+        const newPoolBalance = harvestPool.balance - refundAmount;
+        await supabase
+          .from("savings_pool_accounts")
+          .update({
+            balance: newPoolBalance,
+            available_balance: newPoolBalance,
+            updated_at: new Date().toISOString(),
+          })
+          .eq("id", harvestPool.id);
+        
+        console.log(`✅ Deducted ₦${refundAmount} from harvest_pool. New balance: ₦${newPoolBalance}`);
+      }
+
+      // Update harvest enrollment status to "withdrawn"
+      const { error: updateEnrollmentError } = await supabase
+        .from("user_harvest_enrollments")
+        .update({
+          status: "withdrawn",
+          auto_save: false,
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", request.enrollment_id);
+
+      if (updateEnrollmentError) {
+        console.error("Enrollment update error:", updateEnrollmentError);
+      }
+
+      // Update request status
+      const { error: updateRequestError } = await supabase
+        .from("harvest_withdrawal_requests")
+        .update({
+          status: "approved",
+          processed_at: new Date().toISOString(),
+          processed_by: req.user.id,
+          admin_note: `Approved by ${req.user.email}`,
+        })
+        .eq("id", requestId);
+
+      if (updateRequestError) {
+        console.error("Request update error:", updateRequestError);
+        return res.status(500).json({ error: "Failed to update request status" });
+      }
+
+      // Create refund transaction
+      const { error: transError } = await supabase.from("transactions").insert({
+        to_account_id: account.id,
+        to_user_id: request.user_id,
+        amount: refundAmount,
+        description: `Harvest Plan Withdrawal (Admin Approved) - Request ID: ${requestId}`,
+        transaction_type: "savings_withdrawal",
+        status: "completed",
+        completed_at: new Date().toISOString(),
+        is_admin_adjusted: true,
+        admin_note: `Harvest withdrawal approved by ${req.user.email}`,
       });
-    
-    res.json({ users: sortedUsers });
-  } catch (error) {
-    console.error("Admin live chat users error:", error);
-    res.status(500).json({ error: "Failed to load conversations: " + error.message });
-  }
-});
 
-// 4. Get messages for a specific user (PARAMETERIZED - this comes LAST)
-app.get("/api/sys/live-chat/:userId", authenticate, authorizeAdmin, async (req, res) => {
-  try {
-    const { userId } = req.params;
-    
-    console.log("[Chat] Getting messages for user:", userId);
-    
-    // Validate UUID format
-    const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-    if (!uuidRegex.test(userId)) {
-      return res.status(400).json({ error: "Invalid user ID format" });
-    }
-    
-    // Get all messages for this user
-    const { data: messages, error } = await supabase
-      .from("live_support_messages")
-      .select("*")
-      .eq("user_id", userId)
-      .order("created_at", { ascending: true });
-    
-    if (error) {
-      console.error("[Chat] Messages fetch error:", error);
-      return res.status(500).json({ error: error.message });
-    }
-    
-    // Mark all unread messages as read when admin views them
-    const { error: updateError } = await supabase
-      .from("live_support_messages")
-      .update({ 
-        status: "read",
-        read_at: new Date().toISOString()
-      })
-      .eq("user_id", userId)
-      .eq("is_from_admin", false)
-      .eq("status", "sent");
-    
-    if (updateError) {
-      console.error("[Chat] Mark as read error:", updateError);
-    }
-    
-    // Update user's last_chat_read_at
-    await supabase
-      .from("users")
-      .update({ last_chat_read_at: new Date().toISOString() })
-      .eq("id", userId);
-    
-    res.json({ messages: messages || [] });
-  } catch (error) {
-    console.error("Get user chat error:", error);
-    res.status(500).json({ error: "Failed to load chat: " + error.message });
-  }
-});
+      if (transError) {
+        console.error("Transaction creation error:", transError);
+      }
 
-// 5. Send reply (admin) - POST route
-app.post("/api/sys/live-chat/:userId", authenticate, authorizeAdmin, async (req, res) => {
-  try {
-    const { userId } = req.params;
-    const { message } = req.body;
-    
-    console.log("[Chat] Sending reply to user:", userId);
-    
-    // Validate UUID format
-    const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-    if (!uuidRegex.test(userId)) {
-      return res.status(400).json({ error: "Invalid user ID format" });
-    }
-    
-    if (!message || !message.trim()) {
-      return res.status(400).json({ error: "Message cannot be empty" });
-    }
-    
-    const { data: newMessage, error } = await supabase
-      .from("live_support_messages")
-      .insert({
-        user_id: userId,
-        admin_id: req.user.id,
-        message: message.trim(),
-        is_from_admin: true,
-        status: "sent",
+      // Create savings transaction record
+      await supabase.from("savings_transactions").insert({
+        user_id: request.user_id,
+        savings_type: "harvest",
+        savings_id: request.enrollment_id,
+        amount: refundAmount,
+        transaction_type: "withdrawal",
+        description: `Withdrawn from Harvest Plan via admin approval`,
+        processed_by: req.user.id,
+        processed_at: new Date().toISOString(),
+      });
+
+      // Send notification to user
+      await supabase.from("notifications").insert({
+        user_id: request.user_id,
+        title: "Harvest Plan Withdrawal Approved ✅",
+        message: `Your Harvest Plan withdrawal request has been approved. ₦${refundAmount.toLocaleString()} has been returned to your account.`,
+        type: "success",
         created_at: new Date().toISOString(),
-      })
-      .select()
-      .single();
-    
-    if (error) {
-      console.error("[Chat] Insert error:", error);
-      return res.status(500).json({ error: error.message });
+      });
+
+      // Log admin action
+      await supabase.from("admin_actions").insert({
+        admin_id: req.user.id,
+        action_type: "approve_harvest_withdrawal",
+        target_user_id: request.user_id,
+        details: { request_id: requestId, amount: refundAmount },
+        ip_address: req.ip,
+        created_at: new Date().toISOString(),
+      });
+
+      console.log(`Withdrawal ${requestId} approved successfully`);
+      res.json({
+        success: true,
+        message: "Withdrawal approved and funds returned",
+        amount_refunded: refundAmount,
+      });
+    } catch (error) {
+      console.error("Approve withdrawal error:", error);
+      res.status(500).json({ error: error.message });
     }
-    
-    res.json({ success: true, message: newMessage });
-  } catch (error) {
-    console.error("Send reply error:", error);
-    res.status(500).json({ error: "Failed to send reply: " + error.message });
   }
-});
+);

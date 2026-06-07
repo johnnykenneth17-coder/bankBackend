@@ -1337,43 +1337,6 @@ app.get("/api/user/security-events", authenticate, async (req, res) => {
   }
 });
 
-// Revoke all other sessions (security feature)
-/*app.post(
-  "/api/security/revoke-other-sessions",
-  authenticate,
-  async (req, res) => {
-    try {
-      const currentToken = req.headers.authorization?.split(" ")[1];
-
-      if (!currentToken) {
-        return res.status(400).json({ error: "Invalid session" });
-      }
-
-      // Deactivate all other sessions
-      const { error } = await supabase
-        .from("user_sessions")
-        .update({ is_active: false, expires_at: new Date().toISOString() })
-        .eq("user_id", req.user.id)
-        .neq("session_token", currentToken);
-
-      if (error) throw error;
-
-      // Log security event
-      await supabase.from("security_logs").insert({
-        user_id: req.user.id,
-        event_type: "revoked_other_sessions",
-        details: { action: "user_initiated" },
-        ip_address: req.ip,
-      });
-
-      res.json({ success: true, message: "Other sessions revoked" });
-    } catch (error) {
-      console.error("Revoke sessions error:", error);
-      res.status(500).json({ error: "Failed to revoke sessions" });
-    }
-  },
-);*/
-
 // Revoke all other sessions
 app.post(
   "/api/security/revoke-other-sessions",
@@ -1639,153 +1602,6 @@ app.post("/api/auth/register", async (req, res) => {
 
     console.log("User created with ID:", user.id);
 
-    // ==================== PRODUCTION-GRADE FACE STORAGE ====================
-    /*if (face_images && face_images.length > 0) {
-      console.log(
-        `[FACE] Processing ${face_images.length} face images for user ${user.id}`
-      );
-
-      const faceDescriptorVectors = req.body.face_descriptors || [];
-      const faceQualityScores = req.body.face_quality_scores || [];
-
-      // ── Step 1: Collect all valid 128-D vectors ─────────────────────────────
-      const validFrames = []; // { vector, quality, image, index }
-      for (let i = 0; i < face_images.length; i++) {
-        const vector = faceDescriptorVectors[i];
-        const quality = faceQualityScores[i] || 0.8;
-        if (vector && Array.isArray(vector) && vector.length === 128) {
-          validFrames.push({
-            vector,
-            quality,
-            image: face_images[i],
-            index: i,
-          });
-        }
-      }
-      console.log(
-        `[FACE] ${validFrames.length}/${face_images.length} frames have valid 128-D vectors`
-      );
-
-      // ── Step 2: Compute averaged canonical embedding ─────────────────────────
-      let canonicalVector = null;
-      let bestQuality = 0;
-      let bestImage = null;
-
-      if (validFrames.length > 0) {
-        const avg = new Array(128).fill(0);
-        for (const frame of validFrames) {
-          for (let j = 0; j < 128; j++)
-            avg[j] += frame.vector[j] / validFrames.length;
-        }
-        canonicalVector = avg;
-
-        // Also track the single highest-quality frame for reference
-        const bestFrame = validFrames.reduce((a, b) =>
-          b.quality > a.quality ? b : a
-        );
-        bestQuality = bestFrame.quality;
-        bestImage = bestFrame.image;
-      }
-
-      // ── Step 3: Clean slate — remove old descriptors for this user ──────────
-      const { error: deleteError } = await supabase
-        .from("face_descriptors")
-        .delete()
-        .eq("user_id", user.id);
-      if (deleteError)
-        console.error("[FACE] Error clearing old descriptors:", deleteError);
-
-      // ── Step 4: Insert one PRIMARY row with the clean flat canonical vector ──
-      if (canonicalVector) {
-        const { error: primaryErr } = await supabase
-          .from("face_descriptors")
-          .insert({
-            user_id: user.id,
-            descriptor: canonicalVector,
-            is_primary: true,
-            is_active: true,
-            quality_score: bestQuality,
-            version: 1,
-            created_at: new Date().toISOString(),
-          });
-
-        if (primaryErr) {
-          console.error(
-            "[FACE] Failed to insert primary descriptor:",
-            primaryErr
-          );
-        } else {
-          console.log(
-            "[FACE] ✅ Inserted primary (averaged) descriptor into face_descriptors"
-          );
-        }
-
-        // ── Step 5: Insert individual frame rows (audit / re-train use) ─────────
-        let frameInsertCount = 0;
-        for (const frame of validFrames) {
-          const { error: frameErr } = await supabase
-            .from("face_descriptors")
-            .insert({
-              user_id: user.id,
-              descriptor: {
-                vector: frame.vector,
-                image: frame.image,
-                angle: frame.index,
-                quality: frame.quality,
-                timestamp: new Date().toISOString(),
-                is_valid: true,
-              },
-              is_primary: false,
-              is_active: true,
-              quality_score: frame.quality,
-              version: 1,
-              created_at: new Date().toISOString(),
-            });
-          if (!frameErr) frameInsertCount++;
-          else
-            console.error(
-              `[FACE] Frame ${frame.index} insert error:`,
-              frameErr
-            );
-        }
-        console.log(
-          `[FACE] Inserted ${frameInsertCount}/${validFrames.length} frame rows`
-        );
-
-        // ── Step 6: Store canonical embedding in users table ────────────────────
-        const { error: updateError } = await supabase
-          .from("users")
-          .update({
-            face_embedding: JSON.stringify(canonicalVector),
-            face_verified: true,
-            face_quality_score: bestQuality,
-            face_image: bestImage || null,
-            face_verification_date: new Date().toISOString(),
-            face_embedding_version: 1,
-            updated_at: new Date().toISOString(),
-          })
-          .eq("id", user.id);
-
-        if (updateError) {
-          console.error(
-            "[FACE] Failed to update users.face_embedding:",
-            updateError
-          );
-        } else {
-          console.log(
-            "[FACE] ✅ users.face_embedding updated with canonical vector"
-          );
-        }
-      } else {
-        console.warn(
-          "[FACE] No valid face vectors in payload — face_verified stays false"
-        );
-        await supabase
-          .from("users")
-          .update({ face_verified: false, face_verification_date: null })
-          .eq("id", user.id);
-      }
-    }*/
 
     // ==================== PRODUCTION-GRADE FACE STORAGE ====================
     if (face_images && face_images.length > 0) {
@@ -2186,17 +2002,7 @@ app.post("/api/auth/login", authLimiter, async (req, res) => {
 
       // Send notifications for each old session
       for (const oldSession of existingSessions) {
-        /*await supabase
-          .from("notifications")
-          .insert({
-            user_id: user.id,
-            title: "New Device Login",
-            message: `Your account was accessed from: ${deviceInfo.device_name}. Your session on ${oldSession.device_name || "another device"} was terminated. If this wasn't you, log in and change your password immediately.`,
-            type: "security",
-            created_at: new Date().toISOString(),
-          })
-          .catch((e) => console.error("Notification error:", e));*/
-        // REPLACE that block with this:
+        
         try {
           await supabase.from("notifications").insert({
             user_id: user.id,
@@ -2597,13 +2403,7 @@ app.post("/api/auth/verify-2fa", async (req, res) => {
 
       // Send notifications
       for (const oldSession of existingSessions) {
-        /*await supabase.from("notifications").insert({
-          user_id: user.id,
-          title: "New Device Login (2FA)",
-          message: `Your account was accessed via 2FA from: ${deviceInfo.device_name}. Your session on ${oldSession.device_name || "another device"} was terminated.`,
-          type: "security",
-          created_at: new Date().toISOString(),
-        }).catch(e => console.error("Notification error:", e));*/
+      
         try {
           await supabase.from("notifications").insert({
             user_id: user.id,
@@ -3211,17 +3011,7 @@ app.post("/api/auth/verify-passcode", async (req, res) => {
 
       // Send notifications for each old session
       for (const oldSession of existingSessions) {
-        /*await supabase
-          .from("notifications")
-          .insert({
-            user_id: user.id,
-            title: "New Device Login (Passcode)",
-            message: `Your account was accessed via passcode from: ${deviceInfo.device_name}. Your session on ${oldSession.device_name || "another device"} was terminated. If this wasn't you, log in and change your password immediately.`,
-            type: "security",
-            created_at: new Date().toISOString(),
-          })
-          .catch((e) => console.error("Notification error:", e));*/
-        // REPLACE that block with this:
+      
         try {
           await supabase.from("notifications").insert({
             user_id: user.id,
@@ -4899,88 +4689,6 @@ async function checkTierTransferLimit(userId, amount) {
 
 // ==================== FORGOT PASSWORD ROUTES (EMAIL ONLY) ====================
 
-// Step 1: Request OTP via Email Only
-/*app.post("/api/auth/forgot-password", async (req, res) => {
-  const { email } = req.body;
-
-  if (!email) {
-    return res.status(400).json({ error: "Email required" });
-  }
-
-  const normalizedEmail = email.trim().toLowerCase();
-
-  console.log(`📧 Password reset requested for: ${normalizedEmail}`);
-
-  try {
-    // Check if user exists
-    const { data: user, error: userError } = await supabase
-      .from("users")
-      .select("id, email")
-      .eq("email", normalizedEmail)
-      .maybeSingle();
-
-    // Always return success to prevent email enumeration
-    if (!user) {
-      console.log(`User not found: ${normalizedEmail}`);
-      return res.json({
-        message: "If your email is registered, you will receive a reset code.",
-      });
-    }
-
-    // Generate 6-digit OTP
-    const otp = Math.floor(100000 + Math.random() * 900000).toString();
-    const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
-
-    console.log(`Generated OTP ${otp} for user ${user.id}`);
-
-    // First, mark any existing OTPs as used (soft delete)
-    await supabase
-      .from("password_resets")
-      .update({ used: true })
-      .eq("email", normalizedEmail)
-      .eq("used", false);
-
-    // Insert new OTP
-    const { error: insertError } = await supabase
-      .from("password_resets")
-      .insert({
-        email: normalizedEmail,
-        otp: otp,
-        expires_at: expiresAt.toISOString(),
-        used: false,
-        created_at: new Date().toISOString(),
-      });
-
-    if (insertError) {
-      console.error("Insert OTP error:", insertError);
-      return res.status(500).json({ error: "Failed to generate reset code" });
-    }
-
-    // Send email with OTP
-    const emailSent = await sendOTPEmail(normalizedEmail, otp);
-
-    if (!emailSent) {
-      console.error(`Failed to send email to ${normalizedEmail}`);
-      // Still return success to user (don't reveal email failure)
-      return res.json({
-        message:
-          "If your email is registered, you will receive a reset code. Please check your spam folder.",
-      });
-    }
-
-    console.log(`✅ Reset email sent to ${normalizedEmail}`);
-    res.json({
-      message:
-        "Reset code sent to your email. Please check your inbox and spam folder.",
-    });
-  } catch (error) {
-    console.error("Forgot password error:", error);
-    res.status(500).json({ error: "Something went wrong. Please try again." });
-  }
-});*/
-
-// index.js - REPLACE the forgot-password endpoint
-
 app.post("/api/auth/forgot-password", async (req, res) => {
   const { email } = req.body;
 
@@ -5333,52 +5041,6 @@ async function sendOTPEmail(email, otp, type = "reset") {
   }
 }
 
-// Verify 2FA
-/*app.post("/api/auth/verify-2fa", async (req, res) => {
-  try {
-    const { userId, token } = req.body;
-
-    const { data: user } = await supabase
-      .from("users")
-      .select("*")
-      .eq("id", userId)
-      .single();
-
-    if (!user) {
-      return res.status(404).json({ error: "User not found" });
-    }
-
-    const verified = speakeasy.totp.verify({
-      secret: user.two_factor_secret,
-      encoding: "base32",
-      token,
-    });
-
-    if (!verified) {
-      return res.status(401).json({ error: "Invalid 2FA token" });
-    }
-
-    const jwtToken = jwt.sign(
-      { userId: user.id, email: user.email, role: user.role },
-      process.env.JWT_SECRET,
-      { expiresIn: process.env.JWT_EXPIRE },
-    );
-
-    res.json({
-      token: jwtToken,
-      user: {
-        id: user.id,
-        email: user.email,
-        first_name: user.first_name,
-        last_name: user.last_name,
-        role: user.role,
-      },
-    });
-  } catch (error) {
-    console.error("2FA verification error:", error);
-    res.status(500).json({ error: "Verification failed" });
-  }
-});*/
 
 // TEMPORARY DEBUG ROUTE - Put this FIRST
 app.get("/api/test", (req, res) => {
@@ -9663,7 +9325,7 @@ app.post(
 );
 
 // Withdraw from savings (with fee calculation for SaveBox)
-app.post(
+/*app.post(
   "/api/user/savings/:type/:id/withdraw",
   authenticate,
   async (req, res) => {
@@ -9883,7 +9545,278 @@ app.post(
         .json({ error: "Failed to process withdrawal: " + error.message });
     }
   },
+);*/
+
+// index.js - REPLACE the existing savings withdrawal endpoint
+app.post(
+  "/api/user/savings/:type/:id/withdraw",
+  authenticate,
+  checkAccountFrozen,
+  async (req, res) => {
+    const { type, id } = req.params;
+    
+    try {
+      let savingsRecord, feeAmount = 0, withdrawAmount = 0;
+      
+      // Get the savings record based on type
+      switch (type) {
+        case "harvest":
+          const { data: harvest, error: hError } = await supabase
+            .from("user_harvest_enrollments")
+            .select("*")
+            .eq("id", id)
+            .eq("user_id", req.user.id)
+            .single();
+          if (hError) throw hError;
+          savingsRecord = harvest;
+          withdrawAmount = harvest.total_saved || 0;
+          break;
+          
+        case "fixed":
+          const { data: fixed, error: fError } = await supabase
+            .from("fixed_savings")
+            .select("*")
+            .eq("id", id)
+            .eq("user_id", req.user.id)
+            .single();
+          if (fError) throw fError;
+          savingsRecord = fixed;
+          
+          const interest = fixed.current_saved * (fixed.interest_rate / 100);
+          const today = new Date();
+          const maturityDate = new Date(fixed.maturity_date);
+          const isMatured = maturityDate <= today;
+          
+          if (!isMatured) {
+            return res.status(400).json({ error: "Savings not yet matured" });
+          }
+          
+          // Check if free withdrawal period
+          const freeWithdrawalDate = new Date(fixed.next_free_withdrawal_date);
+          const isFreeWithdrawal = today <= freeWithdrawalDate;
+          
+          withdrawAmount = fixed.current_saved + interest;
+          
+          if (!isFreeWithdrawal) {
+            feeAmount = withdrawAmount * 0.02; // 2% fee after free period
+            withdrawAmount -= feeAmount;
+          }
+          break;
+          
+        case "savebox":
+          const { data: savebox, error: sError } = await supabase
+            .from("savebox_savings")
+            .select("*")
+            .eq("id", id)
+            .eq("user_id", req.user.id)
+            .single();
+          if (sError) throw sError;
+          savingsRecord = savebox;
+          withdrawAmount = savebox.current_saved || 0;
+          
+          const isEarlyWithdrawal = new Date() < new Date(savebox.target_date) && savebox.current_saved < savebox.amount;
+          if (isEarlyWithdrawal) {
+            feeAmount = withdrawAmount * (savebox.early_withdrawal_fee_percent / 100);
+            withdrawAmount -= feeAmount;
+          }
+          break;
+          
+        case "target":
+          const { data: target, error: tError } = await supabase
+            .from("target_savings")
+            .select("*")
+            .eq("id", id)
+            .eq("user_id", req.user.id)
+            .single();
+          if (tError) throw tError;
+          savingsRecord = target;
+          
+          if (!target.target_met && target.current_saved < target.target_amount) {
+            return res.status(400).json({ error: "Target not yet reached" });
+          }
+          withdrawAmount = target.current_saved || 0;
+          break;
+          
+        case "spare_change":
+          const { data: spare, error: spError } = await supabase
+            .from("spare_change_savings")
+            .select("*")
+            .eq("id", id)
+            .eq("user_id", req.user.id)
+            .single();
+          if (spError) throw spError;
+          savingsRecord = spare;
+          withdrawAmount = spare.current_saved || 0;
+          break;
+          
+        default:
+          return res.status(400).json({ error: "Invalid savings type" });
+      }
+      
+      if (withdrawAmount <= 0) {
+        return res.status(400).json({ error: "No funds to withdraw" });
+      }
+      
+      // Get user's primary checking account
+      const { data: account, error: accError } = await supabase
+        .from("accounts")
+        .select("*")
+        .eq("user_id", req.user.id)
+        .eq("account_type", "checking")
+        .single();
+      
+      if (accError || !account) {
+        return res.status(404).json({ error: "Account not found" });
+      }
+      
+      // ========== CRITICAL: Update user balance ==========
+      const newUserBalance = account.balance + withdrawAmount;
+      const newUserAvailable = account.available_balance + withdrawAmount;
+      
+      const { error: updateUserBalanceError } = await supabase
+        .from("accounts")
+        .update({
+          balance: newUserBalance,
+          available_balance: newUserAvailable,
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", account.id);
+      
+      if (updateUserBalanceError) {
+        console.error("Failed to update user balance:", updateUserBalanceError);
+        return res.status(500).json({ error: "Failed to process withdrawal" });
+      }
+      
+      console.log(`✅ Added ₦${withdrawAmount} to user ${req.user.id}. New balance: ₦${newUserAvailable}`);
+      
+      // ========== Update savings record status ==========
+      const tableMap = {
+        harvest: "user_harvest_enrollments",
+        fixed: "fixed_savings",
+        savebox: "savebox_savings",
+        target: "target_savings",
+        spare_change: "spare_change_savings",
+      };
+      
+      const tableName = tableMap[type];
+      if (tableName) {
+        await supabase
+          .from(tableName)
+          .update({
+            status: "withdrawn",
+            updated_at: new Date().toISOString(),
+          })
+          .eq("id", id);
+      }
+      
+      // ========== Update savings pool accounts ==========
+      let poolType = "";
+      switch (type) {
+        case "fixed": poolType = "fixed_pool"; break;
+        case "savebox": poolType = "savebox_pool"; break;
+        case "target": poolType = "target_pool"; break;
+        case "spare_change": poolType = "spare_change_pool"; break;
+        case "harvest": poolType = "harvest_pool"; break;
+      }
+      
+      if (poolType) {
+        const { data: poolAccount } = await supabase
+          .from("savings_pool_accounts")
+          .select("*")
+          .eq("account_type", poolType)
+          .single();
+        
+        if (poolAccount) {
+          const newPoolBalance = poolAccount.balance - (withdrawAmount + feeAmount);
+          await supabase
+            .from("savings_pool_accounts")
+            .update({
+              balance: newPoolBalance,
+              available_balance: newPoolBalance,
+              updated_at: new Date().toISOString(),
+            })
+            .eq("id", poolAccount.id);
+          
+          console.log(`✅ Deducted ₦${withdrawAmount + feeAmount} from ${poolType}. New balance: ₦${newPoolBalance}`);
+        }
+      }
+      
+      // ========== Add fee to fee account ==========
+      if (feeAmount > 0) {
+        const { data: feeAccount } = await supabase
+          .from("savings_pool_accounts")
+          .select("*")
+          .eq("account_type", "fee_account")
+          .single();
+        
+        if (feeAccount) {
+          const newFeeBalance = feeAccount.balance + feeAmount;
+          await supabase
+            .from("savings_pool_accounts")
+            .update({
+              balance: newFeeBalance,
+              available_balance: newFeeBalance,
+              updated_at: new Date().toISOString(),
+            })
+            .eq("id", feeAccount.id);
+          
+          console.log(`✅ Added fee ₦${feeAmount} to fee_account. New balance: ₦${newFeeBalance}`);
+        }
+      }
+      
+      // ========== Create transaction record ==========
+      const { error: txError } = await supabase.from("transactions").insert({
+        to_account_id: account.id,
+        to_user_id: req.user.id,
+        amount: withdrawAmount,
+        fee_amount: feeAmount,
+        description: `${type.charAt(0).toUpperCase() + type.slice(1)} Savings Withdrawal${feeAmount > 0 ? ` (Fee: ₦${feeAmount})` : ""}`,
+        transaction_type: "savings_withdrawal",
+        status: "completed",
+        completed_at: new Date().toISOString(),
+        created_at: new Date().toISOString(),
+      });
+      
+      if (txError) console.error("Transaction creation error:", txError);
+      
+      // ========== Create savings transaction record ==========
+      await supabase.from("savings_transactions").insert({
+        user_id: req.user.id,
+        savings_type: type,
+        savings_id: id,
+        amount: withdrawAmount + feeAmount,
+        fee_amount: feeAmount,
+        transaction_type: "withdrawal",
+        description: `Withdrawn from ${type} savings${feeAmount > 0 ? `, fee: ₦${feeAmount}` : ""}`,
+        processed_by: req.user.id,
+        processed_at: new Date().toISOString(),
+      });
+      
+      // ========== Create notification ==========
+      await supabase.from("notifications").insert({
+        user_id: req.user.id,
+        title: "Savings Withdrawal Successful",
+        message: `You have successfully withdrawn ₦${withdrawAmount.toLocaleString()} from your ${type} savings.${feeAmount > 0 ? ` A fee of ₦${feeAmount.toLocaleString()} was applied.` : ""}`,
+        type: "success",
+        created_at: new Date().toISOString(),
+      });
+      
+      res.json({
+        success: true,
+        message: "Withdrawal completed successfully",
+        amount_withdrawn: withdrawAmount,
+        fee_charged: feeAmount,
+        new_balance: newUserAvailable,
+      });
+      
+    } catch (error) {
+      console.error("Withdrawal error:", error);
+      res.status(500).json({ error: "Failed to process withdrawal: " + error.message });
+    }
+  }
 );
+
+
 
 // Cancel savings plan (stop auto-save but keep saved amount)
 app.post(
@@ -10597,6 +10530,9 @@ app.post(
     }
   },
 );
+
+
+
 
 // ==================== LEDGER SYSTEM ROUTES ====================
 
@@ -13998,7 +13934,7 @@ app.post(
 );
 
 // ADMIN: Approve harvest withdrawal
-app.post(
+/*app.post(
   "/api/sys/harvest-withdrawal/:requestId/approve",
   authenticate,
   authorizeAdmin,
@@ -14152,6 +14088,196 @@ app.post(
       res.status(500).json({ error: error.message });
     }
   },
+);*/
+
+// index.js - Update the harvest withdrawal approval endpoint
+app.post(
+  "/api/sys/harvest-withdrawal/:requestId/approve",
+  authenticate,
+  authorizeAdmin,
+  async (req, res) => {
+    const { requestId } = req.params;
+
+    try {
+      console.log(`Admin ${req.user.id} approving withdrawal request ${requestId}`);
+
+      // Get the request with all related data
+      const { data: request, error: fetchError } = await supabase
+        .from("harvest_withdrawal_requests")
+        .select(
+          `
+          *,
+          users:user_id (
+            id, 
+            email, 
+            first_name, 
+            last_name
+          ),
+          user_harvest_enrollments:enrollment_id (
+            id, 
+            total_saved,
+            user_id,
+            plan_id,
+            status
+          )
+        `,
+        )
+        .eq("id", requestId)
+        .single();
+
+      if (fetchError || !request) {
+        console.error("Request not found:", fetchError);
+        return res.status(404).json({ error: "Request not found" });
+      }
+
+      if (request.status !== "pending") {
+        return res.status(400).json({ error: "Request already processed" });
+      }
+
+      // Get user's primary account
+      const { data: account, error: accError } = await supabase
+        .from("accounts")
+        .select("*")
+        .eq("user_id", request.user_id)
+        .eq("account_type", "checking")
+        .single();
+
+      if (accError || !account) {
+        console.error("User account not found:", accError);
+        return res.status(404).json({ error: "User account not found" });
+      }
+
+      // ========== REFUND THE AMOUNT TO USER'S ACCOUNT ==========
+      const refundAmount = request.amount || 0;
+      const newBalance = (account.balance || 0) + refundAmount;
+      const newAvailable = (account.available_balance || 0) + refundAmount;
+
+      const { error: updateBalanceError } = await supabase
+        .from("accounts")
+        .update({
+          balance: newBalance,
+          available_balance: newAvailable,
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", account.id);
+
+      if (updateBalanceError) {
+        console.error("Balance update error:", updateBalanceError);
+        return res.status(500).json({ error: "Failed to update balance" });
+      }
+
+      console.log(`✅ Refunded ₦${refundAmount} to user ${request.user_id}. New balance: ₦${newAvailable}`);
+
+      // ========== DEDUCT FROM HARVEST POOL ACCOUNT ==========
+      const { data: harvestPool } = await supabase
+        .from("savings_pool_accounts")
+        .select("*")
+        .eq("account_type", "harvest_pool")
+        .single();
+
+      if (harvestPool) {
+        const newPoolBalance = harvestPool.balance - refundAmount;
+        await supabase
+          .from("savings_pool_accounts")
+          .update({
+            balance: newPoolBalance,
+            available_balance: newPoolBalance,
+            updated_at: new Date().toISOString(),
+          })
+          .eq("id", harvestPool.id);
+        
+        console.log(`✅ Deducted ₦${refundAmount} from harvest_pool. New balance: ₦${newPoolBalance}`);
+      }
+
+      // Update harvest enrollment status to "withdrawn"
+      const { error: updateEnrollmentError } = await supabase
+        .from("user_harvest_enrollments")
+        .update({
+          status: "withdrawn",
+          auto_save: false,
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", request.enrollment_id);
+
+      if (updateEnrollmentError) {
+        console.error("Enrollment update error:", updateEnrollmentError);
+      }
+
+      // Update request status
+      const { error: updateRequestError } = await supabase
+        .from("harvest_withdrawal_requests")
+        .update({
+          status: "approved",
+          processed_at: new Date().toISOString(),
+          processed_by: req.user.id,
+          admin_note: `Approved by ${req.user.email}`,
+        })
+        .eq("id", requestId);
+
+      if (updateRequestError) {
+        console.error("Request update error:", updateRequestError);
+        return res.status(500).json({ error: "Failed to update request status" });
+      }
+
+      // Create refund transaction
+      const { error: transError } = await supabase.from("transactions").insert({
+        to_account_id: account.id,
+        to_user_id: request.user_id,
+        amount: refundAmount,
+        description: `Harvest Plan Withdrawal (Admin Approved) - Request ID: ${requestId}`,
+        transaction_type: "savings_withdrawal",
+        status: "completed",
+        completed_at: new Date().toISOString(),
+        is_admin_adjusted: true,
+        admin_note: `Harvest withdrawal approved by ${req.user.email}`,
+      });
+
+      if (transError) {
+        console.error("Transaction creation error:", transError);
+      }
+
+      // Create savings transaction record
+      await supabase.from("savings_transactions").insert({
+        user_id: request.user_id,
+        savings_type: "harvest",
+        savings_id: request.enrollment_id,
+        amount: refundAmount,
+        transaction_type: "withdrawal",
+        description: `Withdrawn from Harvest Plan via admin approval`,
+        processed_by: req.user.id,
+        processed_at: new Date().toISOString(),
+      });
+
+      // Send notification to user
+      await supabase.from("notifications").insert({
+        user_id: request.user_id,
+        title: "Harvest Plan Withdrawal Approved ✅",
+        message: `Your Harvest Plan withdrawal request has been approved. ₦${refundAmount.toLocaleString()} has been returned to your account.`,
+        type: "success",
+        created_at: new Date().toISOString(),
+      });
+
+      // Log admin action
+      await supabase.from("admin_actions").insert({
+        admin_id: req.user.id,
+        action_type: "approve_harvest_withdrawal",
+        target_user_id: request.user_id,
+        details: { request_id: requestId, amount: refundAmount },
+        ip_address: req.ip,
+        created_at: new Date().toISOString(),
+      });
+
+      console.log(`Withdrawal ${requestId} approved successfully`);
+      res.json({
+        success: true,
+        message: "Withdrawal approved and funds returned",
+        amount_refunded: refundAmount,
+      });
+    } catch (error) {
+      console.error("Approve withdrawal error:", error);
+      res.status(500).json({ error: error.message });
+    }
+  }
 );
 
 // ADMIN: Reject harvest withdrawal
@@ -14987,249 +15113,511 @@ app.post(
   },
 );
 
-// ==================== ENHANCED LIVE CHAT API (POLLING WITH UNREAD COUNTS) ====================
+// ==================== SAVINGS POOL & MONEY MANAGEMENT API ROUTES ====================
 
-// Get all users with conversations (admin) - WITH UNREAD COUNTS AND SORTING
-/*app.get(
-  "/api/sys/live-chat/users",
+// GET savings pool stats (admin)
+app.get(
+  "/api/sys/savings/pool-stats",
   authenticate,
   authorizeAdmin,
   async (req, res) => {
     try {
-      // Get all users who have sent messages, with their latest message and unread count
-      const { data: conversations, error } = await supabase
-        .from("live_support_messages")
-        .select(
-          `
-        user_id,
-        users!live_support_messages_user_id_fkey (
-          id,
-          first_name,
-          last_name,
-          email,
-          last_chat_read_at
-        ),
-        message,
-        created_at,
-        is_from_admin,
-        status
-      `,
-        )
+      // Get all savings pool accounts
+      const { data: poolAccounts, error: poolError } = await supabase
+        .from("savings_pool_accounts")
+        .select("*");
+
+      if (poolError) throw poolError;
+
+      // Get total user balances
+      const { data: userAccounts, error: userError } = await supabase
+        .from("accounts")
+        .select("balance")
+        .eq("account_type", "checking");
+
+      if (userError) throw userError;
+
+      const totalUserBalances = userAccounts?.reduce((sum, acc) => sum + (acc.balance || 0), 0) || 0;
+      
+      // Parse pool balances
+      const harvestPool = poolAccounts?.find(p => p.account_type === "harvest_pool")?.balance || 0;
+      const fixedPool = poolAccounts?.find(p => p.account_type === "fixed_pool")?.balance || 0;
+      const saveboxPool = poolAccounts?.find(p => p.account_type === "savebox_pool")?.balance || 0;
+      const targetPool = poolAccounts?.find(p => p.account_type === "target_pool")?.balance || 0;
+      const feeAccount = poolAccounts?.find(p => p.account_type === "fee_account")?.balance || 0;
+      
+      const totalSavingsPools = harvestPool + fixedPool + saveboxPool + targetPool;
+      const totalBankBalance = totalUserBalances + totalSavingsPools + feeAccount;
+      
+      // Check for discrepancies (users with balance mismatch)
+      const { data: ledgerTotals } = await supabase
+        .from("single_ledger")
+        .select("user_id, balance_after")
         .order("created_at", { ascending: false });
+      
+      // Get latest balance per user from ledger
+      const latestLedgerBalances = {};
+      for (const entry of ledgerTotals || []) {
+        if (!latestLedgerBalances[entry.user_id]) {
+          latestLedgerBalances[entry.user_id] = entry.balance_after;
+        }
+      }
+      
+      // Calculate total difference
+      let totalDifference = 0;
+      const discrepancies = [];
+      
+      for (const account of userAccounts || []) {
+        const ledgerBalance = latestLedgerBalances[account.user_id] || 0;
+        const userBalance = account.balance || 0;
+        const diff = userBalance - ledgerBalance;
+        
+        if (Math.abs(diff) > 0.01) {
+          totalDifference += diff;
+          discrepancies.push({
+            user_id: account.user_id,
+            user_balance: userBalance,
+            ledger_balance: ledgerBalance,
+            difference: diff,
+          });
+        }
+      }
+      
+      res.json({
+        total_bank_balance: totalBankBalance,
+        total_user_balances: totalUserBalances,
+        total_savings_pools: totalSavingsPools,
+        harvest_pool: harvestPool,
+        fixed_pool: fixedPool,
+        savebox_pool: saveboxPool,
+        target_pool: targetPool,
+        fee_account: feeAccount,
+        total_difference: totalDifference,
+        discrepancy_count: discrepancies.length,
+        discrepancies: discrepancies,
+      });
+    } catch (error) {
+      console.error("Pool stats error:", error);
+      res.status(500).json({ error: error.message });
+    }
+  }
+);
 
-      if (error) throw error;
+// GET reconciliation issues
+app.get(
+  "/api/sys/ledger/reconciliation-issues",
+  authenticate,
+  authorizeAdmin,
+  async (req, res) => {
+    try {
+      // Get all users with their current balance
+      const { data: users, error: userError } = await supabase
+        .from("users")
+        .select("id, first_name, last_name, email");
 
-      // Group by user and get latest message + unread count
-      const userMap = new Map();
+      if (userError) throw userError;
 
-      for (const msg of conversations || []) {
-        const userId = msg.user_id;
-        const user = msg.users;
+      // Get latest ledger balances per user
+      const { data: ledgerEntries, error: ledgerError } = await supabase
+        .from("single_ledger")
+        .select("user_id, balance_after")
+        .order("created_at", { ascending: false })
+        .limit(1000);
 
-        if (!userMap.has(userId)) {
-          // Get unread count for this user
-          const { count: unreadCount } = await supabase
-            .from("live_support_messages")
-            .select("*", { count: "exact", head: true })
-            .eq("user_id", userId)
-            .eq("is_from_admin", false)
-            .eq("status", "sent");
+      if (ledgerError) throw ledgerError;
 
-          // Get last read time for admin
-          const lastReadAt = user?.last_chat_read_at || null;
+      // Get current account balances
+      const { data: accounts, error: accError } = await supabase
+        .from("accounts")
+        .select("user_id, balance")
+        .eq("account_type", "checking");
 
-          userMap.set(userId, {
-            user_id: userId,
-            user_name:
-              `${user?.first_name || ""} ${user?.last_name || ""}`.trim() ||
-              "Unknown User",
-            user_email: user?.email || "",
-            last_message: msg.message,
-            last_message_time: msg.created_at,
-            last_message_is_from_admin: msg.is_from_admin,
-            unread_count: unreadCount || 0,
-            last_read_at: lastReadAt,
-            has_unread: (unreadCount || 0) > 0,
+      if (accError) throw accError;
+
+      // Map balances
+      const ledgerBalances = {};
+      for (const entry of ledgerEntries || []) {
+        if (!ledgerBalances[entry.user_id]) {
+          ledgerBalances[entry.user_id] = entry.balance_after;
+        }
+      }
+
+      const userBalances = {};
+      for (const acc of accounts || []) {
+        userBalances[acc.user_id] = acc.balance;
+      }
+
+      // Find discrepancies
+      const issues = [];
+      for (const user of users || []) {
+        const userBalance = userBalances[user.id] || 0;
+        const ledgerBalance = ledgerBalances[user.id] || 0;
+        const difference = userBalance - ledgerBalance;
+
+        if (Math.abs(difference) > 0.01) {
+          issues.push({
+            user_id: user.id,
+            user_name: `${user.first_name || ""} ${user.last_name || ""}`.trim() || "Unknown",
+            user_email: user.email || "",
+            user_balance: userBalance,
+            ledger_balance: ledgerBalance,
+            difference: difference,
           });
         }
       }
 
-      // Convert to array and sort: unread first, then by last message time
-      const sortedUsers = Array.from(userMap.values()).sort((a, b) => {
-        // Unread conversations first
-        if (a.has_unread && !b.has_unread) return -1;
-        if (!a.has_unread && b.has_unread) return 1;
-        // Then by last message time (newest first)
-        return new Date(b.last_message_time) - new Date(a.last_message_time);
-      });
-
-      res.json({ users: sortedUsers });
+      res.json({ issues });
     } catch (error) {
-      console.error("Admin live chat users error:", error);
-      res.status(500).json({ error: "Failed to load conversations" });
+      console.error("Reconciliation issues error:", error);
+      res.status(500).json({ error: error.message });
     }
-  },
+  }
 );
 
-// Get messages for a specific user (admin) - WITH MARK AS READ
-app.get(
-  "/api/sys/live-chat/:userId",
-  authenticate,
-  authorizeAdmin,
-  async (req, res) => {
-    try {
-      const { userId } = req.params;
-
-      // Get all messages for this user
-      const { data: messages, error } = await supabase
-        .from("live_support_messages")
-        .select("*")
-        .eq("user_id", userId)
-        .order("created_at", { ascending: true });
-
-      if (error) throw error;
-
-      // Mark all unread messages as read when admin views them
-      const { error: updateError } = await supabase
-        .from("live_support_messages")
-        .update({
-          status: "read",
-          read_at: new Date().toISOString(),
-        })
-        .eq("user_id", userId)
-        .eq("is_from_admin", false)
-        .eq("status", "sent");
-
-      if (updateError) {
-        console.error("Mark as read error:", updateError);
-      }
-
-      // Update user's last_chat_read_at
-      await supabase
-        .from("users")
-        .update({ last_chat_read_at: new Date().toISOString() })
-        .eq("id", userId);
-
-      res.json({ messages: messages || [] });
-    } catch (error) {
-      console.error("Get user chat error:", error);
-      res.status(500).json({ error: "Failed to load chat" });
-    }
-  },
-);
-
-// Send reply (admin)
+// POST merge user balance (accept current balance)
 app.post(
-  "/api/sys/live-chat/:userId",
+  "/api/sys/ledger/merge-balance/:userId",
   authenticate,
   authorizeAdmin,
   async (req, res) => {
+    const { userId } = req.params;
+    
     try {
-      const { userId } = req.params;
-      const { message } = req.body;
-
-      if (!message || !message.trim()) {
-        return res.status(400).json({ error: "Message cannot be empty" });
-      }
-
-      const { data: newMessage, error } = await supabase
-        .from("live_support_messages")
-        .insert({
-          user_id: userId,
-          admin_id: req.user.id,
-          message: message.trim(),
-          is_from_admin: true,
-          status: "sent",
-          created_at: new Date().toISOString(),
-        })
-        .select()
+      // Get user's current balance
+      const { data: account, error: accError } = await supabase
+        .from("accounts")
+        .select("balance, account_number")
+        .eq("user_id", userId)
+        .eq("account_type", "checking")
         .single();
 
-      if (error) throw error;
+      if (accError) throw accError;
 
-      res.json({ success: true, message: newMessage });
-    } catch (error) {
-      console.error("Send reply error:", error);
-      res.status(500).json({ error: "Failed to send reply" });
-    }
-  },
-);
+      const currentBalance = account.balance;
 
-// Get unread counts for admin (polling endpoint)
-app.get(
-  "/api/sys/live-chat/unread-counts",
-  authenticate,
-  authorizeAdmin,
-  async (req, res) => {
-    try {
-      // Get unread counts per user
-      const { data: unreadData, error } = await supabase
-        .from("live_support_messages")
-        .select("user_id, status")
-        .eq("is_from_admin", false)
-        .eq("status", "sent");
+      // Get last ledger entry for this user
+      const { data: lastLedger, error: ledgerError } = await supabase
+        .from("single_ledger")
+        .select("*")
+        .eq("user_id", userId)
+        .order("created_at", { ascending: false })
+        .limit(1)
+        .single();
 
-      if (error) throw error;
+      if (ledgerError && ledgerError.code !== "PGRST116") throw ledgerError;
 
-      const unreadCounts = {};
-      for (const msg of unreadData || []) {
-        unreadCounts[msg.user_id] = (unreadCounts[msg.user_id] || 0) + 1;
+      // Create adjustment entry in ledger to reconcile
+      const adjustmentAmount = currentBalance - (lastLedger?.balance_after || 0);
+      
+      if (Math.abs(adjustmentAmount) > 0.01) {
+        await supabase.from("single_ledger").insert({
+          ledger_id: `ADJ${Date.now()}${Math.floor(Math.random() * 10000)}`,
+          user_id: userId,
+          account_id: account.id,
+          account_number: account.account_number,
+          transaction_id: null,
+          transaction_type: "reconciliation_adjustment",
+          amount: Math.abs(adjustmentAmount),
+          balance_before: lastLedger?.balance_after || 0,
+          balance_after: currentBalance,
+          description: `Reconciliation adjustment: balance merged by admin`,
+          reference: `RECON_${Date.now()}`,
+          direction: adjustmentAmount > 0 ? "Credit" : "Debit",
+          created_at: new Date().toISOString(),
+        });
       }
 
-      res.json({ unread_counts: unreadCounts });
+      // Record reconciliation
+      await supabase.from("ledger_reconciliations").insert({
+        user_id: userId,
+        user_balance: currentBalance,
+        ledger_balance: lastLedger?.balance_after || 0,
+        difference: adjustmentAmount,
+        status: "merged",
+        resolved_by: req.user.id,
+        resolved_at: new Date().toISOString(),
+        notes: `Balance merged by ${req.user.email}`,
+      });
+
+      // Log admin action
+      await supabase.from("admin_actions").insert({
+        admin_id: req.user.id,
+        action_type: "merge_user_balance",
+        target_user_id: userId,
+        details: {
+          previous_ledger_balance: lastLedger?.balance_after || 0,
+          new_balance: currentBalance,
+          adjustment: adjustmentAmount,
+        },
+        ip_address: req.ip,
+      });
+
+      res.json({ success: true, message: "Balance merged successfully" });
     } catch (error) {
-      console.error("Unread counts error:", error);
-      res.status(500).json({ error: "Failed to get unread counts" });
+      console.error("Merge balance error:", error);
+      res.status(500).json({ error: error.message });
     }
-  },
+  }
 );
 
-// Get conversation status (for real-time polling)
-app.get(
-  "/api/sys/live-chat/conversations/status",
+// POST reject balance change (restore ledger balance)
+app.post(
+  "/api/sys/ledger/reject-balance-change/:userId",
   authenticate,
   authorizeAdmin,
   async (req, res) => {
+    const { userId } = req.params;
+    
     try {
-      // Get last message times and unread counts for all users
-      const { data: lastMessages } = await supabase
-        .from("live_support_messages")
-        .select("user_id, created_at, is_from_admin")
+      // Get last ledger balance for this user
+      const { data: lastLedger, error: ledgerError } = await supabase
+        .from("single_ledger")
+        .select("*")
+        .eq("user_id", userId)
+        .order("created_at", { ascending: false })
+        .limit(1)
+        .single();
+
+      if (ledgerError) throw ledgerError;
+
+      const correctBalance = lastLedger?.balance_after || 0;
+
+      // Get user's account
+      const { data: account, error: accError } = await supabase
+        .from("accounts")
+        .select("*")
+        .eq("user_id", userId)
+        .eq("account_type", "checking")
+        .single();
+
+      if (accError) throw accError;
+
+      const oldBalance = account.balance;
+      
+      // Restore correct balance
+      const { error: updateError } = await supabase
+        .from("accounts")
+        .update({
+          balance: correctBalance,
+          available_balance: correctBalance,
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", account.id);
+
+      if (updateError) throw updateError;
+
+      // Record rejection
+      await supabase.from("ledger_reconciliations").insert({
+        user_id: userId,
+        user_balance: oldBalance,
+        ledger_balance: correctBalance,
+        difference: oldBalance - correctBalance,
+        status: "corrected",
+        resolved_by: req.user.id,
+        resolved_at: new Date().toISOString(),
+        notes: `Balance rejected and restored to ledger value by ${req.user.email}`,
+      });
+
+      // Create reversal transaction
+      await supabase.from("transactions").insert({
+        to_account_id: account.id,
+        to_user_id: userId,
+        amount: Math.abs(oldBalance - correctBalance),
+        description: `Balance correction: Rejected unauthorized balance change`,
+        transaction_type: "admin_adjustment",
+        status: "completed",
+        completed_at: new Date().toISOString(),
+        is_admin_adjusted: true,
+        admin_note: `Balance restored by ${req.user.email} from ₦${oldBalance.toFixed(2)} to ₦${correctBalance.toFixed(2)}`,
+      });
+
+      // Log admin action
+      await supabase.from("admin_actions").insert({
+        admin_id: req.user.id,
+        action_type: "reject_balance_change",
+        target_user_id: userId,
+        details: {
+          previous_balance: oldBalance,
+          restored_balance: correctBalance,
+          difference: oldBalance - correctBalance,
+        },
+        ip_address: req.ip,
+      });
+
+      res.json({ success: true, message: "Balance restored successfully" });
+    } catch (error) {
+      console.error("Reject balance change error:", error);
+      res.status(500).json({ error: error.message });
+    }
+  }
+);
+
+// POST run full reconciliation
+app.post(
+  "/api/sys/ledger/reconcile-all",
+  authenticate,
+  authorizeAdmin,
+  async (req, res) => {
+    const { type = "full" } = req.body;
+    
+    try {
+      let discrepancies = 0;
+      
+      // Get all users with their current balances
+      const { data: accounts, error: accError } = await supabase
+        .from("accounts")
+        .select("user_id, balance")
+        .eq("account_type", "checking");
+
+      if (accError) throw accError;
+
+      // Get latest ledger balances
+      const { data: ledgerEntries, error: ledgerError } = await supabase
+        .from("single_ledger")
+        .select("user_id, balance_after")
         .order("created_at", { ascending: false });
 
-      const { data: unreadMessages } = await supabase
-        .from("live_support_messages")
-        .select("user_id")
-        .eq("is_from_admin", false)
-        .eq("status", "sent");
+      if (ledgerError) throw ledgerError;
 
-      const lastMessageTimes = {};
-      const unreadCounts = {};
-
-      for (const msg of lastMessages || []) {
-        if (!lastMessageTimes[msg.user_id]) {
-          lastMessageTimes[msg.user_id] = {
-            time: msg.created_at,
-            is_from_admin: msg.is_from_admin,
-          };
+      const ledgerBalances = {};
+      for (const entry of ledgerEntries || []) {
+        if (!ledgerBalances[entry.user_id]) {
+          ledgerBalances[entry.user_id] = entry.balance_after;
         }
       }
 
-      for (const msg of unreadMessages || []) {
-        unreadCounts[msg.user_id] = (unreadCounts[msg.user_id] || 0) + 1;
+      const userBalances = {};
+      for (const acc of accounts || []) {
+        userBalances[acc.user_id] = acc.balance;
+      }
+
+      // Find and record discrepancies
+      const allUserIds = new Set([...Object.keys(userBalances), ...Object.keys(ledgerBalances)]);
+      
+      for (const userId of allUserIds) {
+        const userBalance = userBalances[userId] || 0;
+        const ledgerBalance = ledgerBalances[userId] || 0;
+        const difference = userBalance - ledgerBalance;
+        
+        if (Math.abs(difference) > 0.01) {
+          discrepancies++;
+          
+          // Check if already recorded
+          const { data: existing } = await supabase
+            .from("ledger_reconciliations")
+            .select("id")
+            .eq("user_id", userId)
+            .eq("status", "pending")
+            .single();
+          
+          if (!existing && type === "full") {
+            await supabase.from("ledger_reconciliations").insert({
+              user_id: userId,
+              user_balance: userBalance,
+              ledger_balance: ledgerBalance,
+              difference: difference,
+              status: "pending",
+              created_at: new Date().toISOString(),
+            });
+          }
+        }
       }
 
       res.json({
-        last_message_times: lastMessageTimes,
-        unread_counts: unreadCounts,
-        timestamp: new Date().toISOString(),
+        success: true,
+        discrepancies: discrepancies,
+        message: `Reconciliation complete. Found ${discrepancies} discrepancy(s).`,
       });
     } catch (error) {
-      console.error("Conversation status error:", error);
-      res.status(500).json({ error: "Failed to get status" });
+      console.error("Reconcile all error:", error);
+      res.status(500).json({ error: error.message });
     }
-  },
-); */
+  }
+);
+
+// GET financial report export
+app.get(
+  "/api/sys/ledger/financial-report",
+  authenticate,
+  authorizeAdmin,
+  async (req, res) => {
+    try {
+      // Get all users with balances
+      const { data: users, error: userError } = await supabase
+        .from("users")
+        .select("id, first_name, last_name, email, created_at");
+
+      if (userError) throw userError;
+
+      // Get account balances
+      const { data: accounts, error: accError } = await supabase
+        .from("accounts")
+        .select("user_id, balance")
+        .eq("account_type", "checking");
+
+      if (accError) throw accError;
+
+      // Get pool accounts
+      const { data: pools, error: poolError } = await supabase
+        .from("savings_pool_accounts")
+        .select("*");
+
+      if (poolError) throw poolError;
+
+      const userBalances = {};
+      for (const acc of accounts || []) {
+        userBalances[acc.user_id] = (userBalances[acc.user_id] || 0) + acc.balance;
+      }
+
+      // Create CSV
+      const headers = [
+        "User ID",
+        "Name",
+        "Email",
+        "Balance (NGN)",
+        "Member Since",
+      ];
+      
+      const rows = [];
+      
+      for (const user of users || []) {
+        rows.push([
+          user.id,
+          `${user.first_name || ""} ${user.last_name || ""}`.trim(),
+          user.email,
+          userBalances[user.id] || 0,
+          new Date(user.created_at).toLocaleDateString(),
+        ]);
+      }
+      
+      // Add summary rows
+      rows.push(["", "", "", "", ""]);
+      rows.push(["SUMMARY", "", "", "", ""]);
+      rows.push(["Total User Balances", "", "", (userBalances ? Object.values(userBalances).reduce((a, b) => a + b, 0) : 0), ""]);
+      
+      for (const pool of pools || []) {
+        rows.push([`${pool.account_name}`, "", "", pool.balance, ""]);
+      }
+      
+      const csvContent = [headers, ...rows]
+        .map(row => row.map(cell => `"${String(cell).replace(/"/g, '""')}"`).join(","))
+        .join("\n");
+      
+      res.setHeader("Content-Type", "text/csv");
+      res.setHeader(
+        "Content-Disposition",
+        `attachment; filename=financial_report_${new Date().toISOString().split("T")[0]}.csv`
+      );
+      res.send(csvContent);
+    } catch (error) {
+      console.error("Financial report error:", error);
+      res.status(500).json({ error: error.message });
+    }
+  }
+);
+
+
+
 
 // ==================== ENHANCED LIVE CHAT API (POLLING WITH UNREAD COUNTS) ====================
 
@@ -15757,48 +16145,6 @@ app.post("/api/sys/users", authenticate, authorizeAdmin, async (req, res) => {
   }
 });
 
-// Update user (admin)
-/*app.put(
-  "/api/sys/users/:userId",
-  authenticate,
-  authorizeAdmin,
-  async (req, res) => {
-    try {
-      const { userId } = req.params;
-      const updates = req.body;
-
-      // Remove sensitive fields
-      delete updates.password_hash;
-      delete updates.id;
-      delete updates.created_at;
-
-      const { data: user, error } = await supabase
-        .from("users")
-        .update({
-          ...updates,
-          updated_at: new Date(),
-        })
-        .eq("id", userId)
-        .select()
-        .single();
-
-      if (error) throw error;
-
-      // Log admin action
-      await supabase.from("admin_actions").insert({
-        admin_id: req.user.id,
-        action_type: "update_user",
-        target_user_id: userId,
-        details: updates,
-      });
-
-      res.json({ message: "User updated successfully", user });
-    } catch (error) {
-      console.error("Admin update user error:", error);
-      res.status(500).json({ error: "Failed to update user" });
-    }
-  },
-);*/
 
 // Freeze/Unfreeze user account (admin)
 app.post(
@@ -16600,140 +16946,7 @@ app.get(
   },
 );
 
-// Update user (admin) - UPDATED with all fields
-/*app.put(
-  "/api/sys/users/:userId",
-  authenticate,
-  authorizeAdmin,
-  async (req, res) => {
-    try {
-      const { userId } = req.params;
-      const updates = req.body;
 
-      // Remove any fields that shouldn't be updated
-      const safeUpdates = {};
-      const allowedFields = [
-        "first_name",
-        "last_name",
-        "middle_name",
-        "email",
-        "phone",
-        "date_of_birth",
-        "age",
-        "gender",
-        "marital_status",
-        "occupation",
-        "referral_code",
-        "address",
-        "city",
-        "state",
-        "country",
-        "postal_code",
-        "role",
-        "admin_role",
-        "admin_permissions",
-        "kyc_status",
-        "identification_type",
-        "identification_number",
-        "is_active",
-        "is_frozen",
-        "freeze_reason",
-        "two_factor_enabled",
-        "face_verified",
-      ];
-
-      allowedFields.forEach((field) => {
-        if (updates[field] !== undefined) {
-          // Allow null explicitly for admin_role and admin_permissions (revoke operation)
-          if (field === "admin_role" || field === "admin_permissions") {
-            safeUpdates[field] = updates[field]; // keep null
-          } else if (updates[field] !== null && updates[field] !== "") {
-            safeUpdates[field] = updates[field];
-          }
-        }
-      });
-
-      // Add timestamp
-      safeUpdates.updated_at = new Date();
-
-      // Check email uniqueness if changed
-      if (safeUpdates.email) {
-        const { data: existingUser } = await supabase
-          .from("users")
-          .select("id")
-          .eq("email", safeUpdates.email)
-          .neq("id", userId)
-          .maybeSingle();
-
-        if (existingUser) {
-          return res.status(400).json({ error: "Email already in use" });
-        }
-      }
-
-      // Update user
-      const { data: user, error: updateError } = await supabase
-        .from("users")
-        .update(safeUpdates)
-        .eq("id", userId)
-        .select(
-          `
-          id,
-          email,
-          first_name,
-          last_name,
-          middle_name,
-          phone,
-          date_of_birth,
-          age,
-          gender,
-          marital_status,
-          occupation,
-          role,
-          admin_role,
-          admin_permissions,
-          kyc_status,
-          is_active,
-          is_frozen,
-          face_verified
-        `,
-        )
-        .single();
-
-      if (updateError) {
-        console.error("Update error:", updateError);
-        return res.status(500).json({ error: "Failed to update user" });
-      }
-
-      // Log admin action
-      await supabase.from("admin_actions").insert({
-        admin_id: req.user.id,
-        action_type: "update_user",
-        target_user_id: userId,
-        details: safeUpdates,
-      });
-
-      // Create notifications for important changes
-      if (updates.is_frozen !== undefined) {
-        await supabase.from("notifications").insert({
-          user_id: userId,
-          title: updates.is_frozen ? "Account Frozen" : "Account Unfrozen",
-          message: updates.is_frozen
-            ? `Your account has been frozen. Reason: ${updates.freeze_reason || "Not specified"}`
-            : "Your account has been unfrozen.",
-          type: updates.is_frozen ? "warning" : "success",
-        });
-      }
-
-      res.json({
-        message: "User updated successfully",
-        user,
-      });
-    } catch (error) {
-      console.error("Admin update user error:", error);
-      res.status(500).json({ error: "Failed to update user" });
-    }
-  },
-);*/
 
 // ==================== UPDATE USER (ADMIN) - SINGLE PRODUCTION VERSION ====================
 app.put(
