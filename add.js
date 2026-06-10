@@ -1602,7 +1602,6 @@ app.post("/api/auth/register", async (req, res) => {
 
     console.log("User created with ID:", user.id);
 
-
     // ==================== PRODUCTION-GRADE FACE STORAGE ====================
     if (face_images && face_images.length > 0) {
       console.log(
@@ -2002,7 +2001,6 @@ app.post("/api/auth/login", authLimiter, async (req, res) => {
 
       // Send notifications for each old session
       for (const oldSession of existingSessions) {
-        
         try {
           await supabase.from("notifications").insert({
             user_id: user.id,
@@ -2055,48 +2053,47 @@ app.post("/api/auth/login", authLimiter, async (req, res) => {
 
 // Get user's theme preference
 app.get("/api/user/theme", authenticate, async (req, res) => {
-    try {
-        const { data: user, error } = await supabase
-            .from("users")
-            .select("theme_preference")
-            .eq("id", req.user.id)
-            .single();
-        
-        if (error) throw error;
-        
-        res.json({ theme_preference: user?.theme_preference || 'system' });
-    } catch (error) {
-        console.error("Get theme error:", error);
-        res.json({ theme_preference: 'system' });
-    }
+  try {
+    const { data: user, error } = await supabase
+      .from("users")
+      .select("theme_preference")
+      .eq("id", req.user.id)
+      .single();
+
+    if (error) throw error;
+
+    res.json({ theme_preference: user?.theme_preference || "system" });
+  } catch (error) {
+    console.error("Get theme error:", error);
+    res.json({ theme_preference: "system" });
+  }
 });
 
 // Update user's theme preference
 app.put("/api/user/theme", authenticate, async (req, res) => {
-    try {
-        const { theme_preference } = req.body;
-        
-        if (!['light', 'dark', 'system'].includes(theme_preference)) {
-            return res.status(400).json({ error: "Invalid theme preference" });
-        }
-        
-        const { error } = await supabase
-            .from("users")
-            .update({ 
-                theme_preference: theme_preference,
-                updated_at: new Date().toISOString()
-            })
-            .eq("id", req.user.id);
-        
-        if (error) throw error;
-        
-        res.json({ success: true, theme_preference });
-    } catch (error) {
-        console.error("Update theme error:", error);
-        res.status(500).json({ error: "Failed to update theme preference" });
-    }
-});
+  try {
+    const { theme_preference } = req.body;
 
+    if (!["light", "dark", "system"].includes(theme_preference)) {
+      return res.status(400).json({ error: "Invalid theme preference" });
+    }
+
+    const { error } = await supabase
+      .from("users")
+      .update({
+        theme_preference: theme_preference,
+        updated_at: new Date().toISOString(),
+      })
+      .eq("id", req.user.id);
+
+    if (error) throw error;
+
+    res.json({ success: true, theme_preference });
+  } catch (error) {
+    console.error("Update theme error:", error);
+    res.status(500).json({ error: "Failed to update theme preference" });
+  }
+});
 
 // ==================== TWO-FACTOR AUTHENTICATION ROUTES ====================
 
@@ -2403,7 +2400,6 @@ app.post("/api/auth/verify-2fa", async (req, res) => {
 
       // Send notifications
       for (const oldSession of existingSessions) {
-      
         try {
           await supabase.from("notifications").insert({
             user_id: user.id,
@@ -3011,7 +3007,6 @@ app.post("/api/auth/verify-passcode", async (req, res) => {
 
       // Send notifications for each old session
       for (const oldSession of existingSessions) {
-      
         try {
           await supabase.from("notifications").insert({
             user_id: user.id,
@@ -5041,7 +5036,6 @@ async function sendOTPEmail(email, otp, type = "reset") {
   }
 }
 
-
 // TEMPORARY DEBUG ROUTE - Put this FIRST
 app.get("/api/test", (req, res) => {
   res.json({ message: "Server is working!", time: new Date().toISOString() });
@@ -6216,34 +6210,6 @@ app.post(
         console.error("Single ledger error:", singleLedgerError);
       }
 
-      // ========== ROUTE TRANSFER FEE TO FEE ACCOUNT ==========
-      if (feeAmount > 0) {
-        try {
-          const { data: feePoolAccount } = await supabase
-            .from("savings_pool_accounts")
-            .select("*")
-            .eq("account_type", "fee_account")
-            .single();
-
-          if (feePoolAccount) {
-            const newFeePoolBalance = feePoolAccount.balance + feeAmount;
-            await supabase
-              .from("savings_pool_accounts")
-              .update({
-                balance: newFeePoolBalance,
-                available_balance: newFeePoolBalance,
-                updated_at: new Date().toISOString(),
-              })
-              .eq("id", feePoolAccount.id);
-            console.log(`✅ Transfer fee ₦${feeAmount} credited to fee_account. New balance: ₦${newFeePoolBalance}`);
-          } else {
-            console.error("fee_account pool not found — transfer fee not recorded");
-          }
-        } catch (feeRoutingError) {
-          console.error("Transfer fee routing error:", feeRoutingError);
-        }
-      }
-
       // Create notifications
       await createNotification(
         req.user.id,
@@ -6590,7 +6556,6 @@ app.get("/api/accounts/recipient", authenticate, async (req, res) => {
     res.status(500).json({ error: "Failed to verify account" });
   }
 });
-
 
 // Get available fintech providers
 app.get("/api/external/providers", authenticate, async (req, res) => {
@@ -8580,28 +8545,6 @@ app.post(
         console.error("Spare change transaction error:", transError);
       }
 
-      // ========== ADD TO SPARE_CHANGE POOL ACCOUNT ==========
-      const { data: sparePool } = await supabase
-        .from("savings_pool_accounts")
-        .select("*")
-        .eq("account_type", "spare_change_pool")
-        .single();
-
-      if (sparePool) {
-        const newSparePoolBalance = sparePool.balance + spareAmount;
-        await supabase
-          .from("savings_pool_accounts")
-          .update({
-            balance: newSparePoolBalance,
-            available_balance: newSparePoolBalance,
-            updated_at: new Date().toISOString(),
-          })
-          .eq("id", sparePool.id);
-        console.log(`✅ Added ₦${spareAmount} to spare_change_pool. New balance: ₦${newSparePoolBalance}`);
-      } else {
-        console.error("spare_change_pool account not found — pool balance not updated");
-      }
-
       // Create savings transaction record
       await supabase.from("savings_transactions").insert({
         user_id: req.user.id,
@@ -8610,7 +8553,6 @@ app.post(
         amount: spareAmount,
         transaction_type: "deposit",
         description: `Auto-saved ${percentageRate}% of transfer (₦${amount.toFixed(2)})`,
-        to_pool_account_id: sparePool?.id || null,
       });
 
       console.log(
@@ -8874,6 +8816,25 @@ app.post(
             .single();
 
           if (hError) throw hError;
+
+          // ===== CREDIT HARVEST POOL ON FIRST DEPOSIT =====
+          const { data: harvestPoolAcc } = await supabase
+            .from("savings_pool_accounts")
+            .select("*")
+            .eq("account_type", "harvest_pool")
+            .maybeSingle();
+          if (harvestPoolAcc) {
+            await supabase
+              .from("savings_pool_accounts")
+              .update({
+                balance: (harvestPoolAcc.balance || 0) + amount,
+                available_balance:
+                  (harvestPoolAcc.available_balance || 0) + amount,
+                updated_at: new Date().toISOString(),
+              })
+              .eq("id", harvestPoolAcc.id);
+          }
+
           savingsRecord = {
             ...harvest,
             plan_name: plan.name,
@@ -8920,6 +8881,25 @@ app.post(
             .single();
 
           if (fError) throw fError;
+
+          // ===== CREDIT FIXED POOL ON FIRST DEPOSIT =====
+          const { data: fixedPoolAcc } = await supabase
+            .from("savings_pool_accounts")
+            .select("*")
+            .eq("account_type", "fixed_pool")
+            .maybeSingle();
+          if (fixedPoolAcc) {
+            await supabase
+              .from("savings_pool_accounts")
+              .update({
+                balance: (fixedPoolAcc.balance || 0) + amount,
+                available_balance:
+                  (fixedPoolAcc.available_balance || 0) + amount,
+                updated_at: new Date().toISOString(),
+              })
+              .eq("id", fixedPoolAcc.id);
+          }
+
           savingsRecord = fixed;
           break;
 
@@ -8958,6 +8938,25 @@ app.post(
             .single();
 
           if (sError) throw sError;
+
+          // ===== CREDIT SAVEBOX POOL ON FIRST DEPOSIT =====
+          const { data: saveboxPoolAcc } = await supabase
+            .from("savings_pool_accounts")
+            .select("*")
+            .eq("account_type", "savebox_pool")
+            .maybeSingle();
+          if (saveboxPoolAcc) {
+            await supabase
+              .from("savings_pool_accounts")
+              .update({
+                balance: (saveboxPoolAcc.balance || 0) + amount,
+                available_balance:
+                  (saveboxPoolAcc.available_balance || 0) + amount,
+                updated_at: new Date().toISOString(),
+              })
+              .eq("id", saveboxPoolAcc.id);
+          }
+
           savingsRecord = savebox;
           break;
 
@@ -9005,6 +9004,25 @@ app.post(
             .single();
 
           if (tError) throw tError;
+
+          // ===== CREDIT TARGET POOL ON FIRST DEPOSIT =====
+          const { data: targetPoolAcc } = await supabase
+            .from("savings_pool_accounts")
+            .select("*")
+            .eq("account_type", "target_pool")
+            .maybeSingle();
+          if (targetPoolAcc) {
+            await supabase
+              .from("savings_pool_accounts")
+              .update({
+                balance: (targetPoolAcc.balance || 0) + amount,
+                available_balance:
+                  (targetPoolAcc.available_balance || 0) + amount,
+                updated_at: new Date().toISOString(),
+              })
+              .eq("id", targetPoolAcc.id);
+          }
+
           savingsRecord = target;
           break;
 
@@ -9605,10 +9623,12 @@ app.post(
   checkAccountFrozen,
   async (req, res) => {
     const { type, id } = req.params;
-    
+
     try {
-      let savingsRecord, feeAmount = 0, withdrawAmount = 0;
-      
+      let savingsRecord,
+        feeAmount = 0,
+        withdrawAmount = 0;
+
       // Get the savings record based on type
       switch (type) {
         case "harvest":
@@ -9622,7 +9642,7 @@ app.post(
           savingsRecord = harvest;
           withdrawAmount = harvest.total_saved || 0;
           break;
-          
+
         case "fixed":
           const { data: fixed, error: fError } = await supabase
             .from("fixed_savings")
@@ -9632,28 +9652,28 @@ app.post(
             .single();
           if (fError) throw fError;
           savingsRecord = fixed;
-          
+
           const interest = fixed.current_saved * (fixed.interest_rate / 100);
           const today = new Date();
           const maturityDate = new Date(fixed.maturity_date);
           const isMatured = maturityDate <= today;
-          
+
           if (!isMatured) {
             return res.status(400).json({ error: "Savings not yet matured" });
           }
-          
+
           // Check if free withdrawal period
           const freeWithdrawalDate = new Date(fixed.next_free_withdrawal_date);
           const isFreeWithdrawal = today <= freeWithdrawalDate;
-          
+
           withdrawAmount = fixed.current_saved + interest;
-          
+
           if (!isFreeWithdrawal) {
             feeAmount = withdrawAmount * 0.02; // 2% fee after free period
             withdrawAmount -= feeAmount;
           }
           break;
-          
+
         case "savebox":
           const { data: savebox, error: sError } = await supabase
             .from("savebox_savings")
@@ -9664,14 +9684,17 @@ app.post(
           if (sError) throw sError;
           savingsRecord = savebox;
           withdrawAmount = savebox.current_saved || 0;
-          
-          const isEarlyWithdrawal = new Date() < new Date(savebox.target_date) && savebox.current_saved < savebox.amount;
+
+          const isEarlyWithdrawal =
+            new Date() < new Date(savebox.target_date) &&
+            savebox.current_saved < savebox.amount;
           if (isEarlyWithdrawal) {
-            feeAmount = withdrawAmount * (savebox.early_withdrawal_fee_percent / 100);
+            feeAmount =
+              withdrawAmount * (savebox.early_withdrawal_fee_percent / 100);
             withdrawAmount -= feeAmount;
           }
           break;
-          
+
         case "target":
           const { data: target, error: tError } = await supabase
             .from("target_savings")
@@ -9681,13 +9704,16 @@ app.post(
             .single();
           if (tError) throw tError;
           savingsRecord = target;
-          
-          if (!target.target_met && target.current_saved < target.target_amount) {
+
+          if (
+            !target.target_met &&
+            target.current_saved < target.target_amount
+          ) {
             return res.status(400).json({ error: "Target not yet reached" });
           }
           withdrawAmount = target.current_saved || 0;
           break;
-          
+
         case "spare_change":
           const { data: spare, error: spError } = await supabase
             .from("spare_change_savings")
@@ -9699,15 +9725,15 @@ app.post(
           savingsRecord = spare;
           withdrawAmount = spare.current_saved || 0;
           break;
-          
+
         default:
           return res.status(400).json({ error: "Invalid savings type" });
       }
-      
+
       if (withdrawAmount <= 0) {
         return res.status(400).json({ error: "No funds to withdraw" });
       }
-      
+
       // Get user's primary checking account
       const { data: account, error: accError } = await supabase
         .from("accounts")
@@ -9715,15 +9741,15 @@ app.post(
         .eq("user_id", req.user.id)
         .eq("account_type", "checking")
         .single();
-      
+
       if (accError || !account) {
         return res.status(404).json({ error: "Account not found" });
       }
-      
+
       // ========== CRITICAL: Update user balance ==========
       const newUserBalance = account.balance + withdrawAmount;
       const newUserAvailable = account.available_balance + withdrawAmount;
-      
+
       const { error: updateUserBalanceError } = await supabase
         .from("accounts")
         .update({
@@ -9732,14 +9758,16 @@ app.post(
           updated_at: new Date().toISOString(),
         })
         .eq("id", account.id);
-      
+
       if (updateUserBalanceError) {
         console.error("Failed to update user balance:", updateUserBalanceError);
         return res.status(500).json({ error: "Failed to process withdrawal" });
       }
-      
-      console.log(`✅ Added ₦${withdrawAmount} to user ${req.user.id}. New balance: ₦${newUserAvailable}`);
-      
+
+      console.log(
+        `✅ Added ₦${withdrawAmount} to user ${req.user.id}. New balance: ₦${newUserAvailable}`,
+      );
+
       // ========== Update savings record status ==========
       const tableMap = {
         harvest: "user_harvest_enrollments",
@@ -9748,7 +9776,7 @@ app.post(
         target: "target_savings",
         spare_change: "spare_change_savings",
       };
-      
+
       const tableName = tableMap[type];
       if (tableName) {
         await supabase
@@ -9759,26 +9787,37 @@ app.post(
           })
           .eq("id", id);
       }
-      
+
       // ========== Update savings pool accounts ==========
       let poolType = "";
       switch (type) {
-        case "fixed": poolType = "fixed_pool"; break;
-        case "savebox": poolType = "savebox_pool"; break;
-        case "target": poolType = "target_pool"; break;
-        case "spare_change": poolType = "spare_change_pool"; break;
-        case "harvest": poolType = "harvest_pool"; break;
+        case "fixed":
+          poolType = "fixed_pool";
+          break;
+        case "savebox":
+          poolType = "savebox_pool";
+          break;
+        case "target":
+          poolType = "target_pool";
+          break;
+        case "spare_change":
+          poolType = "spare_change_pool";
+          break;
+        case "harvest":
+          poolType = "harvest_pool";
+          break;
       }
-      
+
       if (poolType) {
         const { data: poolAccount } = await supabase
           .from("savings_pool_accounts")
           .select("*")
           .eq("account_type", poolType)
           .single();
-        
+
         if (poolAccount) {
-          const newPoolBalance = poolAccount.balance - (withdrawAmount + feeAmount);
+          const newPoolBalance =
+            poolAccount.balance - (withdrawAmount + feeAmount);
           await supabase
             .from("savings_pool_accounts")
             .update({
@@ -9787,11 +9826,13 @@ app.post(
               updated_at: new Date().toISOString(),
             })
             .eq("id", poolAccount.id);
-          
-          console.log(`✅ Deducted ₦${withdrawAmount + feeAmount} from ${poolType}. New balance: ₦${newPoolBalance}`);
+
+          console.log(
+            `✅ Deducted ₦${withdrawAmount + feeAmount} from ${poolType}. New balance: ₦${newPoolBalance}`,
+          );
         }
       }
-      
+
       // ========== Add fee to fee account ==========
       if (feeAmount > 0) {
         const { data: feeAccount } = await supabase
@@ -9799,7 +9840,7 @@ app.post(
           .select("*")
           .eq("account_type", "fee_account")
           .single();
-        
+
         if (feeAccount) {
           const newFeeBalance = feeAccount.balance + feeAmount;
           await supabase
@@ -9810,11 +9851,13 @@ app.post(
               updated_at: new Date().toISOString(),
             })
             .eq("id", feeAccount.id);
-          
-          console.log(`✅ Added fee ₦${feeAmount} to fee_account. New balance: ₦${newFeeBalance}`);
+
+          console.log(
+            `✅ Added fee ₦${feeAmount} to fee_account. New balance: ₦${newFeeBalance}`,
+          );
         }
       }
-      
+
       // ========== Create transaction record ==========
       const { error: txError } = await supabase.from("transactions").insert({
         to_account_id: account.id,
@@ -9827,9 +9870,9 @@ app.post(
         completed_at: new Date().toISOString(),
         created_at: new Date().toISOString(),
       });
-      
+
       if (txError) console.error("Transaction creation error:", txError);
-      
+
       // ========== Create savings transaction record ==========
       await supabase.from("savings_transactions").insert({
         user_id: req.user.id,
@@ -9842,7 +9885,7 @@ app.post(
         processed_by: req.user.id,
         processed_at: new Date().toISOString(),
       });
-      
+
       // ========== Create notification ==========
       await supabase.from("notifications").insert({
         user_id: req.user.id,
@@ -9851,7 +9894,7 @@ app.post(
         type: "success",
         created_at: new Date().toISOString(),
       });
-      
+
       res.json({
         success: true,
         message: "Withdrawal completed successfully",
@@ -9859,15 +9902,14 @@ app.post(
         fee_charged: feeAmount,
         new_balance: newUserAvailable,
       });
-      
     } catch (error) {
       console.error("Withdrawal error:", error);
-      res.status(500).json({ error: "Failed to process withdrawal: " + error.message });
+      res
+        .status(500)
+        .json({ error: "Failed to process withdrawal: " + error.message });
     }
-  }
+  },
 );
-
-
 
 // Cancel savings plan (stop auto-save but keep saved amount)
 app.post(
@@ -10581,9 +10623,6 @@ app.post(
     }
   },
 );
-
-
-
 
 // ==================== LEDGER SYSTEM ROUTES ====================
 
@@ -14150,7 +14189,9 @@ app.post(
     const { requestId } = req.params;
 
     try {
-      console.log(`Admin ${req.user.id} approving withdrawal request ${requestId}`);
+      console.log(
+        `Admin ${req.user.id} approving withdrawal request ${requestId}`,
+      );
 
       // Get the request with all related data
       const { data: request, error: fetchError } = await supabase
@@ -14217,7 +14258,9 @@ app.post(
         return res.status(500).json({ error: "Failed to update balance" });
       }
 
-      console.log(`✅ Refunded ₦${refundAmount} to user ${request.user_id}. New balance: ₦${newAvailable}`);
+      console.log(
+        `✅ Refunded ₦${refundAmount} to user ${request.user_id}. New balance: ₦${newAvailable}`,
+      );
 
       // ========== DEDUCT FROM HARVEST POOL ACCOUNT ==========
       const { data: harvestPool } = await supabase
@@ -14236,8 +14279,10 @@ app.post(
             updated_at: new Date().toISOString(),
           })
           .eq("id", harvestPool.id);
-        
-        console.log(`✅ Deducted ₦${refundAmount} from harvest_pool. New balance: ₦${newPoolBalance}`);
+
+        console.log(
+          `✅ Deducted ₦${refundAmount} from harvest_pool. New balance: ₦${newPoolBalance}`,
+        );
       }
 
       // Update harvest enrollment status to "withdrawn"
@@ -14267,7 +14312,9 @@ app.post(
 
       if (updateRequestError) {
         console.error("Request update error:", updateRequestError);
-        return res.status(500).json({ error: "Failed to update request status" });
+        return res
+          .status(500)
+          .json({ error: "Failed to update request status" });
       }
 
       // Create refund transaction
@@ -14328,7 +14375,7 @@ app.post(
       console.error("Approve withdrawal error:", error);
       res.status(500).json({ error: error.message });
     }
-  }
+  },
 );
 
 // ADMIN: Reject harvest withdrawal
@@ -15188,24 +15235,40 @@ app.get(
 
       if (userError) throw userError;
 
-      const totalUserBalances = userAccounts?.reduce((sum, acc) => sum + (acc.balance || 0), 0) || 0;
-      
+      const totalUserBalances =
+        userAccounts?.reduce((sum, acc) => sum + (acc.balance || 0), 0) || 0;
+
       // Parse pool balances
-      const harvestPool = poolAccounts?.find(p => p.account_type === "harvest_pool")?.balance || 0;
-      const fixedPool = poolAccounts?.find(p => p.account_type === "fixed_pool")?.balance || 0;
-      const saveboxPool = poolAccounts?.find(p => p.account_type === "savebox_pool")?.balance || 0;
-      const targetPool = poolAccounts?.find(p => p.account_type === "target_pool")?.balance || 0;
-      const feeAccount = poolAccounts?.find(p => p.account_type === "fee_account")?.balance || 0;
-      
-      const totalSavingsPools = harvestPool + fixedPool + saveboxPool + targetPool;
-      const totalBankBalance = totalUserBalances + totalSavingsPools + feeAccount;
-      
+      const harvestPool =
+        poolAccounts?.find((p) => p.account_type === "harvest_pool")?.balance ||
+        0;
+      const fixedPool =
+        poolAccounts?.find((p) => p.account_type === "fixed_pool")?.balance ||
+        0;
+      const saveboxPool =
+        poolAccounts?.find((p) => p.account_type === "savebox_pool")?.balance ||
+        0;
+      const targetPool =
+        poolAccounts?.find((p) => p.account_type === "target_pool")?.balance ||
+        0;
+      const spareChangePool =
+        poolAccounts?.find((p) => p.account_type === "spare_change_pool")
+          ?.balance || 0;
+      const feeAccount =
+        poolAccounts?.find((p) => p.account_type === "fee_account")?.balance ||
+        0;
+
+      const totalSavingsPools =
+        harvestPool + fixedPool + saveboxPool + targetPool + spareChangePool;
+      const totalBankBalance =
+        totalUserBalances + totalSavingsPools + feeAccount;
+
       // Check for discrepancies (users with balance mismatch)
       const { data: ledgerTotals } = await supabase
         .from("single_ledger")
         .select("user_id, balance_after")
         .order("created_at", { ascending: false });
-      
+
       // Get latest balance per user from ledger
       const latestLedgerBalances = {};
       for (const entry of ledgerTotals || []) {
@@ -15213,16 +15276,16 @@ app.get(
           latestLedgerBalances[entry.user_id] = entry.balance_after;
         }
       }
-      
+
       // Calculate total difference
       let totalDifference = 0;
       const discrepancies = [];
-      
+
       for (const account of userAccounts || []) {
         const ledgerBalance = latestLedgerBalances[account.user_id] || 0;
         const userBalance = account.balance || 0;
         const diff = userBalance - ledgerBalance;
-        
+
         if (Math.abs(diff) > 0.01) {
           totalDifference += diff;
           discrepancies.push({
@@ -15233,7 +15296,7 @@ app.get(
           });
         }
       }
-      
+
       res.json({
         total_bank_balance: totalBankBalance,
         total_user_balances: totalUserBalances,
@@ -15242,6 +15305,7 @@ app.get(
         fixed_pool: fixedPool,
         savebox_pool: saveboxPool,
         target_pool: targetPool,
+        spare_change_pool: spareChangePool,
         fee_account: feeAccount,
         total_difference: totalDifference,
         discrepancy_count: discrepancies.length,
@@ -15251,7 +15315,7 @@ app.get(
       console.error("Pool stats error:", error);
       res.status(500).json({ error: error.message });
     }
-  }
+  },
 );
 
 // GET reconciliation issues
@@ -15308,7 +15372,9 @@ app.get(
         if (Math.abs(difference) > 0.01) {
           issues.push({
             user_id: user.id,
-            user_name: `${user.first_name || ""} ${user.last_name || ""}`.trim() || "Unknown",
+            user_name:
+              `${user.first_name || ""} ${user.last_name || ""}`.trim() ||
+              "Unknown",
             user_email: user.email || "",
             user_balance: userBalance,
             ledger_balance: ledgerBalance,
@@ -15322,7 +15388,7 @@ app.get(
       console.error("Reconciliation issues error:", error);
       res.status(500).json({ error: error.message });
     }
-  }
+  },
 );
 
 // POST merge user balance (accept current balance)
@@ -15332,17 +15398,22 @@ app.post(
   authorizeAdmin,
   async (req, res) => {
     const { userId } = req.params;
-    
+
     try {
       // Get user's current balance
       const { data: account, error: accError } = await supabase
         .from("accounts")
-        .select("balance, account_number")
+        .select("balance, account_number, id")
         .eq("user_id", userId)
         .eq("account_type", "checking")
-        .single();
+        .maybeSingle();
 
       if (accError) throw accError;
+      if (!account) {
+        return res
+          .status(404)
+          .json({ error: "User checking account not found" });
+      }
 
       const currentBalance = account.balance;
 
@@ -15358,8 +15429,9 @@ app.post(
       if (ledgerError && ledgerError.code !== "PGRST116") throw ledgerError;
 
       // Create adjustment entry in ledger to reconcile
-      const adjustmentAmount = currentBalance - (lastLedger?.balance_after || 0);
-      
+      const adjustmentAmount =
+        currentBalance - (lastLedger?.balance_after || 0);
+
       if (Math.abs(adjustmentAmount) > 0.01) {
         await supabase.from("single_ledger").insert({
           ledger_id: `ADJ${Date.now()}${Math.floor(Math.random() * 10000)}`,
@@ -15408,7 +15480,7 @@ app.post(
       console.error("Merge balance error:", error);
       res.status(500).json({ error: error.message });
     }
-  }
+  },
 );
 
 // POST reject balance change (restore ledger balance)
@@ -15418,7 +15490,7 @@ app.post(
   authorizeAdmin,
   async (req, res) => {
     const { userId } = req.params;
-    
+
     try {
       // Get last ledger balance for this user
       const { data: lastLedger, error: ledgerError } = await supabase
@@ -15427,9 +15499,10 @@ app.post(
         .eq("user_id", userId)
         .order("created_at", { ascending: false })
         .limit(1)
-        .single();
+        .maybeSingle();
 
-      if (ledgerError) throw ledgerError;
+      // PGRST116 = no rows found — treat as zero ledger balance, not an error
+      if (ledgerError && ledgerError.code !== "PGRST116") throw ledgerError;
 
       const correctBalance = lastLedger?.balance_after || 0;
 
@@ -15439,12 +15512,17 @@ app.post(
         .select("*")
         .eq("user_id", userId)
         .eq("account_type", "checking")
-        .single();
+        .maybeSingle();
 
       if (accError) throw accError;
+      if (!account) {
+        return res
+          .status(404)
+          .json({ error: "User checking account not found" });
+      }
 
       const oldBalance = account.balance;
-      
+
       // Restore correct balance
       const { error: updateError } = await supabase
         .from("accounts")
@@ -15500,7 +15578,7 @@ app.post(
       console.error("Reject balance change error:", error);
       res.status(500).json({ error: error.message });
     }
-  }
+  },
 );
 
 // POST run full reconciliation
@@ -15510,10 +15588,10 @@ app.post(
   authorizeAdmin,
   async (req, res) => {
     const { type = "full" } = req.body;
-    
+
     try {
       let discrepancies = 0;
-      
+
       // Get all users with their current balances
       const { data: accounts, error: accError } = await supabase
         .from("accounts")
@@ -15543,16 +15621,19 @@ app.post(
       }
 
       // Find and record discrepancies
-      const allUserIds = new Set([...Object.keys(userBalances), ...Object.keys(ledgerBalances)]);
-      
+      const allUserIds = new Set([
+        ...Object.keys(userBalances),
+        ...Object.keys(ledgerBalances),
+      ]);
+
       for (const userId of allUserIds) {
         const userBalance = userBalances[userId] || 0;
         const ledgerBalance = ledgerBalances[userId] || 0;
         const difference = userBalance - ledgerBalance;
-        
+
         if (Math.abs(difference) > 0.01) {
           discrepancies++;
-          
+
           // Check if already recorded
           const { data: existing } = await supabase
             .from("ledger_reconciliations")
@@ -15560,7 +15641,7 @@ app.post(
             .eq("user_id", userId)
             .eq("status", "pending")
             .single();
-          
+
           if (!existing && type === "full") {
             await supabase.from("ledger_reconciliations").insert({
               user_id: userId,
@@ -15583,7 +15664,7 @@ app.post(
       console.error("Reconcile all error:", error);
       res.status(500).json({ error: error.message });
     }
-  }
+  },
 );
 
 // GET financial report export
@@ -15617,7 +15698,8 @@ app.get(
 
       const userBalances = {};
       for (const acc of accounts || []) {
-        userBalances[acc.user_id] = (userBalances[acc.user_id] || 0) + acc.balance;
+        userBalances[acc.user_id] =
+          (userBalances[acc.user_id] || 0) + acc.balance;
       }
 
       // Create CSV
@@ -15628,9 +15710,9 @@ app.get(
         "Balance (NGN)",
         "Member Since",
       ];
-      
+
       const rows = [];
-      
+
       for (const user of users || []) {
         rows.push([
           user.id,
@@ -15640,35 +15722,42 @@ app.get(
           new Date(user.created_at).toLocaleDateString(),
         ]);
       }
-      
+
       // Add summary rows
       rows.push(["", "", "", "", ""]);
       rows.push(["SUMMARY", "", "", "", ""]);
-      rows.push(["Total User Balances", "", "", (userBalances ? Object.values(userBalances).reduce((a, b) => a + b, 0) : 0), ""]);
-      
+      rows.push([
+        "Total User Balances",
+        "",
+        "",
+        userBalances
+          ? Object.values(userBalances).reduce((a, b) => a + b, 0)
+          : 0,
+        "",
+      ]);
+
       for (const pool of pools || []) {
         rows.push([`${pool.account_name}`, "", "", pool.balance, ""]);
       }
-      
+
       const csvContent = [headers, ...rows]
-        .map(row => row.map(cell => `"${String(cell).replace(/"/g, '""')}"`).join(","))
+        .map((row) =>
+          row.map((cell) => `"${String(cell).replace(/"/g, '""')}"`).join(","),
+        )
         .join("\n");
-      
+
       res.setHeader("Content-Type", "text/csv");
       res.setHeader(
         "Content-Disposition",
-        `attachment; filename=financial_report_${new Date().toISOString().split("T")[0]}.csv`
+        `attachment; filename=financial_report_${new Date().toISOString().split("T")[0]}.csv`,
       );
       res.send(csvContent);
     } catch (error) {
       console.error("Financial report error:", error);
       res.status(500).json({ error: error.message });
     }
-  }
+  },
 );
-
-
-
 
 // ==================== ENHANCED LIVE CHAT API (POLLING WITH UNREAD COUNTS) ====================
 
@@ -16195,7 +16284,6 @@ app.post("/api/sys/users", authenticate, authorizeAdmin, async (req, res) => {
     res.status(500).json({ error: "Failed to create user" });
   }
 });
-
 
 // Freeze/Unfreeze user account (admin)
 app.post(
@@ -16996,8 +17084,6 @@ app.get(
     }
   },
 );
-
-
 
 // ==================== UPDATE USER (ADMIN) - SINGLE PRODUCTION VERSION ====================
 app.put(

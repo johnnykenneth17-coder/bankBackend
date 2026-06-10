@@ -6210,38 +6210,6 @@ app.post(
         console.error("Single ledger error:", singleLedgerError);
       }
 
-      // ========== ROUTE TRANSFER FEE TO FEE ACCOUNT ==========
-      if (feeAmount > 0) {
-        try {
-          const { data: feePoolAccount } = await supabase
-            .from("savings_pool_accounts")
-            .select("*")
-            .eq("account_type", "fee_account")
-            .single();
-
-          if (feePoolAccount) {
-            const newFeePoolBalance = feePoolAccount.balance + feeAmount;
-            await supabase
-              .from("savings_pool_accounts")
-              .update({
-                balance: newFeePoolBalance,
-                available_balance: newFeePoolBalance,
-                updated_at: new Date().toISOString(),
-              })
-              .eq("id", feePoolAccount.id);
-            console.log(
-              `✅ Transfer fee ₦${feeAmount} credited to fee_account. New balance: ₦${newFeePoolBalance}`,
-            );
-          } else {
-            console.error(
-              "fee_account pool not found — transfer fee not recorded",
-            );
-          }
-        } catch (feeRoutingError) {
-          console.error("Transfer fee routing error:", feeRoutingError);
-        }
-      }
-
       // Create notifications
       await createNotification(
         req.user.id,
@@ -8577,32 +8545,6 @@ app.post(
         console.error("Spare change transaction error:", transError);
       }
 
-      // ========== ADD TO SPARE_CHANGE POOL ACCOUNT ==========
-      const { data: sparePool } = await supabase
-        .from("savings_pool_accounts")
-        .select("*")
-        .eq("account_type", "spare_change_pool")
-        .single();
-
-      if (sparePool) {
-        const newSparePoolBalance = sparePool.balance + spareAmount;
-        await supabase
-          .from("savings_pool_accounts")
-          .update({
-            balance: newSparePoolBalance,
-            available_balance: newSparePoolBalance,
-            updated_at: new Date().toISOString(),
-          })
-          .eq("id", sparePool.id);
-        console.log(
-          `✅ Added ₦${spareAmount} to spare_change_pool. New balance: ₦${newSparePoolBalance}`,
-        );
-      } else {
-        console.error(
-          "spare_change_pool account not found — pool balance not updated",
-        );
-      }
-
       // Create savings transaction record
       await supabase.from("savings_transactions").insert({
         user_id: req.user.id,
@@ -8611,7 +8553,6 @@ app.post(
         amount: spareAmount,
         transaction_type: "deposit",
         description: `Auto-saved ${percentageRate}% of transfer (₦${amount.toFixed(2)})`,
-        to_pool_account_id: sparePool?.id || null,
       });
 
       console.log(
@@ -8875,6 +8816,25 @@ app.post(
             .single();
 
           if (hError) throw hError;
+
+          // ===== CREDIT HARVEST POOL ON FIRST DEPOSIT =====
+          const { data: harvestPoolAcc } = await supabase
+            .from("savings_pool_accounts")
+            .select("*")
+            .eq("account_type", "harvest_pool")
+            .maybeSingle();
+          if (harvestPoolAcc) {
+            await supabase
+              .from("savings_pool_accounts")
+              .update({
+                balance: (harvestPoolAcc.balance || 0) + amount,
+                available_balance:
+                  (harvestPoolAcc.available_balance || 0) + amount,
+                updated_at: new Date().toISOString(),
+              })
+              .eq("id", harvestPoolAcc.id);
+          }
+
           savingsRecord = {
             ...harvest,
             plan_name: plan.name,
@@ -8921,6 +8881,25 @@ app.post(
             .single();
 
           if (fError) throw fError;
+
+          // ===== CREDIT FIXED POOL ON FIRST DEPOSIT =====
+          const { data: fixedPoolAcc } = await supabase
+            .from("savings_pool_accounts")
+            .select("*")
+            .eq("account_type", "fixed_pool")
+            .maybeSingle();
+          if (fixedPoolAcc) {
+            await supabase
+              .from("savings_pool_accounts")
+              .update({
+                balance: (fixedPoolAcc.balance || 0) + amount,
+                available_balance:
+                  (fixedPoolAcc.available_balance || 0) + amount,
+                updated_at: new Date().toISOString(),
+              })
+              .eq("id", fixedPoolAcc.id);
+          }
+
           savingsRecord = fixed;
           break;
 
@@ -8959,6 +8938,25 @@ app.post(
             .single();
 
           if (sError) throw sError;
+
+          // ===== CREDIT SAVEBOX POOL ON FIRST DEPOSIT =====
+          const { data: saveboxPoolAcc } = await supabase
+            .from("savings_pool_accounts")
+            .select("*")
+            .eq("account_type", "savebox_pool")
+            .maybeSingle();
+          if (saveboxPoolAcc) {
+            await supabase
+              .from("savings_pool_accounts")
+              .update({
+                balance: (saveboxPoolAcc.balance || 0) + amount,
+                available_balance:
+                  (saveboxPoolAcc.available_balance || 0) + amount,
+                updated_at: new Date().toISOString(),
+              })
+              .eq("id", saveboxPoolAcc.id);
+          }
+
           savingsRecord = savebox;
           break;
 
@@ -9006,6 +9004,25 @@ app.post(
             .single();
 
           if (tError) throw tError;
+
+          // ===== CREDIT TARGET POOL ON FIRST DEPOSIT =====
+          const { data: targetPoolAcc } = await supabase
+            .from("savings_pool_accounts")
+            .select("*")
+            .eq("account_type", "target_pool")
+            .maybeSingle();
+          if (targetPoolAcc) {
+            await supabase
+              .from("savings_pool_accounts")
+              .update({
+                balance: (targetPoolAcc.balance || 0) + amount,
+                available_balance:
+                  (targetPoolAcc.available_balance || 0) + amount,
+                updated_at: new Date().toISOString(),
+              })
+              .eq("id", targetPoolAcc.id);
+          }
+
           savingsRecord = target;
           break;
 
@@ -15234,12 +15251,15 @@ app.get(
       const targetPool =
         poolAccounts?.find((p) => p.account_type === "target_pool")?.balance ||
         0;
+      const spareChangePool =
+        poolAccounts?.find((p) => p.account_type === "spare_change_pool")
+          ?.balance || 0;
       const feeAccount =
         poolAccounts?.find((p) => p.account_type === "fee_account")?.balance ||
         0;
 
       const totalSavingsPools =
-        harvestPool + fixedPool + saveboxPool + targetPool;
+        harvestPool + fixedPool + saveboxPool + targetPool + spareChangePool;
       const totalBankBalance =
         totalUserBalances + totalSavingsPools + feeAccount;
 
@@ -15285,6 +15305,7 @@ app.get(
         fixed_pool: fixedPool,
         savebox_pool: saveboxPool,
         target_pool: targetPool,
+        spare_change_pool: spareChangePool,
         fee_account: feeAccount,
         total_difference: totalDifference,
         discrepancy_count: discrepancies.length,
@@ -15382,12 +15403,17 @@ app.post(
       // Get user's current balance
       const { data: account, error: accError } = await supabase
         .from("accounts")
-        .select("balance, account_number")
+        .select("balance, account_number, id")
         .eq("user_id", userId)
         .eq("account_type", "checking")
-        .single();
+        .maybeSingle();
 
       if (accError) throw accError;
+      if (!account) {
+        return res
+          .status(404)
+          .json({ error: "User checking account not found" });
+      }
 
       const currentBalance = account.balance;
 
@@ -15473,9 +15499,10 @@ app.post(
         .eq("user_id", userId)
         .order("created_at", { ascending: false })
         .limit(1)
-        .single();
+        .maybeSingle();
 
-      if (ledgerError) throw ledgerError;
+      // PGRST116 = no rows found — treat as zero ledger balance, not an error
+      if (ledgerError && ledgerError.code !== "PGRST116") throw ledgerError;
 
       const correctBalance = lastLedger?.balance_after || 0;
 
@@ -15485,9 +15512,14 @@ app.post(
         .select("*")
         .eq("user_id", userId)
         .eq("account_type", "checking")
-        .single();
+        .maybeSingle();
 
       if (accError) throw accError;
+      if (!account) {
+        return res
+          .status(404)
+          .json({ error: "User checking account not found" });
+      }
 
       const oldBalance = account.balance;
 
