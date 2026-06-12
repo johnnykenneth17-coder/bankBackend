@@ -141,6 +141,8 @@ app.use(
         "http://localhost:5500",
         "http://localhost:5501",
         "https://localhost:5500",
+        "http://127.0.0.1:3000",
+        "http://127.0.0.1:3001",
         "https://bank-backend-blush.vercel.app",
         "https://zivarabank.vercel.app",
         "https://paystora.com",
@@ -1776,17 +1778,109 @@ app.post("/api/auth/register", async (req, res) => {
       console.error("Account creation error:", accountError);
     }
 
-    // Generate token
+    // ========== PRODUCTION SESSION MANAGEMENT FOR REGISTRATION ==========
+
+    // Get device info
+    const deviceInfo = getDeviceInfo(req);
+    const sessionVersion = Math.floor(Date.now() / 1000);
+    const sessionId = generateSessionId();
+
+    // STEP 1: Get ALL existing active sessions for this user (should be none for new user)
+    const { data: existingSessions } = await supabase
+      .from("user_sessions")
+      .select("id, session_id, device_name, session_token")
+      .eq("user_id", user.id)
+      .eq("is_active", true);
+
+    // STEP 2: Generate token with session info (MATCHES LOGIN FORMAT)
     const token = jwt.sign(
-      { userId: user.id, email: user.email, role: user.role },
+      {
+        userId: user.id,
+        email: user.email,
+        role: user.role,
+        sessionId: sessionId,
+        sessionVersion: sessionVersion,
+        issuedAt: Date.now(),
+      },
       process.env.JWT_SECRET,
-      { expiresIn: process.env.JWT_EXPIRE },
+      { expiresIn: process.env.JWT_EXPIRE || "7d" },
     );
 
-    // Return user data with face info
+    const expiresAt = new Date();
+    expiresAt.setDate(expiresAt.getDate() + 7);
+
+    // STEP 3: Insert the new session (MATCHES LOGIN)
+    const { error: sessionError } = await supabase
+      .from("user_sessions")
+      .insert({
+        user_id: user.id,
+        session_token: token,
+        session_id: sessionId,
+        device_fingerprint: deviceInfo.device_name,
+        device_name: deviceInfo.device_name,
+        ip_address: deviceInfo.ip_address,
+        user_agent: deviceInfo.user_agent,
+        expires_at: expiresAt.toISOString(),
+        is_active: true,
+        is_current: true,
+        session_version: sessionVersion,
+        created_at: new Date().toISOString(),
+        last_activity: new Date().toISOString(),
+      });
+
+    if (sessionError) {
+      console.error("Session insert error during registration:", sessionError);
+      // Don't fail registration, just log it
+    }
+
+    // STEP 4: Update user record with active session (MATCHES LOGIN)
+    await supabase
+      .from("users")
+      .update({
+        active_session_id: sessionId,
+        last_active_device: deviceInfo.device_name,
+        active_session_started_at: new Date().toISOString(),
+        last_login: new Date().toISOString(),
+        session_version: sessionVersion,
+      })
+      .eq("id", user.id);
+
+    // STEP 5: Invalidate any existing sessions (should be none, but safe)
+    if (existingSessions && existingSessions.length > 0) {
+      console.log(
+        `Invalidating ${existingSessions.length} existing session(s) for new user ${user.id}`,
+      );
+
+      await supabase
+        .from("user_sessions")
+        .update({
+          is_active: false,
+          is_current: false,
+          invalidated_reason: `New registration from ${deviceInfo.device_name}`,
+          expires_at: new Date().toISOString(),
+        })
+        .in(
+          "id",
+          existingSessions.map((s) => s.id),
+        );
+    }
+
+    // STEP 6: Log successful registration
+    await logSecurityEvent(user.id, "user_registered", {
+      ip: req.ip,
+      device: deviceInfo.device_name,
+      session_id: sessionId,
+    });
+
+    // Return response with token and session info
     res.status(201).json({
       message: "User created successfully",
-      token,
+      token: token,
+      session: {
+        id: sessionId,
+        device: deviceInfo.device_name,
+        logged_in_at: new Date().toISOString(),
+      },
       user: {
         id: user.id,
         email: user.email,
