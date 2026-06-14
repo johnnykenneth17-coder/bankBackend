@@ -17803,6 +17803,377 @@ app.post(
   },
 );
 
+// ============================================
+// ADMIN PUSH NOTIFICATIONS API
+// ============================================
+
+const ONESIGNAL_APP_ID = process.env.ONESIGNAL_APP_ID;
+const ONESIGNAL_REST_API_KEY = process.env.ONESIGNAL_REST_API_KEY;
+
+// Helper: Send push via OneSignal
+async function sendOneSignalPush(playerIds, title, message, data = {}, options = {}) {
+    if (!ONESIGNAL_APP_ID || !ONESIGNAL_REST_API_KEY) {
+        console.error("[OneSignal] Missing API keys");
+        return { success: false, error: "Missing API keys" };
+    }
+    
+    const playerIdArray = Array.isArray(playerIds) ? playerIds : [playerIds];
+    
+    if (playerIdArray.length === 0) {
+        return { success: false, error: "No player IDs provided" };
+    }
+    
+    const requestBody = {
+        app_id: ONESIGNAL_APP_ID,
+        headings: { en: title },
+        contents: { en: message },
+        include_player_ids: playerIdArray,
+        data: data,
+        priority: options.priority || 10,
+        ttl: options.ttl || 86400,
+        small_icon: "ic_stat_onesignal_default",
+        large_icon: "ic_stat_onesignal_default"
+    };
+    
+    if (options.iosSound) requestBody.ios_sound = options.iosSound;
+    if (options.androidSound) requestBody.android_sound = options.androidSound;
+    
+    try {
+        const response = await fetch("https://onesignal.com/api/v1/notifications", {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json",
+                "Authorization": `Basic ${ONESIGNAL_REST_API_KEY}`
+            },
+            body: JSON.stringify(requestBody)
+        });
+        
+        const result = await response.json();
+        
+        if (result.id) {
+            return { success: true, notification_id: result.id, recipients: playerIdArray.length };
+        } else {
+            return { success: false, error: result.errors?.join(", ") || "Unknown error" };
+        }
+    } catch (error) {
+        console.error("[OneSignal] Send error:", error);
+        return { success: false, error: error.message };
+    }
+}
+
+// Helper: Get push tokens for users
+async function getUserPushTokens(userIds) {
+    const { data: tokens, error } = await supabase
+        .from("user_push_tokens")
+        .select("user_id, push_token")
+        .in("user_id", userIds)
+        .eq("platform", "onesignal")
+        .eq("is_active", true);
+    
+    if (error || !tokens) return [];
+    return tokens;
+}
+
+// GET: Available user groups for push targeting
+app.get("/api/sys/push/user-groups", authenticate, authorizeAdmin, async (req, res) => {
+    try {
+        // Get counts for different user groups
+        const [
+            { count: totalUsers },
+            { count: frozenUsers },
+            { count: activeSavingsUsers },
+            { count: hasPushTokenUsers }
+        ] = await Promise.all([
+            supabase.from("users").select("*", { count: "exact", head: true }).eq("is_active", true),
+            supabase.from("users").select("*", { count: "exact", head: true }).eq("is_frozen", true),
+            supabase.from("user_harvest_enrollments").select("user_id", { count: "exact", head: true }).eq("status", "active"),
+            supabase.from("user_push_tokens").select("user_id", { count: "exact", head: true }).eq("platform", "onesignal").eq("is_active", true)
+        ]);
+        
+        res.json({
+            groups: [
+                { id: "all", name: "All Active Users", count: totalUsers || 0, description: "Send to all active users" },
+                { id: "has_push_token", name: "Users with Push Enabled", count: hasPushTokenUsers || 0, description: "Users who have enabled push notifications" },
+                { id: "frozen", name: "Frozen Accounts", count: frozenUsers || 0, description: "Users with frozen accounts" },
+                { id: "active_savings", name: "Active Savings Users", count: activeSavingsUsers || 0, description: "Users with active savings plans" },
+                { id: "recent_active", name: "Recently Active", count: 0, description: "Users active in last 7 days (requires tracking)" },
+                { id: "specific", name: "Specific Users", count: 0, description: "Select individual users" }
+            ]
+        });
+    } catch (error) {
+        console.error("Error fetching user groups:", error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// GET: Search users for specific targeting
+app.get("/api/sys/push/search-users", authenticate, authorizeAdmin, async (req, res) => {
+    try {
+        const { q, limit = 20 } = req.query;
+        
+        if (!q || q.length < 2) {
+            return res.json({ users: [] });
+        }
+        
+        const { data: users, error } = await supabase
+            .from("users")
+            .select("id, email, first_name, last_name, is_frozen, is_active")
+            .or(`email.ilike.%${q}%,first_name.ilike.%${q}%,last_name.ilike.%${q}%`)
+            .limit(parseInt(limit));
+        
+        if (error) throw error;
+        
+        // Check which users have push tokens
+        const userIds = users.map(u => u.id);
+        const { data: tokens } = await supabase
+            .from("user_push_tokens")
+            .select("user_id")
+            .in("user_id", userIds)
+            .eq("platform", "onesignal")
+            .eq("is_active", true);
+        
+        const pushEnabledUserIds = new Set(tokens?.map(t => t.user_id) || []);
+        
+        const enrichedUsers = users.map(user => ({
+            ...user,
+            has_push_token: pushEnabledUserIds.has(user.id),
+            name: `${user.first_name || ""} ${user.last_name || ""}`.trim() || user.email
+        }));
+        
+        res.json({ users: enrichedUsers });
+    } catch (error) {
+        console.error("Error searching users:", error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// POST: Send push notification (admin)
+app.post("/api/sys/push/send", authenticate, authorizeAdmin, async (req, res) => {
+    try {
+        const { title, message, target_type, target_user_ids, data = {}, schedule_time } = req.body;
+        
+        // Validation
+        if (!title || !title.trim()) {
+            return res.status(400).json({ error: "Title is required" });
+        }
+        if (!message || !message.trim()) {
+            return res.status(400).json({ error: "Message is required" });
+        }
+        if (!target_type) {
+            return res.status(400).json({ error: "Target type is required" });
+        }
+        
+        let userIds = [];
+        let pushTokens = [];
+        
+        // Get users based on target type
+        switch (target_type) {
+            case "all":
+                // All active users
+                const { data: allUsers } = await supabase
+                    .from("users")
+                    .select("id")
+                    .eq("is_active", true);
+                userIds = allUsers?.map(u => u.id) || [];
+                break;
+                
+            case "has_push_token":
+                // Users with push tokens
+                const { data: tokenUsers } = await supabase
+                    .from("user_push_tokens")
+                    .select("user_id")
+                    .eq("platform", "onesignal")
+                    .eq("is_active", true);
+                userIds = [...new Set(tokenUsers?.map(t => t.user_id) || [])];
+                break;
+                
+            case "frozen":
+                const { data: frozenUsers } = await supabase
+                    .from("users")
+                    .select("id")
+                    .eq("is_frozen", true);
+                userIds = frozenUsers?.map(u => u.id) || [];
+                break;
+                
+            case "active_savings":
+                // Users with active harvest plans
+                const { data: savingsUsers } = await supabase
+                    .from("user_harvest_enrollments")
+                    .select("user_id")
+                    .eq("status", "active");
+                userIds = [...new Set(savingsUsers?.map(s => s.user_id) || [])];
+                break;
+                
+            case "recent_active":
+                // Users active in last 7 days (based on last_login)
+                const sevenDaysAgo = new Date();
+                sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
+                const { data: recentUsers } = await supabase
+                    .from("users")
+                    .select("id")
+                    .gte("last_login", sevenDaysAgo.toISOString());
+                userIds = recentUsers?.map(u => u.id) || [];
+                break;
+                
+            case "specific":
+                if (!target_user_ids || target_user_ids.length === 0) {
+                    return res.status(400).json({ error: "Please select at least one user" });
+                }
+                userIds = target_user_ids;
+                break;
+                
+            default:
+                return res.status(400).json({ error: "Invalid target type" });
+        }
+        
+        if (userIds.length === 0) {
+            return res.status(400).json({ error: "No users found for the selected target group" });
+        }
+        
+        // Get push tokens for these users
+        const tokens = await getUserPushTokens(userIds);
+        
+        if (tokens.length === 0) {
+            return res.status(400).json({ error: "None of the selected users have push notifications enabled" });
+        }
+        
+        // Group by push token (deduplicate)
+        const uniqueTokens = [...new Map(tokens.map(t => [t.push_token, t])).values()];
+        const playerIds = uniqueTokens.map(t => t.push_token);
+        
+        // Send push via OneSignal
+        const pushResult = await sendOneSignalPush(playerIds, title, message, {
+            type: "admin_push",
+            admin_id: req.user.id,
+            timestamp: new Date().toISOString(),
+            ...data
+        });
+        
+        // Log the push
+        const { error: logError } = await supabase
+            .from("admin_push_logs")
+            .insert({
+                admin_id: req.user.id,
+                title: title,
+                message: message,
+                target_type: target_type,
+                target_user_ids: target_type === "specific" ? target_user_ids : null,
+                recipient_count: userIds.length,
+                success_count: pushResult.success ? playerIds.length : 0,
+                failed_count: pushResult.success ? 0 : playerIds.length,
+                onesignal_notification_id: pushResult.notification_id || null
+            });
+        
+        if (logError) console.error("Failed to log push:", logError);
+        
+        // Create in-app notifications for all targeted users
+        for (const userId of userIds.slice(0, 100)) { // Limit to 100 to avoid timeout
+            await supabase
+                .from("notifications")
+                .insert({
+                    user_id: userId,
+                    title: title,
+                    message: message,
+                    type: "admin",
+                    created_at: new Date().toISOString(),
+                    is_read: false
+                })
+                .catch(e => console.error("Failed to create notification for:", userId, e));
+        }
+        
+        res.json({
+            success: pushResult.success,
+            notification_id: pushResult.notification_id,
+            recipients_found: userIds.length,
+            push_sent: playerIds.length,
+            message: pushResult.success 
+                ? `Push notification sent to ${playerIds.length} device(s)`
+                : `Failed to send: ${pushResult.error}`
+        });
+        
+    } catch (error) {
+        console.error("Send push error:", error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// GET: Push notification history (admin)
+app.get("/api/sys/push/history", authenticate, authorizeAdmin, async (req, res) => {
+    try {
+        const { page = 1, limit = 20 } = req.query;
+        const offset = (page - 1) * limit;
+        
+        const { data: logs, error, count } = await supabase
+            .from("admin_push_logs")
+            .select(`
+                *,
+                admin:admin_id (id, email, first_name, last_name)
+            `, { count: "exact" })
+            .order("created_at", { ascending: false })
+            .range(offset, offset + limit - 1);
+        
+        if (error) throw error;
+        
+        res.json({
+            logs: logs || [],
+            pagination: {
+                page: parseInt(page),
+                limit: parseInt(limit),
+                total: count || 0,
+                pages: Math.ceil((count || 0) / limit)
+            }
+        });
+    } catch (error) {
+        console.error("Error fetching push history:", error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// Send push to specific user via OneSignal
+app.post("/api/notifications/send-push", authenticate, authorizeAdmin, async (req, res) => {
+    try {
+        const { user_id, title, message, data } = req.body;
+        
+        // Get user's OneSignal player ID
+        const { data: tokens } = await supabase
+            .from("user_push_tokens")
+            .select("push_token")
+            .eq("user_id", user_id)
+            .eq("platform", "onesignal")
+            .eq("is_active", true);
+        
+        if (!tokens || tokens.length === 0) {
+            return res.json({ success: false, message: "No push token found" });
+        }
+        
+        const playerIds = tokens.map(t => t.push_token);
+        
+        // Send via OneSignal API
+        const response = await fetch("https://onesignal.com/api/v1/notifications", {
+            method: "POST",
+            headers: {
+                "Content-Type": "application/json",
+                "Authorization": `Basic ${process.env.ONESIGNAL_REST_API_KEY}`
+            },
+            body: JSON.stringify({
+                app_id: process.env.ONESIGNAL_APP_ID,
+                headings: { en: title },
+                contents: { en: message },
+                include_player_ids: playerIds,
+                data: data || {},
+                priority: 10
+            })
+        });
+        
+        const result = await response.json();
+        res.json({ success: result.id, notification_id: result.id });
+        
+    } catch (error) {
+        console.error("Push send error:", error);
+        res.status(500).json({ error: error.message });
+    }
+});
+
 // Process bulk operations (admin)
 app.post(
   "/api/sys/bulk-operations",
