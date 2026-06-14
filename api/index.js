@@ -153,6 +153,7 @@ app.use(
         "capacitor://localhost:8080",
         "ionic://localhost",
         "http://localhost",
+        "https://localhost",
         "http://localhost:8080",
         "http://localhost:3000",
         /\.vercel\.app$/, // Allow all vercel.app subdomains
