@@ -5656,6 +5656,289 @@ app.get(
   },
 );
 
+// ============================================================
+// ADD THIS TO YOUR index.js FILE
+// ============================================================
+
+// ==================== CHART OF ACCOUNTS API ====================
+
+// GET all chart of accounts
+app.get(
+  '/api/sys/ledger/chart-of-accounts',
+  authenticate,
+  authorizeAdmin,
+  async (req, res) => {
+    try {
+      // Fetch all active accounts from the chart_of_accounts table
+      const { data: accounts, error } = await supabase
+        .from('chart_of_accounts')
+        .select('*')
+        .order('account_code', { ascending: true });
+
+      if (error) {
+        console.error('Error fetching chart of accounts:', error);
+        return res.status(500).json({ 
+          error: 'Failed to fetch chart of accounts',
+          details: error.message
+        });
+      }
+
+      // Return the accounts, or an empty array if none exist
+      res.json({
+        success: true,
+        accounts: accounts || []
+      });
+
+    } catch (error) {
+      console.error('Chart of accounts error:', error);
+      res.status(500).json({ 
+        error: 'Internal server error',
+        details: error.message
+      });
+    }
+  }
+);
+
+// POST - Add a new account to chart of accounts
+app.post(
+  '/api/sys/ledger/chart-of-accounts',
+  authenticate,
+  authorizeAdmin,
+  async (req, res) => {
+    try {
+      const {
+        account_code,
+        account_name,
+        account_type,
+        normal_balance,
+        description,
+        parent_account_id
+      } = req.body;
+
+      // Validate required fields
+      if (!account_code || !account_name || !account_type || !normal_balance) {
+        return res.status(400).json({
+          error: 'Missing required fields: account_code, account_name, account_type, normal_balance'
+        });
+      }
+
+      // Check if account code already exists
+      const { data: existing, error: checkError } = await supabase
+        .from('chart_of_accounts')
+        .select('account_code')
+        .eq('account_code', account_code)
+        .maybeSingle();
+
+      if (existing) {
+        return res.status(409).json({
+          error: 'Account code already exists',
+          account_code: account_code
+        });
+      }
+
+      // Insert new account
+      const { data: account, error: insertError } = await supabase
+        .from('chart_of_accounts')
+        .insert({
+          account_code,
+          account_name,
+          account_type,
+          normal_balance,
+          description: description || null,
+          parent_account_id: parent_account_id || null,
+          is_active: true,
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString()
+        })
+        .select()
+        .single();
+
+      if (insertError) {
+        console.error('Error creating account:', insertError);
+        return res.status(500).json({
+          error: 'Failed to create account',
+          details: insertError.message
+        });
+      }
+
+      // Log admin action
+      await supabase.from('admin_actions').insert({
+        admin_id: req.user.id,
+        action_type: 'create_chart_account',
+        details: {
+          account_code,
+          account_name,
+          account_type
+        },
+        ip_address: req.ip,
+        created_at: new Date().toISOString()
+      });
+
+      res.status(201).json({
+        success: true,
+        message: 'Account created successfully',
+        account: account
+      });
+
+    } catch (error) {
+      console.error('Create chart account error:', error);
+      res.status(500).json({
+        error: 'Internal server error',
+        details: error.message
+      });
+    }
+  }
+);
+
+// PUT - Update an existing chart of accounts entry
+app.put(
+  '/api/sys/ledger/chart-of-accounts/:accountCode',
+  authenticate,
+  authorizeAdmin,
+  async (req, res) => {
+    try {
+      const { accountCode } = req.params;
+      const {
+        account_name,
+        account_type,
+        normal_balance,
+        description,
+        parent_account_id,
+        is_active
+      } = req.body;
+
+      // Check if account exists
+      const { data: existing, error: checkError } = await supabase
+        .from('chart_of_accounts')
+        .select('account_code')
+        .eq('account_code', accountCode)
+        .maybeSingle();
+
+      if (!existing) {
+        return res.status(404).json({
+          error: 'Account not found',
+          account_code: accountCode
+        });
+      }
+
+      // Update account
+      const { data: account, error: updateError } = await supabase
+        .from('chart_of_accounts')
+        .update({
+          account_name: account_name || existing.account_name,
+          account_type: account_type || existing.account_type,
+          normal_balance: normal_balance || existing.normal_balance,
+          description: description !== undefined ? description : existing.description,
+          parent_account_id: parent_account_id !== undefined ? parent_account_id : existing.parent_account_id,
+          is_active: is_active !== undefined ? is_active : existing.is_active,
+          updated_at: new Date().toISOString()
+        })
+        .eq('account_code', accountCode)
+        .select()
+        .single();
+
+      if (updateError) {
+        console.error('Error updating account:', updateError);
+        return res.status(500).json({
+          error: 'Failed to update account',
+          details: updateError.message
+        });
+      }
+
+      // Log admin action
+      await supabase.from('admin_actions').insert({
+        admin_id: req.user.id,
+        action_type: 'update_chart_account',
+        details: {
+          account_code: accountCode,
+          updated_fields: Object.keys(req.body)
+        },
+        ip_address: req.ip,
+        created_at: new Date().toISOString()
+      });
+
+      res.json({
+        success: true,
+        message: 'Account updated successfully',
+        account: account
+      });
+
+    } catch (error) {
+      console.error('Update chart account error:', error);
+      res.status(500).json({
+        error: 'Internal server error',
+        details: error.message
+      });
+    }
+  }
+);
+
+// DELETE - Deactivate (soft delete) a chart of accounts entry
+app.delete(
+  '/api/sys/ledger/chart-of-accounts/:accountCode',
+  authenticate,
+  authorizeAdmin,
+  async (req, res) => {
+    try {
+      const { accountCode } = req.params;
+
+      // Check if account exists
+      const { data: existing, error: checkError } = await supabase
+        .from('chart_of_accounts')
+        .select('account_code, is_active')
+        .eq('account_code', accountCode)
+        .maybeSingle();
+
+      if (!existing) {
+        return res.status(404).json({
+          error: 'Account not found',
+          account_code: accountCode
+        });
+      }
+
+      // Soft delete - set inactive instead of hard delete
+      const { error: updateError } = await supabase
+        .from('chart_of_accounts')
+        .update({
+          is_active: false,
+          updated_at: new Date().toISOString()
+        })
+        .eq('account_code', accountCode);
+
+      if (updateError) {
+        console.error('Error deleting account:', updateError);
+        return res.status(500).json({
+          error: 'Failed to deactivate account',
+          details: updateError.message
+        });
+      }
+
+      // Log admin action
+      await supabase.from('admin_actions').insert({
+        admin_id: req.user.id,
+        action_type: 'delete_chart_account',
+        details: {
+          account_code: accountCode
+        },
+        ip_address: req.ip,
+        created_at: new Date().toISOString()
+      });
+
+      res.json({
+        success: true,
+        message: 'Account deactivated successfully'
+      });
+
+    } catch (error) {
+      console.error('Delete chart account error:', error);
+      res.status(500).json({
+        error: 'Internal server error',
+        details: error.message
+      });
+    }
+  }
+);
+
 // Enhanced transfer with device trust and recipient checking - WITH EARLY FAILURE RECORDING
 /*app.post(
   "/api/user/transfer",
