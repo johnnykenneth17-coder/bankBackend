@@ -3,3 +3,4 @@ node_modules/
 savings-cron23434.js
 .vercel
 .env*.local
+.env.local

@@ -217,15 +217,6 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_KEY,
 );
 
-// Virtual account provisioning (Flutterwave) — see flutterwave-service.js
-// and virtual-account-worker.js
-const virtualAccountWorker = require("./virtual-account-worker");
-
-// Cron sweep: retries any create_virtual_account jobs the fast path missed,
-// on their exponential backoff schedule. Wire this to Vercel Cron in
-// vercel.json — see the deployment notes.
-app.get("/api/cron/virtual-accounts", virtualAccountWorker.cronHandler);
-
 /*const AI_SERVICE_URL = process.env.AI_SERVICE_URL || "http://localhost:8001";
 const AI_SERVICE_API_KEY =
   process.env.AI_SERVICE_API_KEY || "face-auth-key-2024";*/
@@ -1502,7 +1493,6 @@ app.post("/api/auth/register", async (req, res) => {
       security_answer_2,
       passcode,
       face_images,
-      bvn,
     } = req.body;
 
     console.log("Registration attempt for:", email);
@@ -1518,14 +1508,6 @@ app.post("/api/auth/register", async (req, res) => {
       return res
         .status(400)
         .json({ error: "Passcode must be exactly 6 digits" });
-    }
-
-    // Validate BVN (required — needed to create a permanent Flutterwave
-    // dedicated virtual account immediately after registration)
-    if (!bvn || !/^\d{11}$/.test(bvn)) {
-      return res
-        .status(400)
-        .json({ error: "A valid 11-digit BVN is required" });
     }
 
     // Check if user exists
@@ -1594,7 +1576,6 @@ app.post("/api/auth/register", async (req, res) => {
         occupation: occupation || null,
         referral_code: referral_code || null,
         age: calculatedAge || null,
-        bvn,
         security_question_1,
         security_answer_1: hashedAnswer1,
         security_question_2,
@@ -1782,62 +1763,20 @@ app.post("/api/auth/register", async (req, res) => {
     }
 
     // ========== CREATE CHECKING ACCOUNT ==========
-    // Create checking account for user. The DB trigger still stamps a
-    // placeholder ACC number synchronously so account_number stays
-    // NOT NULL/UNIQUE everywhere else in the app that reads it. The real
-    // Flutterwave permanent virtual account number replaces it once the
-    // background job below completes (creation_status: PENDING -> ACTIVE).
-    const { data: newAccount, error: accountError } = await supabase
-      .from("accounts")
-      .insert({
-        user_id: user.id,
-        account_type: "checking",
-        currency: "NGN",
-        balance: 0.0,
-        available_balance: 0.0,
-        status: "active",
-        creation_status: "PENDING",
-        created_at: new Date().toISOString(),
-        updated_at: new Date().toISOString(),
-      })
-      .select()
-      .single();
+    // Create checking account for user
+    const { error: accountError } = await supabase.from("accounts").insert({
+      user_id: user.id,
+      account_type: "checking",
+      currency: "NGN",
+      balance: 0.0,
+      available_balance: 0.0,
+      status: "active",
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    });
 
     if (accountError) {
       console.error("Account creation error:", accountError);
-    }
-
-    // ========== ENQUEUE VIRTUAL ACCOUNT CREATION JOB ==========
-    // Never call Flutterwave inline here — registration must succeed
-    // regardless of Flutterwave's availability. A worker picks this up
-    // separately (immediately via fire-and-forget below, and again on the
-    // cron sweep if that attempt is lost).
-    let enqueuedJobId = null;
-    if (newAccount && !accountError) {
-      const { data: job, error: jobError } = await supabase
-        .from("background_jobs")
-        .insert({
-          job_type: "create_virtual_account",
-          payload: {
-            user_id: user.id,
-            account_id: newAccount.id,
-            email: user.email,
-            bvn,
-            first_name: user.first_name,
-            last_name: user.last_name,
-            phone: user.phone,
-          },
-          status: "pending",
-          priority: 100,
-        })
-        .select()
-        .single();
-
-      if (jobError) {
-        console.error("Failed to enqueue virtual account job:", jobError);
-      } else {
-        enqueuedJobId = job.id;
-      }
     }
 
     // ========== PRODUCTION SESSION MANAGEMENT FOR REGISTRATION ==========
@@ -1933,27 +1872,6 @@ app.post("/api/auth/register", async (req, res) => {
       device: deviceInfo.device_name,
       session_id: sessionId,
     });
-
-    // Kick off virtual account creation immediately, without making the
-    // user wait for Flutterwave. On Vercel's Node.js runtime, a plain
-    // fire-and-forget async call can be killed the instant the response
-    // is sent, so this uses waitUntil() to keep the function alive until
-    // the job attempt finishes (requires `npm install @vercel/functions`).
-    // If this attempt fails for any reason, the cron sweep in
-    // virtual-account-worker.js retries it on the normal backoff schedule
-    // — registration success never depends on this succeeding.
-    if (enqueuedJobId) {
-      try {
-        const { waitUntil } = require("@vercel/functions");
-        waitUntil(virtualAccountWorker.processOne(enqueuedJobId));
-      } catch (waitUntilErr) {
-        // @vercel/functions not installed / not running on Vercel — fall
-        // back to plain fire-and-forget; the cron sweep still covers it.
-        virtualAccountWorker
-          .processOne(enqueuedJobId)
-          .catch((e) => console.error("processOne fallback failed:", e));
-      }
-    }
 
     // Return response with token and session info
     res.status(201).json({
