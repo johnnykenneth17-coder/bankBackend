@@ -217,15 +217,15 @@ async function processSingleHarvestDeduction(enrollment) {
     }
 
     // Create transaction record
-    const { error: txError } = await supabase.from("transactions").insert({
-      from_account_id: account.id,
-      from_user_id: enrollment.user_id,
+    const { error: txError } = await supabase.from("transactions_new").insert({
+      sender_account_id: account.id,
+      sender_user_id: enrollment.user_id,
       amount: enrollment.daily_amount,
       description: `Harvest Plan: ${enrollment.harvest_plans?.name || "Harvest Plan"} - Day ${newDaysCompleted}`,
       transaction_type: "savings",
       status: "completed",
       completed_at: new Date().toISOString(),
-      is_admin_adjusted: false,
+      metadata: { is_admin_adjusted: false },
     });
 
     if (txError) console.error("Transaction creation error:", txError);
@@ -378,9 +378,9 @@ async function processSingleFixedDeduction(saving) {
     }
 
     // Create transaction record
-    const { error: txError } = await supabase.from("transactions").insert({
-      from_account_id: account.id,
-      from_user_id: saving.user_id,
+    const { error: txError } = await supabase.from("transactions_new").insert({
+      sender_account_id: account.id,
+      sender_user_id: saving.user_id,
       amount: dailyAmount,
       description: `Fixed Savings Deposit - Day ${Math.ceil(newCurrentSaved / dailyAmount)} of 30`,
       transaction_type: "savings",
@@ -534,9 +534,9 @@ async function processSingleSaveboxDeduction(saving) {
     }
 
     // Create transaction
-    const { error: txError } = await supabase.from("transactions").insert({
-      from_account_id: account.id,
-      from_user_id: saving.user_id,
+    const { error: txError } = await supabase.from("transactions_new").insert({
+      sender_account_id: account.id,
+      sender_user_id: saving.user_id,
       amount: dailyAmount,
       description: `SaveBox Savings - Target: ₦${saving.amount?.toFixed(2) || "0.00"}`,
       transaction_type: "savings",
@@ -698,9 +698,9 @@ async function processSingleTargetDeduction(saving) {
     }
 
     // Create transaction record
-    const { error: txError } = await supabase.from("transactions").insert({
-      from_account_id: account.id,
-      from_user_id: saving.user_id,
+    const { error: txError } = await supabase.from("transactions_new").insert({
+      sender_account_id: account.id,
+      sender_user_id: saving.user_id,
       amount: dailyAmount,
       description: `Target Savings - Daily deposit ₦${dailyAmount}`,
       transaction_type: "savings",
@@ -856,11 +856,11 @@ async function processSavingsWithdrawal(
     );
 
     // ========== CREATE TRANSACTION RECORD ==========
-    const { error: txError } = await supabase.from("transactions").insert({
-      to_account_id: userAccount.id,
-      to_user_id: userId,
+    const { error: txError } = await supabase.from("transactions_new").insert({
+      receiver_account_id: userAccount.id,
+      receiver_user_id: userId,
       amount: netAmount,
-      fee_amount: feeAmount,
+      metadata: { fee_amount: feeAmount },
       description: `${savingsType.charAt(0).toUpperCase() + savingsType.slice(1)} Savings Withdrawal${feeAmount > 0 ? ` (Fee: ₦${feeAmount})` : ""}`,
       transaction_type: "savings_withdrawal",
       status: "completed",

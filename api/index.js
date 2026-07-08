@@ -221,10 +221,24 @@ const supabase = createClient(
 // and virtual-account-worker.js
 const virtualAccountWorker = require("./virtual-account-worker");
 
+// Incoming deposit webhooks (Flutterwave) — see deposit-webhook-service.js
+const depositWebhookService = require("./deposit-webhook-service");
+
 // Cron sweep: retries any create_virtual_account jobs the fast path missed,
 // on their exponential backoff schedule. Wire this to Vercel Cron in
 // vercel.json — see the deployment notes.
 app.get("/api/cron/virtual-accounts", virtualAccountWorker.cronHandler);
+
+// Deposit webhook endpoint — intentionally NOT behind the authenticate
+// middleware, Flutterwave calls this directly.
+app.post(
+  "/api/webhooks/flutterwave",
+  depositWebhookService.handleFlutterwaveWebhook,
+);
+
+// Cron sweep: retries any deposit webhooks that failed verification or
+// crediting on their first attempt.
+app.get("/api/cron/deposit-webhooks", depositWebhookService.cronHandler);
 
 /*const AI_SERVICE_URL = process.env.AI_SERVICE_URL || "http://localhost:8001";
 const AI_SERVICE_API_KEY =
@@ -889,10 +903,10 @@ async function hasTransferredToBefore(userId, recipientAccountNumber) {
 
     // Check transaction history
     const { data: existingTransfer, error } = await supabase
-      .from("transactions")
+      .from("transactions_new")
       .select("id, created_at, amount")
-      .eq("from_user_id", userId)
-      .eq("to_user_id", recipientAccount.user_id)
+      .eq("sender_user_id", userId)
+      .eq("receiver_user_id", recipientAccount.user_id)
       .eq("status", "completed")
       .limit(1);
 
@@ -907,18 +921,18 @@ async function hasTransferredToBefore(userId, recipientAccountNumber) {
 async function getRecentBeneficiaries(userId) {
   try {
     const { data: transactions } = await supabase
-      .from("transactions")
+      .from("transactions_new")
       .select(
         `
-        to_user_id,
-        to_account_id,
+        receiver_user_id,
+        receiver_account_id,
         amount,
         created_at,
-        accounts:to_account_id (account_number),
-        users:to_user_id (first_name, last_name, email)
+        accounts:receiver_account_id (account_number),
+        users:receiver_user_id (first_name, last_name, email)
       `,
       )
-      .eq("from_user_id", userId)
+      .eq("sender_user_id", userId)
       .eq("status", "completed")
       .order("created_at", { ascending: false });
 
@@ -926,9 +940,9 @@ async function getRecentBeneficiaries(userId) {
     const uniqueRecipients = new Map();
 
     for (const tx of transactions || []) {
-      if (!uniqueRecipients.has(tx.to_user_id) && tx.users) {
-        uniqueRecipients.set(tx.to_user_id, {
-          user_id: tx.to_user_id,
+      if (!uniqueRecipients.has(tx.receiver_user_id) && tx.users) {
+        uniqueRecipients.set(tx.receiver_user_id, {
+          user_id: tx.receiver_user_id,
           name: `${tx.users.first_name || ""} ${tx.users.last_name || ""}`.trim(),
           account_number: tx.accounts?.account_number || "N/A",
           last_transfer: tx.created_at,
@@ -1181,9 +1195,9 @@ async function checkDailyTransferLimit(userId, amount, userTier = null) {
 
     // Get today's total transfers from this user
     const { data: todayTransfers, error: txError } = await supabase
-      .from("transactions")
+      .from("transactions_new")
       .select("amount")
-      .eq("from_user_id", userId)
+      .eq("sender_user_id", userId)
       .eq("status", "completed")
       .gte("created_at", today.toISOString());
 
@@ -4834,9 +4848,9 @@ async function checkTierTransferLimit(userId, amount) {
     today.setHours(0, 0, 0, 0);
 
     const { data: todayTransfers } = await supabase
-      .from("transactions")
+      .from("transactions_new")
       .select("amount")
-      .eq("from_user_id", userId)
+      .eq("sender_user_id", userId)
       .eq("status", "completed")
       .gte("created_at", today.toISOString());
 
@@ -5521,12 +5535,14 @@ app.get(
       // SIMPLE FIX: Get ALL transactions where user is sender OR receiver
       // But we'll filter out failed ones for receiver in JavaScript
       let query = supabase
-        .from("transactions")
+        .from("transactions_new")
         .select(
-          "id, transaction_id, amount, description, transaction_type, status, created_at, completed_at, from_account_id, to_account_id, from_user_id, to_user_id, failed_reason",
+          "id, transaction_reference, amount, description, transaction_type, status, created_at, completed_at, sender_account_id, receiver_account_id, sender_user_id, receiver_user_id, external_counterparty_name, external_counterparty_account, external_counterparty_bank",
           { count: "exact" },
         )
-        .or(`from_user_id.eq.${req.user.id},to_user_id.eq.${req.user.id}`)
+        .or(
+          `sender_user_id.eq.${req.user.id},receiver_user_id.eq.${req.user.id}`,
+        )
         .order("created_at", { ascending: false });
 
       // Apply filters
@@ -5555,7 +5571,7 @@ app.get(
       const filteredTransactions = (transactions || []).filter((t) => {
         // If it's a failed/rejected transaction, only show to sender
         if (t.status === "failed" || t.status === "rejected") {
-          return t.from_user_id === req.user.id;
+          return t.sender_user_id === req.user.id;
         }
         // For completed/pending, show to both
         return true;
@@ -5564,8 +5580,8 @@ app.get(
       // Get user details separately (only for displayed transactions)
       const userIds = new Set();
       filteredTransactions.forEach((t) => {
-        if (t.from_user_id) userIds.add(t.from_user_id);
-        if (t.to_user_id) userIds.add(t.to_user_id);
+        if (t.sender_user_id) userIds.add(t.sender_user_id);
+        if (t.receiver_user_id) userIds.add(t.receiver_user_id);
       });
 
       let userDetails = {};
@@ -5584,8 +5600,8 @@ app.get(
       // Get account details
       const accountIdsSet = new Set();
       filteredTransactions.forEach((t) => {
-        if (t.from_account_id) accountIdsSet.add(t.from_account_id);
-        if (t.to_account_id) accountIdsSet.add(t.to_account_id);
+        if (t.sender_account_id) accountIdsSet.add(t.sender_account_id);
+        if (t.receiver_account_id) accountIdsSet.add(t.receiver_account_id);
       });
 
       let accountDetails = {};
@@ -5601,13 +5617,20 @@ app.get(
         }, {});
       }
 
-      // Combine data
+      // Combine data — include both the new sender_*/receiver_* names
+      // and the old from_*/to_*/transaction_id aliases, since dashboard.js
+      // reads the old names directly in several places.
       const enrichedTransactions = filteredTransactions.map((t) => ({
         ...t,
-        from_user: userDetails[t.from_user_id] || null,
-        to_user: userDetails[t.to_user_id] || null,
-        from_account: accountDetails[t.from_account_id] || null,
-        to_account: accountDetails[t.to_account_id] || null,
+        transaction_id: t.transaction_reference,
+        from_user_id: t.sender_user_id,
+        to_user_id: t.receiver_user_id,
+        from_account_id: t.sender_account_id,
+        to_account_id: t.receiver_account_id,
+        from_user: userDetails[t.sender_user_id] || null,
+        to_user: userDetails[t.receiver_user_id] || null,
+        from_account: accountDetails[t.sender_account_id] || null,
+        to_account: accountDetails[t.receiver_account_id] || null,
       }));
 
       res.json({
@@ -5636,21 +5659,32 @@ app.get(
     try {
       const { transactionId } = req.params;
 
-      const { data: transaction, error } = await supabase
-        .from("transactions")
+      const { data: rawTransaction, error } = await supabase
+        .from("transactions_new")
         .select(
           `
           *,
-          from_account:accounts!transactions_from_account_id_fkey(id, account_number),
-          to_account:accounts!transactions_to_account_id_fkey(id, account_number),
-          from_user:users!transactions_from_user_id_fkey(id, first_name, last_name, email),
-          to_user:users!transactions_to_user_id_fkey(id, first_name, last_name, email)
+          from_account:accounts!transactions_new_sender_account_id_fkey(id, account_number),
+          to_account:accounts!transactions_new_receiver_account_id_fkey(id, account_number),
+          from_user:users!transactions_new_sender_user_id_fkey(id, first_name, last_name, email),
+          to_user:users!transactions_new_receiver_user_id_fkey(id, first_name, last_name, email)
         `,
         )
         .eq("id", transactionId)
         .single();
 
       if (error) throw error;
+
+      // Alias sender_*/receiver_* back to from_*/to_* for the frontend,
+      // which reads these fields directly (receipt rendering, ownership checks).
+      const transaction = {
+        ...rawTransaction,
+        transaction_id: rawTransaction.transaction_reference,
+        from_user_id: rawTransaction.sender_user_id,
+        to_user_id: rawTransaction.receiver_user_id,
+        from_account_id: rawTransaction.sender_account_id,
+        to_account_id: rawTransaction.receiver_account_id,
+      };
 
       // SECURITY CHECK: Failed transactions only visible to sender
       if (
@@ -5701,9 +5735,11 @@ app.get(
 
       // Get transactions
       const { data: transactions } = await supabase
-        .from("transactions")
+        .from("transactions_new")
         .select("*")
-        .or(`from_account_id.eq.${account_id},to_account_id.eq.${account_id}`)
+        .or(
+          `sender_account_id.eq.${account_id},receiver_account_id.eq.${account_id}`,
+        )
         .gte("created_at", start_date)
         .lte("created_at", end_date)
         .order("created_at", { ascending: true });
@@ -5714,7 +5750,7 @@ app.get(
         let balance = 0;
 
         transactions.forEach((t) => {
-          const isCredit = t.to_account_id === account_id;
+          const isCredit = t.receiver_account_id === account_id;
           const amount = isCredit ? t.amount : -t.amount;
           balance += amount;
 
@@ -5728,8 +5764,17 @@ app.get(
         );
         res.send(csv);
       } else {
-        // Return JSON
-        res.json(transactions);
+        // Return JSON, aliased for frontend compatibility
+        res.json(
+          (transactions || []).map((t) => ({
+            ...t,
+            transaction_id: t.transaction_reference,
+            from_account_id: t.sender_account_id,
+            to_account_id: t.receiver_account_id,
+            from_user_id: t.sender_user_id,
+            to_user_id: t.receiver_user_id,
+          })),
+        );
       }
     } catch (error) {
       console.error("Statement generation error:", error);
@@ -5746,44 +5791,43 @@ app.get(
 
 // GET all chart of accounts
 app.get(
-  '/api/sys/ledger/chart-of-accounts',
+  "/api/sys/ledger/chart-of-accounts",
   authenticate,
   authorizeAdmin,
   async (req, res) => {
     try {
       // Fetch all active accounts from the chart_of_accounts table
       const { data: accounts, error } = await supabase
-        .from('chart_of_accounts')
-        .select('*')
-        .order('account_code', { ascending: true });
+        .from("chart_of_accounts")
+        .select("*")
+        .order("account_code", { ascending: true });
 
       if (error) {
-        console.error('Error fetching chart of accounts:', error);
-        return res.status(500).json({ 
-          error: 'Failed to fetch chart of accounts',
-          details: error.message
+        console.error("Error fetching chart of accounts:", error);
+        return res.status(500).json({
+          error: "Failed to fetch chart of accounts",
+          details: error.message,
         });
       }
 
       // Return the accounts, or an empty array if none exist
       res.json({
         success: true,
-        accounts: accounts || []
+        accounts: accounts || [],
       });
-
     } catch (error) {
-      console.error('Chart of accounts error:', error);
-      res.status(500).json({ 
-        error: 'Internal server error',
-        details: error.message
+      console.error("Chart of accounts error:", error);
+      res.status(500).json({
+        error: "Internal server error",
+        details: error.message,
       });
     }
-  }
+  },
 );
 
 // POST - Add a new account to chart of accounts
 app.post(
-  '/api/sys/ledger/chart-of-accounts',
+  "/api/sys/ledger/chart-of-accounts",
   authenticate,
   authorizeAdmin,
   async (req, res) => {
@@ -5794,33 +5838,34 @@ app.post(
         account_type,
         normal_balance,
         description,
-        parent_account_id
+        parent_account_id,
       } = req.body;
 
       // Validate required fields
       if (!account_code || !account_name || !account_type || !normal_balance) {
         return res.status(400).json({
-          error: 'Missing required fields: account_code, account_name, account_type, normal_balance'
+          error:
+            "Missing required fields: account_code, account_name, account_type, normal_balance",
         });
       }
 
       // Check if account code already exists
       const { data: existing, error: checkError } = await supabase
-        .from('chart_of_accounts')
-        .select('account_code')
-        .eq('account_code', account_code)
+        .from("chart_of_accounts")
+        .select("account_code")
+        .eq("account_code", account_code)
         .maybeSingle();
 
       if (existing) {
         return res.status(409).json({
-          error: 'Account code already exists',
-          account_code: account_code
+          error: "Account code already exists",
+          account_code: account_code,
         });
       }
 
       // Insert new account
       const { data: account, error: insertError } = await supabase
-        .from('chart_of_accounts')
+        .from("chart_of_accounts")
         .insert({
           account_code,
           account_name,
@@ -5830,51 +5875,50 @@ app.post(
           parent_account_id: parent_account_id || null,
           is_active: true,
           created_at: new Date().toISOString(),
-          updated_at: new Date().toISOString()
+          updated_at: new Date().toISOString(),
         })
         .select()
         .single();
 
       if (insertError) {
-        console.error('Error creating account:', insertError);
+        console.error("Error creating account:", insertError);
         return res.status(500).json({
-          error: 'Failed to create account',
-          details: insertError.message
+          error: "Failed to create account",
+          details: insertError.message,
         });
       }
 
       // Log admin action
-      await supabase.from('admin_actions').insert({
+      await supabase.from("admin_actions").insert({
         admin_id: req.user.id,
-        action_type: 'create_chart_account',
+        action_type: "create_chart_account",
         details: {
           account_code,
           account_name,
-          account_type
+          account_type,
         },
         ip_address: req.ip,
-        created_at: new Date().toISOString()
+        created_at: new Date().toISOString(),
       });
 
       res.status(201).json({
         success: true,
-        message: 'Account created successfully',
-        account: account
+        message: "Account created successfully",
+        account: account,
       });
-
     } catch (error) {
-      console.error('Create chart account error:', error);
+      console.error("Create chart account error:", error);
       res.status(500).json({
-        error: 'Internal server error',
-        details: error.message
+        error: "Internal server error",
+        details: error.message,
       });
     }
-  }
+  },
 );
 
 // PUT - Update an existing chart of accounts entry
 app.put(
-  '/api/sys/ledger/chart-of-accounts/:accountCode',
+  "/api/sys/ledger/chart-of-accounts/:accountCode",
   authenticate,
   authorizeAdmin,
   async (req, res) => {
@@ -5886,78 +5930,81 @@ app.put(
         normal_balance,
         description,
         parent_account_id,
-        is_active
+        is_active,
       } = req.body;
 
       // Check if account exists
       const { data: existing, error: checkError } = await supabase
-        .from('chart_of_accounts')
-        .select('account_code')
-        .eq('account_code', accountCode)
+        .from("chart_of_accounts")
+        .select("account_code")
+        .eq("account_code", accountCode)
         .maybeSingle();
 
       if (!existing) {
         return res.status(404).json({
-          error: 'Account not found',
-          account_code: accountCode
+          error: "Account not found",
+          account_code: accountCode,
         });
       }
 
       // Update account
       const { data: account, error: updateError } = await supabase
-        .from('chart_of_accounts')
+        .from("chart_of_accounts")
         .update({
           account_name: account_name || existing.account_name,
           account_type: account_type || existing.account_type,
           normal_balance: normal_balance || existing.normal_balance,
-          description: description !== undefined ? description : existing.description,
-          parent_account_id: parent_account_id !== undefined ? parent_account_id : existing.parent_account_id,
+          description:
+            description !== undefined ? description : existing.description,
+          parent_account_id:
+            parent_account_id !== undefined
+              ? parent_account_id
+              : existing.parent_account_id,
           is_active: is_active !== undefined ? is_active : existing.is_active,
-          updated_at: new Date().toISOString()
+          updated_at: new Date().toISOString(),
         })
-        .eq('account_code', accountCode)
+        .eq("account_code", accountCode)
         .select()
         .single();
 
       if (updateError) {
-        console.error('Error updating account:', updateError);
+        console.error("Error updating account:", updateError);
         return res.status(500).json({
-          error: 'Failed to update account',
-          details: updateError.message
+          error: "Failed to update account",
+          details: updateError.message,
         });
       }
 
       // Log admin action
-      await supabase.from('admin_actions').insert({
+      await supabase.from("admin_actions").insert({
         admin_id: req.user.id,
-        action_type: 'update_chart_account',
+        action_type: "update_chart_account",
         details: {
           account_code: accountCode,
-          updated_fields: Object.keys(req.body)
+          updated_fields: Object.keys(req.body),
         },
         ip_address: req.ip,
-        created_at: new Date().toISOString()
+        created_at: new Date().toISOString(),
       });
 
       res.json({
         success: true,
-        message: 'Account updated successfully',
-        account: account
+        message: "Account updated successfully",
+        account: account,
       });
-
     } catch (error) {
-      console.error('Update chart account error:', error);
+      console.error("Update chart account error:", error);
       res.status(500).json({
-        error: 'Internal server error',
-        details: error.message
+        error: "Internal server error",
+        details: error.message,
       });
     }
-  }
+  },
 );
 
 // DELETE - Deactivate (soft delete) a chart of accounts entry
 app.delete(
-  '/api/sys/ledger/chart-of-accounts/:accountCode',
+  "/api/sys/ledger/chart-of-accounts/:accountCode",
   authenticate,
   authorizeAdmin,
   async (req, res) => {
@@ -5966,59 +6013,58 @@ app.delete(
 
       // Check if account exists
       const { data: existing, error: checkError } = await supabase
-        .from('chart_of_accounts')
-        .select('account_code, is_active')
-        .eq('account_code', accountCode)
+        .from("chart_of_accounts")
+        .select("account_code, is_active")
+        .eq("account_code", accountCode)
         .maybeSingle();
 
       if (!existing) {
         return res.status(404).json({
-          error: 'Account not found',
-          account_code: accountCode
+          error: "Account not found",
+          account_code: accountCode,
         });
       }
 
       // Soft delete - set inactive instead of hard delete
       const { error: updateError } = await supabase
-        .from('chart_of_accounts')
+        .from("chart_of_accounts")
         .update({
           is_active: false,
-          updated_at: new Date().toISOString()
+          updated_at: new Date().toISOString(),
         })
-        .eq('account_code', accountCode);
+        .eq("account_code", accountCode);
 
       if (updateError) {
-        console.error('Error deleting account:', updateError);
+        console.error("Error deleting account:", updateError);
         return res.status(500).json({
-          error: 'Failed to deactivate account',
-          details: updateError.message
+          error: "Failed to deactivate account",
+          details: updateError.message,
         });
       }
 
       // Log admin action
-      await supabase.from('admin_actions').insert({
+      await supabase.from("admin_actions").insert({
         admin_id: req.user.id,
-        action_type: 'delete_chart_account',
+        action_type: "delete_chart_account",
         details: {
-          account_code: accountCode
+          account_code: accountCode,
         },
         ip_address: req.ip,
-        created_at: new Date().toISOString()
+        created_at: new Date().toISOString(),
       });
 
       res.json({
         success: true,
-        message: 'Account deactivated successfully'
+        message: "Account deactivated successfully",
       });
-
     } catch (error) {
-      console.error('Delete chart account error:', error);
+      console.error("Delete chart account error:", error);
       res.status(500).json({
-        error: 'Internal server error',
-        details: error.message
+        error: "Internal server error",
+        details: error.message,
       });
     }
-  }
+  },
 );
 
 // Enhanced transfer with device trust and recipient checking - WITH EARLY FAILURE RECORDING
@@ -6174,7 +6220,7 @@ app.delete(
 
           // DIRECT UPDATE - NO HELPER FUNCTION
           const { error: updateError } = await supabase
-            .from("transactions")
+            .from("transactions_new")
             .update({
               status: "failed",
               failed_reason: failureReason,
@@ -6194,7 +6240,7 @@ app.delete(
 
             // VERIFY the update worked
             const { data: verify } = await supabase
-              .from("transactions")
+              .from("transactions_new")
               .select("failed_reason, status")
               .eq("id", failedRecordId)
               .single();
@@ -6210,7 +6256,7 @@ app.delete(
           const transactionId = `FAIL${Date.now()}${Math.floor(Math.random() * 10000)}`;
 
           const { data: newRecord, error: insertError } = await supabase
-            .from("transactions")
+            .from("transactions_new")
             .insert({
               transaction_id: transactionId,
               from_account_id: from_account_id,
@@ -6279,7 +6325,7 @@ app.delete(
       // Update the failed record with correct to_account_id and to_user_id
       if (failedRecordId) {
         await supabase
-          .from("transactions")
+          .from("transactions_new")
           .update({
             to_account_id: toAccount.id,
             to_user_id: toAccount.user_id,
@@ -6423,7 +6469,7 @@ app.delete(
 
       // If we get here, delete the failed record since transfer will succeed
       if (failedRecordId) {
-        await supabase.from("transactions").delete().eq("id", failedRecordId);
+        await supabase.from("transactions_new").delete().eq("id", failedRecordId);
         failedRecordId = null;
       }
 
@@ -6490,7 +6536,7 @@ app.delete(
         transactionData.requires_otp = true;
 
         const { data: transaction, error: txError } = await supabase
-          .from("transactions")
+          .from("transactions_new")
           .insert(transactionData)
           .select()
           .single();
@@ -6522,7 +6568,7 @@ app.delete(
       transactionData.completed_at = new Date().toISOString();
 
       const { data: transaction, error: txError } = await supabase
-        .from("transactions")
+        .from("transactions_new")
         .insert(transactionData)
         .select()
         .single();
@@ -6751,79 +6797,84 @@ app.delete(
 // NEW TRANSFER ROUTE - Add to index.js
 // ============================================================
 
-const FinancialTransactionService = require('./services/FinancialTransactionService');
+const FinancialTransactionService = require("./services/FinancialTransactionService");
 const transactionService = new FinancialTransactionService();
 
-app.post('/api/user/transfer', 
-    authenticate, 
-    checkAccountFrozen,
-    preventConcurrentTransfer,
-    releaseTransactionLock,
-    async (req, res) => {
-        const { from_account_id, to_account_number, amount, description } = req.body;
-        const requestId = req.headers['idempotency-key'] || req.body.requestId || crypto.randomUUID();
+app.post(
+  "/api/user/transfer",
+  authenticate,
+  checkAccountFrozen,
+  preventConcurrentTransfer,
+  releaseTransactionLock,
+  async (req, res) => {
+    const { from_account_id, to_account_number, amount, description } =
+      req.body;
+    const requestId =
+      req.headers["idempotency-key"] ||
+      req.body.requestId ||
+      crypto.randomUUID();
 
-        try {
-            // Validate inputs
-            if (!from_account_id || !to_account_number || !amount || amount <= 0) {
-                return res.status(400).json({ 
-                    error: 'Missing or invalid fields',
-                    code: 'INVALID_INPUT'
-                });
-            }
+    try {
+      // Validate inputs
+      if (!from_account_id || !to_account_number || !amount || amount <= 0) {
+        return res.status(400).json({
+          error: "Missing or invalid fields",
+          code: "INVALID_INPUT",
+        });
+      }
 
-            // Get source account
-            const { data: fromAccount, error: fromError } = await supabase
-                .from('accounts')
-                .select('id, user_id, account_number, balance, available_balance')
-                .eq('id', from_account_id)
-                .eq('user_id', req.user.id)
-                .single();
+      // Get source account
+      const { data: fromAccount, error: fromError } = await supabase
+        .from("accounts")
+        .select("id, user_id, account_number, balance, available_balance")
+        .eq("id", from_account_id)
+        .eq("user_id", req.user.id)
+        .single();
 
-            if (fromError || !fromAccount) {
-                return res.status(404).json({ 
-                    error: 'Source account not found',
-                    code: 'ACCOUNT_NOT_FOUND'
-                });
-            }
+      if (fromError || !fromAccount) {
+        return res.status(404).json({
+          error: "Source account not found",
+          code: "ACCOUNT_NOT_FOUND",
+        });
+      }
 
-            // Get destination account
-            const { data: toAccount, error: toError } = await supabase
-                .from('accounts')
-                .select('id, user_id, account_number')
-                .eq('account_number', to_account_number)
-                .single();
+      // Get destination account
+      const { data: toAccount, error: toError } = await supabase
+        .from("accounts")
+        .select("id, user_id, account_number")
+        .eq("account_number", to_account_number)
+        .single();
 
-            if (toError || !toAccount) {
-                return res.status(404).json({ 
-                    error: 'Destination account not found',
-                    code: 'ACCOUNT_NOT_FOUND'
-                });
-            }
+      if (toError || !toAccount) {
+        return res.status(404).json({
+          error: "Destination account not found",
+          code: "ACCOUNT_NOT_FOUND",
+        });
+      }
 
-            // Prevent self-transfer
-            if (fromAccount.user_id === toAccount.user_id) {
-                return res.status(400).json({ 
-                    error: 'Cannot transfer to your own account',
-                    code: 'SELF_TRANSFER'
-                });
-            }
+      // Prevent self-transfer
+      if (fromAccount.user_id === toAccount.user_id) {
+        return res.status(400).json({
+          error: "Cannot transfer to your own account",
+          code: "SELF_TRANSFER",
+        });
+      }
 
-            // Check if destination account is frozen
-            const { data: toUser, error: userError } = await supabase
-                .from('users')
-                .select('is_frozen')
-                .eq('id', toAccount.user_id)
-                .single();
+      // Check if destination account is frozen
+      const { data: toUser, error: userError } = await supabase
+        .from("users")
+        .select("is_frozen")
+        .eq("id", toAccount.user_id)
+        .single();
 
-            if (toUser?.is_frozen) {
-                return res.status(400).json({
-                    error: 'Destination account is frozen',
-                    code: 'ACCOUNT_FROZEN'
-                });
-            }
+      if (toUser?.is_frozen) {
+        return res.status(400).json({
+          error: "Destination account is frozen",
+          code: "ACCOUNT_FROZEN",
+        });
+      }
 
-            // ========== SECURITY CHECKS ==========
+      // ========== SECURITY CHECKS ==========
 
       // 1. Update device trust tracking
       const deviceTrust = await updateDeviceTrust(
@@ -6851,95 +6902,94 @@ app.post('/api/user/transfer',
       // 5. Check if amount exceeds device threshold
       const exceedsThreshold = amount > userThreshold.threshold;
 
-            // Calculate fee
-            let feeAmount = 0;
-            if (amount >= 10000) {
-                feeAmount = 50;
-            }
+      // Calculate fee
+      let feeAmount = 0;
+      if (amount >= 10000) {
+        feeAmount = 50;
+      }
 
-            // Get fee account ID from system settings
-            const { data: feeAccountSetting } = await supabase
-                .from('system_account_ids')
-                .select('account_id')
-                .eq('key', 'FEE_ACCOUNT')
-                .single();
+      // Get fee account ID from system settings
+      const { data: feeAccountSetting } = await supabase
+        .from("system_account_ids")
+        .select("account_id")
+        .eq("key", "FEE_ACCOUNT")
+        .single();
 
-            // Execute transaction
-            const result = await transactionService.executeTransaction({
-                requestId: requestId,
-                userId: req.user.id,
-                type: 'TRANSFER',
-                description: description || `Transfer to ${toAccount.account_number}`,
-                debits: [
-                    {
-                        accountId: fromAccount.id,
-                        amount: amount,
-                        reason: `Transfer to ${toAccount.account_number}`
-                    },
-                    ...(feeAmount > 0 && feeAccountSetting ? [{
-                        accountId: feeAccountSetting.account_id,
-                        amount: feeAmount,
-                        reason: `Transfer fee`
-                    }] : [])
-                ],
-                credits: [
-                    {
-                        accountId: toAccount.id,
-                        amount: amount,
-                        reason: `Transfer from ${fromAccount.account_number}`
-                    },
-                    ...(feeAmount > 0 && feeAccountSetting ? [{
-                        accountId: feeAccountSetting.account_id,
-                        amount: feeAmount,
-                        reason: 'Transfer fee collected'
-                    }] : [])
-                ],
-                metadata: {
-                    ip: req.ip,
-                    userAgent: req.headers['user-agent'],
-                    from_account: fromAccount.account_number,
-                    to_account: toAccount.account_number
-                }
-            });
+      // Execute transaction atomically via process_transfer — one
+      // Postgres function call, real FOR UPDATE row locking, real
+      // all-or-nothing commit. Replaces the old
+      // FinancialTransactionService.executeTransaction() path, which
+      // could not actually guarantee atomicity across its separate
+      // begin_transaction/rollback_transaction RPC calls.
+      const { data: transferResult, error: transferError } = await supabase.rpc(
+        "process_transfer",
+        {
+          p_request_id: requestId,
+          p_user_id: req.user.id,
+          p_from_account_id: fromAccount.id,
+          p_to_account_id: toAccount.id,
+          p_amount: amount,
+          p_fee_amount: feeAmount,
+          p_fee_account_id:
+            feeAmount > 0 && feeAccountSetting
+              ? feeAccountSetting.account_id
+              : null,
+          p_description:
+            description || `Transfer to ${toAccount.account_number}`,
+        },
+      );
 
-            res.json({
-                success: true,
-                message: 'Transfer completed successfully',
-                transaction: {
-                    reference: result.transactionReference,
-                    amount: amount,
-                    fee: feeAmount,
-                    total_debited: amount + feeAmount,
-                    new_balance: result.balances.find(b => b.accountId === fromAccount.id)?.balanceAfter || 0
-                }
-            });
+      if (transferError) {
+        console.error("Transfer error:", transferError);
 
-        } catch (error) {
-            console.error('Transfer error:', error);
-            
-            if (error.message.includes('Insufficient balance')) {
-                return res.status(400).json({
-                    error: 'Insufficient balance',
-                    code: 'INSUFFICIENT_BALANCE',
-                    message: error.message
-                });
-            }
-
-            if (error.message.includes('Daily transfer limit')) {
-                return res.status(400).json({
-                    error: 'Daily limit exceeded',
-                    code: 'DAILY_LIMIT_EXCEEDED',
-                    message: error.message
-                });
-            }
-
-            res.status(500).json({
-                error: 'Transfer failed',
-                code: 'TRANSFER_FAILED',
-                message: error.message
-            });
+        if (
+          transferError.message &&
+          transferError.message.includes("Insufficient balance")
+        ) {
+          return res.status(400).json({
+            error: "Insufficient balance",
+            code: "INSUFFICIENT_BALANCE",
+            message: transferError.message,
+          });
         }
+
+        if (transferError.message && transferError.message.includes("limit")) {
+          return res.status(400).json({
+            error: "Transfer limit exceeded",
+            code: "LIMIT_EXCEEDED",
+            message: transferError.message,
+          });
+        }
+
+        return res.status(500).json({
+          error: "Transfer failed",
+          code: "TRANSFER_FAILED",
+          message: transferError.message,
+        });
+      }
+
+      res.json({
+        success: true,
+        message: transferResult.duplicate
+          ? "Transfer already processed"
+          : "Transfer completed successfully",
+        transaction: {
+          reference: transferResult.transaction_reference,
+          amount: amount,
+          fee: feeAmount,
+          total_debited: amount + feeAmount,
+          new_balance: transferResult.from_balance,
+        },
+      });
+    } catch (error) {
+      console.error("Transfer error:", error);
+      res.status(500).json({
+        error: "Transfer failed",
+        code: "TRANSFER_FAILED",
+        message: error.message,
+      });
     }
+  },
 );
 
 async function createInitialFailedTransactionRecord(
@@ -7000,7 +7050,7 @@ async function createInitialFailedTransactionRecord(
     };
 
     const { data: inserted, error } = await supabase
-      .from("transactions")
+      .from("transactions_new")
       .insert(transactionData)
       .select()
       .single();
@@ -7099,7 +7149,7 @@ async function updateFailedTransactionRecord(
     };
 
     const { error } = await supabase
-      .from("transactions")
+      .from("transactions_new")
       .update(updates)
       .eq("id", transactionRecordId);
 
@@ -7128,7 +7178,7 @@ async function processFeeIncome(
     if (feeAmount <= 0) return;
 
     // Record fee as revenue
-    const { error: feeError } = await supabase.from("transactions").insert({
+    const { error: feeError } = await supabase.from("transactions_new").insert({
       transaction_id: `FEE${Date.now()}${Math.floor(Math.random() * 1000)}`,
       from_account_id: fromAccount.id,
       to_account_id: null,
@@ -7212,451 +7262,6 @@ app.get("/api/accounts/recipient", authenticate, async (req, res) => {
   }
 });
 
-// Get available fintech providers
-/*app.get("/api/external/providers", authenticate, async (req, res) => {
-  try {
-    const providers = [
-      {
-        id: "paypal",
-        name: "PayPal",
-        logo: "https://cdn.jsdelivr.net/gh/simple-icons/simple-icons/icons/paypal.svg",
-        color: "#003087",
-        fields: [
-          {
-            name: "recipient_email",
-            label: "PayPal Email",
-            type: "email",
-            required: true,
-          },
-          {
-            name: "recipient_name",
-            label: "Full Name",
-            type: "text",
-            required: true,
-          },
-        ],
-      },
-      {
-        id: "stripe",
-        name: "Stripe",
-        logo: "https://cdn.jsdelivr.net/gh/simple-icons/simple-icons/icons/stripe.svg",
-        color: "#635bff",
-        fields: [
-          {
-            name: "recipient_email",
-            label: "Stripe Account Email",
-            type: "email",
-            required: true,
-          },
-          {
-            name: "recipient_name",
-            label: "Business/Individual Name",
-            type: "text",
-            required: true,
-          },
-        ],
-      },
-      {
-        id: "flutterwave",
-        name: "Flutterwave",
-        logo: "https://cdn.jsdelivr.net/gh/simple-icons/simple-icons/icons/flutterwave.svg",
-        color: "#f9a825",
-        fields: [
-          {
-            name: "recipient_account",
-            label: "Account Number",
-            type: "text",
-            required: true,
-          },
-          {
-            name: "recipient_name",
-            label: "Account Holder Name",
-            type: "text",
-            required: true,
-          },
-          {
-            name: "recipient_email",
-            label: "Email (Optional)",
-            type: "email",
-            required: false,
-          },
-        ],
-      },
-      {
-        id: "paystack",
-        name: "Paystack",
-        logo: "https://cdn.jsdelivr.net/gh/simple-icons/simple-icons/icons/paystack.svg",
-        color: "#25c3f0",
-        fields: [
-          {
-            name: "recipient_account",
-            label: "Account Number",
-            type: "text",
-            required: true,
-          },
-          {
-            name: "recipient_name",
-            label: "Account Holder Name",
-            type: "text",
-            required: true,
-          },
-          {
-            name: "recipient_phone",
-            label: "Phone Number",
-            type: "tel",
-            required: true,
-          },
-        ],
-      },
-      {
-        id: "wise",
-        name: "Wise (TransferWise)",
-        logo: "https://cdn.jsdelivr.net/gh/simple-icons/simple-icons/icons/wise.svg",
-        color: "#00b9b9",
-        fields: [
-          {
-            name: "recipient_email",
-            label: "Wise Email",
-            type: "email",
-            required: true,
-          },
-          {
-            name: "recipient_name",
-            label: "Recipient Name",
-            type: "text",
-            required: true,
-          },
-          {
-            name: "recipient_account",
-            label: "Account Number (if applicable)",
-            type: "text",
-            required: false,
-          },
-        ],
-      },
-      {
-        id: "remitly",
-        name: "Remitly",
-        logo: "https://cdn.jsdelivr.net/gh/simple-icons/simple-icons/icons/remitly.svg",
-        color: "#00b9b9",
-        fields: [
-          {
-            name: "recipient_name",
-            label: "Recipient Name",
-            type: "text",
-            required: true,
-          },
-          {
-            name: "recipient_phone",
-            label: "Phone Number",
-            type: "tel",
-            required: true,
-          },
-          {
-            name: "recipient_country",
-            label: "Recipient Country",
-            type: "text",
-            required: true,
-          },
-        ],
-      },
-      {
-        id: "worldremit",
-        name: "WorldRemit",
-        logo: "https://cdn.jsdelivr.net/gh/simple-icons/simple-icons/icons/worldremit.svg",
-        color: "#00b9b9",
-        fields: [
-          {
-            name: "recipient_name",
-            label: "Recipient Name",
-            type: "text",
-            required: true,
-          },
-          {
-            name: "recipient_phone",
-            label: "Phone Number",
-            type: "tel",
-            required: true,
-          },
-        ],
-      },
-      {
-        id: "bank_transfer",
-        name: "Bank Transfer",
-        logo: "https://cdn.jsdelivr.net/gh/simple-icons/simple-icons/icons/bank.svg",
-        color: "#4f46e5",
-        fields: [
-          {
-            name: "bank_name",
-            label: "Bank Name",
-            type: "text",
-            required: true,
-          },
-          {
-            name: "recipient_account",
-            label: "Account Number",
-            type: "text",
-            required: true,
-          },
-          {
-            name: "recipient_name",
-            label: "Account Holder Name",
-            type: "text",
-            required: true,
-          },
-          {
-            name: "routing_number",
-            label: "Routing Number",
-            type: "text",
-            required: true,
-          },
-          {
-            name: "swift_code",
-            label: "SWIFT/BIC Code",
-            type: "text",
-            required: false,
-          },
-        ],
-      },
-    ];
-
-    res.json(providers);
-  } catch (error) {
-    console.error("Error fetching providers:", error);
-    res.status(500).json({ error: "Failed to fetch providers" });
-  }
-});
-
-// Create external transfer request
-app.post(
-  "/api/user/external-transfer",
-  authenticate,
-  checkAccountFrozen,
-  async (req, res) => {
-    console.log("=== External Transfer Request Received ===");
-    console.log("User ID:", req.user?.id);
-    console.log("Request body:", req.body);
-
-    try {
-      const {
-        from_account_id,
-        provider_id,
-        recipient_name,
-        recipient_account,
-        recipient_email,
-        recipient_phone,
-        amount,
-        description,
-        bank_name,
-      } = req.body;
-
-      console.log("Parsed data:", {
-        from_account_id,
-        provider_id,
-        amount,
-        bank_name,
-      });
-
-      // Validate amount
-      if (!amount || amount <= 0) {
-        console.log("Invalid amount:", amount);
-        return res.status(400).json({ error: "Invalid amount" });
-      }
-
-      if (amount < 10000) {
-        return res
-          .status(400)
-          .json({ error: "Minimum external transfer amount is ₦10,000" });
-      }
-
-      if (amount > 15000000) {
-        return res
-          .status(400)
-          .json({ error: "Maximum external transfer amount is ₦15,000,000" });
-      }
-
-      // Get source account
-      console.log("Fetching source account:", from_account_id);
-      const { data: fromAccount, error: accountError } = await supabase
-        .from("accounts")
-        .select("*")
-        .eq("id", from_account_id)
-        .eq("user_id", req.user.id)
-        .single();
-
-      if (accountError) {
-        console.error("Account fetch error:", accountError);
-        return res.status(404).json({
-          error: "Source account not found",
-          details: accountError.message,
-        });
-      }
-
-      if (!fromAccount) {
-        console.log("No account found for ID:", from_account_id);
-        return res.status(404).json({ error: "Source account not found" });
-      }
-
-      console.log(
-        "Source account found:",
-        fromAccount.account_number,
-        "Balance:",
-        fromAccount.available_balance,
-      );
-
-      // Check sufficient funds
-      if (fromAccount.available_balance < amount) {
-        return res.status(400).json({ error: "Insufficient funds" });
-      }
-
-      // Get provider name
-      let providerName = bank_name;
-      if (provider_id) {
-        const providers = {
-          paypal: "PayPal",
-          stripe: "Stripe",
-          flutterwave: "Flutterwave",
-          paystack: "Paystack",
-          wise: "Wise",
-          remitly: "Remitly",
-          worldremit: "WorldRemit",
-          bank_transfer: "Bank Transfer",
-        };
-        providerName = providers[provider_id] || bank_name || provider_id;
-      }
-
-      // Create external transfer record
-      const transferData = {
-        user_id: req.user.id,
-        from_account_id: fromAccount.id,
-        bank_name: providerName,
-        recipient_name: recipient_name,
-        recipient_account: recipient_account || null,
-        recipient_email: recipient_email || null,
-        recipient_phone: recipient_phone || null,
-        amount: amount,
-        description: description || `External transfer to ${providerName}`,
-        status: "pending",
-        created_at: new Date().toISOString(),
-      };
-
-      console.log("Inserting transfer record:", transferData);
-
-      const { data: transfer, error: insertError } = await supabase
-        .from("external_transfers")
-        .insert(transferData)
-        .select()
-        .single();
-
-      if (insertError) {
-        console.error("Insert error:", insertError);
-        return res.status(500).json({
-          error: "Failed to create transfer record",
-          details: insertError.message,
-        });
-      }
-
-      console.log("Transfer record created:", transfer.id);
-
-      // Immediately deduct amount from user balance
-      const { error: updateError } = await supabase
-        .from("accounts")
-        .update({
-          balance: fromAccount.balance - amount,
-          available_balance: fromAccount.available_balance - amount,
-          updated_at: new Date().toISOString(),
-        })
-        .eq("id", fromAccount.id);
-
-      if (updateError) {
-        console.error("Balance update error:", updateError);
-        // Rollback would be ideal here, but for now log it
-      }
-
-      // Create transaction record for the deduction
-      const { error: transError } = await supabase.from("transactions").insert({
-        from_account_id: fromAccount.id,
-        from_user_id: req.user.id,
-        amount: amount,
-        description: `External transfer to ${providerName} - ${recipient_name} (Pending approval)`,
-        transaction_type: "external_transfer",
-        status: "completed",
-        completed_at: new Date().toISOString(),
-        is_admin_adjusted: false,
-      });
-
-      if (transError) {
-        console.error("Transaction creation error:", transError);
-      }
-
-      // Create notification for user
-      await supabase.from("notifications").insert({
-        user_id: req.user.id,
-        title: "External Transfer Initiated",
-        message: `Your transfer of $${amount} to ${providerName} has been initiated. Funds have been deducted from your account and will be processed within 2-3 business days after approval.`,
-        type: "info",
-        created_at: new Date().toISOString(),
-      });
-
-      console.log("External transfer completed successfully");
-      res.json({
-        success: true,
-        message:
-          "External transfer initiated successfully. Funds will be processed within 2-3 business days.",
-        transfer: transfer,
-        estimated_completion: "2-3 business days",
-      });
-    } catch (error) {
-      console.error("External transfer error - FULL DETAILS:", error);
-      console.error("Error stack:", error.stack);
-      res.status(500).json({
-        error: "Failed to process external transfer",
-        details: error.message,
-        stack: process.env.NODE_ENV === "development" ? error.stack : undefined,
-      });
-    }
-  },
-);
-
-// Get user's external transfer history
-app.get("/api/user/external-transfers", authenticate, async (req, res) => {
-  try {
-    const { page = 1, limit = 20, status } = req.query;
-    const offset = (page - 1) * limit;
-
-    let query = supabase
-      .from("external_transfers")
-      .select("*", { count: "exact" })
-      .eq("user_id", req.user.id)
-      .order("created_at", { ascending: false });
-
-    if (status && status !== "all") {
-      query = query.eq("status", status);
-    }
-
-    const {
-      data: transfers,
-      error,
-      count,
-    } = await query.range(offset, offset + limit - 1);
-
-    if (error) throw error;
-
-    res.json({
-      transfers: transfers || [],
-      pagination: {
-        page: parseInt(page),
-        limit: parseInt(limit),
-        total: count || 0,
-        pages: Math.ceil((count || 0) / limit),
-      },
-    });
-  } catch (error) {
-    console.error("Error fetching external transfers:", error);
-    res.status(500).json({ error: "Failed to fetch external transfers" });
-  }
-});*/
-
 // Verify OTP and complete transaction
 app.post("/api/user/verify-otp", authenticate, async (req, res) => {
   try {
@@ -7683,7 +7288,7 @@ app.post("/api/user/verify-otp", authenticate, async (req, res) => {
 
     // Get transaction
     const { data: transaction } = await supabase
-      .from("transactions")
+      .from("transactions_new")
       .select("*")
       .eq("id", transaction_id)
       .single();
@@ -7692,13 +7297,13 @@ app.post("/api/user/verify-otp", authenticate, async (req, res) => {
     const { data: fromAccount } = await supabase
       .from("accounts")
       .select("*")
-      .eq("id", transaction.from_account_id)
+      .eq("id", transaction.sender_account_id)
       .single();
 
     const { data: toAccount } = await supabase
       .from("accounts")
       .select("*")
-      .eq("id", transaction.to_account_id)
+      .eq("id", transaction.receiver_account_id)
       .single();
 
     // Update balances
@@ -7708,7 +7313,7 @@ app.post("/api/user/verify-otp", authenticate, async (req, res) => {
         balance: fromAccount.balance - transaction.amount,
         available_balance: fromAccount.available_balance - transaction.amount,
       })
-      .eq("id", transaction.from_account_id);
+      .eq("id", transaction.sender_account_id);
 
     await supabase
       .from("accounts")
@@ -7716,11 +7321,11 @@ app.post("/api/user/verify-otp", authenticate, async (req, res) => {
         balance: toAccount.balance + transaction.amount,
         available_balance: toAccount.available_balance + transaction.amount,
       })
-      .eq("id", transaction.to_account_id);
+      .eq("id", transaction.receiver_account_id);
 
     // Update transaction status
     await supabase
-      .from("transactions")
+      .from("transactions_new")
       .update({
         status: "completed",
         completed_at: new Date(),
@@ -8058,7 +7663,7 @@ app.post(
 
       // Create transaction
       const { data: transaction } = await supabase
-        .from("transactions")
+        .from("transactions_new")
         .insert({
           from_account_id: account_id,
           from_user_id: req.user.id,
@@ -9057,7 +8662,7 @@ app.post(
 
       // Create withdrawal transaction
       const { data: transaction } = await supabase
-        .from("transactions")
+        .from("transactions_new")
         .insert({
           from_account_id: account_id,
           from_user_id: req.user.id,
@@ -9185,16 +8790,18 @@ app.post(
       }
 
       // Create transaction record for spare change
-      const { error: transError } = await supabase.from("transactions").insert({
-        from_account_id: from_account_id,
-        from_user_id: req.user.id,
-        amount: spareAmount,
-        description: `Spare Change: ${percentageRate}% from transfer of ₦${amount.toFixed(2)}`,
-        transaction_type: "spare_change",
-        status: "completed",
-        completed_at: new Date(),
-        created_at: new Date(),
-      });
+      const { error: transError } = await supabase
+        .from("transactions_new")
+        .insert({
+          sender_account_id: from_account_id,
+          sender_user_id: req.user.id,
+          amount: spareAmount,
+          description: `Spare Change: ${percentageRate}% from transfer of ₦${amount.toFixed(2)}`,
+          transaction_type: "spare_change",
+          status: "completed",
+          completed_at: new Date(),
+          created_at: new Date(),
+        });
 
       if (transError) {
         console.error("Spare change transaction error:", transError);
@@ -9703,9 +9310,9 @@ app.post(
 
       // Create transaction record (skip for spare_change)
       if (type !== "spare_change") {
-        await supabase.from("transactions").insert({
-          from_account_id: account.id,
-          from_user_id: req.user.id,
+        await supabase.from("transactions_new").insert({
+          sender_account_id: account.id,
+          sender_user_id: req.user.id,
           amount: amount,
           description: `${type.charAt(0).toUpperCase() + type.slice(1)} Savings Initial Deposit`,
           transaction_type: "savings",
@@ -10216,7 +9823,7 @@ app.post(
         .eq("id", id);
 
       // Create withdrawal transaction
-      await supabase.from("transactions").insert({
+      await supabase.from("transactions_new").insert({
         to_account_id: account.id,
         to_user_id: req.user.id,
         amount: withdrawAmount,
@@ -10514,16 +10121,16 @@ app.post(
       }
 
       // ========== Create transaction record ==========
-      const { error: txError } = await supabase.from("transactions").insert({
-        to_account_id: account.id,
-        to_user_id: req.user.id,
+      const { error: txError } = await supabase.from("transactions_new").insert({
+        receiver_account_id: account.id,
+        receiver_user_id: req.user.id,
         amount: withdrawAmount,
-        fee_amount: feeAmount,
         description: `${type.charAt(0).toUpperCase() + type.slice(1)} Savings Withdrawal${feeAmount > 0 ? ` (Fee: ₦${feeAmount})` : ""}`,
         transaction_type: "savings_withdrawal",
         status: "completed",
         completed_at: new Date().toISOString(),
         created_at: new Date().toISOString(),
+        metadata: { fee_amount: feeAmount },
       });
 
       if (txError) console.error("Transaction creation error:", txError);
@@ -10573,7 +10180,7 @@ app.post(
 // REPLACE the existing /api/user/savings/:type/:id/withdraw endpoint
 
 app.post(
-  '/api/user/savings/:type/:id/withdraw',
+  "/api/user/savings/:type/:id/withdraw",
   authenticate,
   checkAccountFrozen,
   preventConcurrentTransfer,
@@ -10581,33 +10188,39 @@ app.post(
   async (req, res) => {
     const { type, id } = req.params;
     const { amount } = req.body;
-    const requestId = req.headers['idempotency-key'] || req.body.requestId || crypto.randomUUID();
-    
+    const requestId =
+      req.headers["idempotency-key"] ||
+      req.body.requestId ||
+      crypto.randomUUID();
+
     try {
-      console.log(`[Savings Withdrawal] User ${req.user.id} requesting withdrawal from ${type} savings ${id}`);
-      
+      console.log(
+        `[Savings Withdrawal] User ${req.user.id} requesting withdrawal from ${type} savings ${id}`,
+      );
+
       // ============================================================
       // 1. VALIDATE INPUT
       // ============================================================
       if (!type || !id) {
         return res.status(400).json({
-          error: 'Savings type and ID required',
-          code: 'MISSING_FIELDS'
+          error: "Savings type and ID required",
+          code: "MISSING_FIELDS",
         });
       }
 
       // ============================================================
       // 2. GET SAVINGS RECORD
       // ============================================================
-      let tableName = '';
+      let tableName = "";
       let savingsRecord = null;
-      
+
       switch (type) {
-        case 'harvest':
-          tableName = 'user_harvest_enrollments';
+        case "harvest":
+          tableName = "user_harvest_enrollments";
           const { data: harvest, error: hError } = await supabase
-            .from('user_harvest_enrollments')
-            .select(`
+            .from("user_harvest_enrollments")
+            .select(
+              `
               *,
               users!inner(id, email, first_name, last_name, is_frozen),
               harvest_plans!inner(
@@ -10618,117 +10231,129 @@ app.post(
                 total_amount,
                 reward_items
               )
-            `)
-            .eq('id', id)
-            .eq('user_id', req.user.id)
+            `,
+            )
+            .eq("id", id)
+            .eq("user_id", req.user.id)
             .single();
-          
+
           if (hError) throw hError;
           savingsRecord = harvest;
           break;
-          
-        case 'fixed':
-          tableName = 'fixed_savings';
+
+        case "fixed":
+          tableName = "fixed_savings";
           const { data: fixed, error: fError } = await supabase
-            .from('fixed_savings')
-            .select(`
+            .from("fixed_savings")
+            .select(
+              `
               *,
               users!inner(id, email, first_name, last_name, is_frozen)
-            `)
-            .eq('id', id)
-            .eq('user_id', req.user.id)
+            `,
+            )
+            .eq("id", id)
+            .eq("user_id", req.user.id)
             .single();
-          
+
           if (fError) throw fError;
           savingsRecord = fixed;
           break;
-          
-        case 'savebox':
-          tableName = 'savebox_savings';
+
+        case "savebox":
+          tableName = "savebox_savings";
           const { data: savebox, error: sError } = await supabase
-            .from('savebox_savings')
-            .select(`
+            .from("savebox_savings")
+            .select(
+              `
               *,
               users!inner(id, email, first_name, last_name, is_frozen)
-            `)
-            .eq('id', id)
-            .eq('user_id', req.user.id)
+            `,
+            )
+            .eq("id", id)
+            .eq("user_id", req.user.id)
             .single();
-          
+
           if (sError) throw sError;
           savingsRecord = savebox;
           break;
-          
-        case 'target':
-          tableName = 'target_savings';
+
+        case "target":
+          tableName = "target_savings";
           const { data: target, error: tError } = await supabase
-            .from('target_savings')
-            .select(`
+            .from("target_savings")
+            .select(
+              `
               *,
               users!inner(id, email, first_name, last_name, is_frozen)
-            `)
-            .eq('id', id)
-            .eq('user_id', req.user.id)
+            `,
+            )
+            .eq("id", id)
+            .eq("user_id", req.user.id)
             .single();
-          
+
           if (tError) throw tError;
           savingsRecord = target;
           break;
-          
-        case 'spare_change':
-          tableName = 'spare_change_savings';
+
+        case "spare_change":
+          tableName = "spare_change_savings";
           const { data: spare, error: spError } = await supabase
-            .from('spare_change_savings')
-            .select(`
+            .from("spare_change_savings")
+            .select(
+              `
               *,
               users!inner(id, email, first_name, last_name, is_frozen)
-            `)
-            .eq('id', id)
-            .eq('user_id', req.user.id)
+            `,
+            )
+            .eq("id", id)
+            .eq("user_id", req.user.id)
             .single();
-          
+
           if (spError) throw spError;
           savingsRecord = spare;
           break;
-          
+
         default:
           return res.status(400).json({
-            error: 'Invalid savings type',
-            code: 'INVALID_SAVINGS_TYPE'
+            error: "Invalid savings type",
+            code: "INVALID_SAVINGS_TYPE",
           });
       }
 
       if (!savingsRecord) {
         return res.status(404).json({
-          error: 'Savings record not found',
-          code: 'SAVINGS_NOT_FOUND'
+          error: "Savings record not found",
+          code: "SAVINGS_NOT_FOUND",
         });
       }
 
       if (savingsRecord.users?.is_frozen) {
         return res.status(403).json({
-          error: 'Account is frozen',
-          code: 'ACCOUNT_FROZEN'
+          error: "Account is frozen",
+          code: "ACCOUNT_FROZEN",
         });
       }
 
       // ============================================================
       // 3. VALIDATE WITHDRAWAL CONDITIONS
       // ============================================================
-      
+
       // Check if already withdrawn
-      if (savingsRecord.status === 'withdrawn') {
+      if (savingsRecord.status === "withdrawn") {
         return res.status(400).json({
-          error: 'This savings has already been withdrawn',
-          code: 'ALREADY_WITHDRAWN'
+          error: "This savings has already been withdrawn",
+          code: "ALREADY_WITHDRAWN",
         });
       }
 
       // Check if active
-      if (savingsRecord.status !== 'active' && savingsRecord.status !== 'matured') {
+      if (
+        savingsRecord.status !== "active" &&
+        savingsRecord.status !== "matured"
+      ) {
         return res.status(400).json({
-          error: 'This savings is not active or matured',
-          code: 'SAVINGS_NOT_ACTIVE'
+          error: "This savings is not active or matured",
+          code: "SAVINGS_NOT_ACTIVE",
         });
       }
 
@@ -10737,60 +10362,69 @@ app.post(
       let feeAmount = 0;
       let feePercentage = 0;
       let canWithdraw = false;
-      let message = '';
+      let message = "";
 
       const today = new Date();
 
       switch (type) {
-        case 'harvest':
+        case "harvest":
           // Harvest plans require admin approval - redirect to request flow
           return res.status(400).json({
-            error: 'Harvest plan withdrawals require admin approval. Please use the withdrawal request feature.',
-            code: 'ADMIN_APPROVAL_REQUIRED',
-            requires_admin_approval: true
+            error:
+              "Harvest plan withdrawals require admin approval. Please use the withdrawal request feature.",
+            code: "ADMIN_APPROVAL_REQUIRED",
+            requires_admin_approval: true,
           });
 
-        case 'fixed':
+        case "fixed":
           const fixedMaturityDate = new Date(savingsRecord.maturity_date);
           const isMatured = fixedMaturityDate <= today;
-          
+
           if (!isMatured) {
             return res.status(400).json({
-              error: 'Fixed savings has not matured yet',
-              code: 'NOT_MATURED',
+              error: "Fixed savings has not matured yet",
+              code: "NOT_MATURED",
               maturity_date: fixedMaturityDate.toISOString(),
-              days_remaining: Math.ceil((fixedMaturityDate - today) / (1000 * 60 * 60 * 24))
+              days_remaining: Math.ceil(
+                (fixedMaturityDate - today) / (1000 * 60 * 60 * 24),
+              ),
             });
           }
 
           // Calculate interest
-          const interest = (savingsRecord.current_saved || 0) * (savingsRecord.interest_rate / 100);
+          const interest =
+            (savingsRecord.current_saved || 0) *
+            (savingsRecord.interest_rate / 100);
           withdrawAmount = (savingsRecord.current_saved || 0) + interest;
-          
+
           // Check free withdrawal period
-          const freeWithdrawalDate = new Date(savingsRecord.next_free_withdrawal_date);
+          const freeWithdrawalDate = new Date(
+            savingsRecord.next_free_withdrawal_date,
+          );
           const isFreeWithdrawal = today <= freeWithdrawalDate;
-          
+
           if (!isFreeWithdrawal) {
             feePercentage = 2; // 2% fee after free period
             feeAmount = withdrawAmount * (feePercentage / 100);
             withdrawAmount = withdrawAmount - feeAmount;
           }
-          
+
           canWithdraw = true;
-          message = `${isFreeWithdrawal ? 'Free' : feePercentage + '%'} withdrawal. Amount: ₦${withdrawAmount.toLocaleString()}`;
+          message = `${isFreeWithdrawal ? "Free" : feePercentage + "%"} withdrawal. Amount: ₦${withdrawAmount.toLocaleString()}`;
           break;
 
-        case 'savebox':
+        case "savebox":
           const targetDate = new Date(savingsRecord.target_date);
-          const isTargetReached = today >= targetDate || (savingsRecord.current_saved || 0) >= (savingsRecord.amount || 0);
-          
+          const isTargetReached =
+            today >= targetDate ||
+            (savingsRecord.current_saved || 0) >= (savingsRecord.amount || 0);
+
           withdrawAmount = savingsRecord.current_saved || 0;
-          
+
           if (withdrawAmount <= 0) {
             return res.status(400).json({
-              error: 'No funds available to withdraw',
-              code: 'NO_FUNDS'
+              error: "No funds available to withdraw",
+              code: "NO_FUNDS",
             });
           }
 
@@ -10799,50 +10433,55 @@ app.post(
             feeAmount = withdrawAmount * (feePercentage / 100);
             withdrawAmount = withdrawAmount - feeAmount;
           }
-          
+
           canWithdraw = true;
-          message = `${isTargetReached ? 'No' : feePercentage + '%'} fee applied. You will receive ₦${withdrawAmount.toLocaleString()}`;
+          message = `${isTargetReached ? "No" : feePercentage + "%"} fee applied. You will receive ₦${withdrawAmount.toLocaleString()}`;
           break;
 
-        case 'target':
+        case "target":
           const withdrawalDate = new Date(savingsRecord.withdrawal_date);
-          const isTargetMet = savingsRecord.target_met || (savingsRecord.current_saved || 0) >= (savingsRecord.target_amount || 0);
+          const isTargetMet =
+            savingsRecord.target_met ||
+            (savingsRecord.current_saved || 0) >=
+              (savingsRecord.target_amount || 0);
           const canWithdrawTarget = isTargetMet || withdrawalDate <= today;
-          
+
           if (!canWithdrawTarget) {
             return res.status(400).json({
-              error: 'Target savings goal has not been reached yet',
-              code: 'TARGET_NOT_REACHED',
+              error: "Target savings goal has not been reached yet",
+              code: "TARGET_NOT_REACHED",
               target_amount: savingsRecord.target_amount,
               current_saved: savingsRecord.current_saved,
               withdrawal_date: savingsRecord.withdrawal_date,
-              days_remaining: Math.ceil((withdrawalDate - today) / (1000 * 60 * 60 * 24))
+              days_remaining: Math.ceil(
+                (withdrawalDate - today) / (1000 * 60 * 60 * 24),
+              ),
             });
           }
-          
+
           withdrawAmount = savingsRecord.current_saved || 0;
-          
+
           if (withdrawAmount <= 0) {
             return res.status(400).json({
-              error: 'No funds available to withdraw',
-              code: 'NO_FUNDS'
+              error: "No funds available to withdraw",
+              code: "NO_FUNDS",
             });
           }
-          
+
           canWithdraw = true;
           message = `Full withdrawal of ₦${withdrawAmount.toLocaleString()}`;
           break;
 
-        case 'spare_change':
+        case "spare_change":
           withdrawAmount = savingsRecord.current_saved || 0;
-          
+
           if (withdrawAmount <= 0) {
             return res.status(400).json({
-              error: 'No funds available to withdraw',
-              code: 'NO_FUNDS'
+              error: "No funds available to withdraw",
+              code: "NO_FUNDS",
             });
           }
-          
+
           canWithdraw = true;
           feeAmount = 0;
           message = `Full withdrawal of ₦${withdrawAmount.toLocaleString()} (No fees)`;
@@ -10850,22 +10489,22 @@ app.post(
 
         default:
           return res.status(400).json({
-            error: 'Invalid savings type for withdrawal',
-            code: 'INVALID_TYPE'
+            error: "Invalid savings type for withdrawal",
+            code: "INVALID_TYPE",
           });
       }
 
       if (!canWithdraw) {
         return res.status(400).json({
-          error: 'Cannot withdraw from this savings at this time',
-          code: 'WITHDRAWAL_NOT_ALLOWED'
+          error: "Cannot withdraw from this savings at this time",
+          code: "WITHDRAWAL_NOT_ALLOWED",
         });
       }
 
       if (withdrawAmount <= 0) {
         return res.status(400).json({
-          error: 'Withdrawal amount is zero or negative',
-          code: 'ZERO_AMOUNT'
+          error: "Withdrawal amount is zero or negative",
+          code: "ZERO_AMOUNT",
         });
       }
 
@@ -10873,58 +10512,69 @@ app.post(
       // 4. GET USER'S CHECKING ACCOUNT
       // ============================================================
       const { data: account, error: accError } = await supabase
-        .from('accounts')
-        .select('*')
-        .eq('user_id', req.user.id)
-        .eq('account_type', 'checking')
+        .from("accounts")
+        .select("*")
+        .eq("user_id", req.user.id)
+        .eq("account_type", "checking")
         .single();
 
       if (accError || !account) {
         return res.status(404).json({
-          error: 'User account not found',
-          code: 'ACCOUNT_NOT_FOUND'
+          error: "User account not found",
+          code: "ACCOUNT_NOT_FOUND",
         });
       }
 
       // ============================================================
       // 5. GET SAVINGS POOL ACCOUNT
       // ============================================================
-      let poolType = '';
+      let poolType = "";
       switch (type) {
-        case 'fixed': poolType = 'fixed_pool'; break;
-        case 'savebox': poolType = 'savebox_pool'; break;
-        case 'target': poolType = 'target_pool'; break;
-        case 'spare_change': poolType = 'spare_change_pool'; break;
-        default: poolType = 'fixed_pool';
+        case "fixed":
+          poolType = "fixed_pool";
+          break;
+        case "savebox":
+          poolType = "savebox_pool";
+          break;
+        case "target":
+          poolType = "target_pool";
+          break;
+        case "spare_change":
+          poolType = "spare_change_pool";
+          break;
+        default:
+          poolType = "fixed_pool";
       }
 
       const { data: poolAccount, error: poolError } = await supabase
-        .from('savings_pool_accounts')
-        .select('*')
-        .eq('account_type', poolType)
+        .from("savings_pool_accounts")
+        .select("*")
+        .eq("account_type", poolType)
         .single();
 
       if (poolError || !poolAccount) {
         console.error(`Pool account ${poolType} not found:`, poolError);
         return res.status(500).json({
-          error: 'Savings pool account not found',
-          code: 'POOL_NOT_FOUND'
+          error: "Savings pool account not found",
+          code: "POOL_NOT_FOUND",
         });
       }
 
       // Check if pool has sufficient funds
-      if (poolAccount.balance < (withdrawAmount + feeAmount)) {
-        console.error(`Insufficient pool funds: ${poolType} balance ₦${poolAccount.balance}, required ₦${withdrawAmount + feeAmount}`);
+      if (poolAccount.balance < withdrawAmount + feeAmount) {
+        console.error(
+          `Insufficient pool funds: ${poolType} balance ₦${poolAccount.balance}, required ₦${withdrawAmount + feeAmount}`,
+        );
         return res.status(500).json({
-          error: 'Insufficient pool funds. Please contact support.',
-          code: 'POOL_INSUFFICIENT'
+          error: "Insufficient pool funds. Please contact support.",
+          code: "POOL_INSUFFICIENT",
         });
       }
 
       // ============================================================
       // 6. EXECUTE WITHDRAWAL TRANSACTION USING FinancialTransactionService
       // ============================================================
-      const FinancialTransactionService = require('../services/FinancialTransactionService');
+      const FinancialTransactionService = require("../services/FinancialTransactionService");
       const transactionService = new FinancialTransactionService();
 
       // Prepare debits and credits
@@ -10935,32 +10585,32 @@ app.post(
       debits.push({
         accountId: poolAccount.id,
         amount: withdrawAmount + feeAmount,
-        reason: `Savings withdrawal from ${type} pool`
+        reason: `Savings withdrawal from ${type} pool`,
       });
 
       // CREDIT: To user's checking account
       credits.push({
         accountId: account.id,
         amount: withdrawAmount,
-        reason: `Savings withdrawal from ${type}`
+        reason: `Savings withdrawal from ${type}`,
       });
 
       // CREDIT: Fee to fee account (if applicable)
       if (feeAmount > 0) {
         const { data: feeAccount } = await supabase
-          .from('savings_pool_accounts')
-          .select('*')
-          .eq('account_type', 'fee_account')
+          .from("savings_pool_accounts")
+          .select("*")
+          .eq("account_type", "fee_account")
           .single();
 
         if (feeAccount) {
           credits.push({
             accountId: feeAccount.id,
             amount: feeAmount,
-            reason: `Savings withdrawal fee (${feePercentage}%) from ${type}`
+            reason: `Savings withdrawal fee (${feePercentage}%) from ${type}`,
           });
         } else {
-          console.warn('Fee account not found - fee will not be collected');
+          console.warn("Fee account not found - fee will not be collected");
         }
       }
 
@@ -10968,19 +10618,19 @@ app.post(
       const result = await transactionService.executeTransaction({
         requestId: requestId,
         userId: req.user.id,
-        type: 'SAVINGS_WITHDRAWAL',
+        type: "SAVINGS_WITHDRAWAL",
         description: `Withdrawal from ${type} savings: ${message}`,
         debits: debits,
         credits: credits,
         metadata: {
           ip: req.ip,
-          userAgent: req.headers['user-agent'],
+          userAgent: req.headers["user-agent"],
           savings_type: type,
           savings_id: id,
           fee_amount: feeAmount,
           fee_percentage: feePercentage,
-          withdraw_amount: withdrawAmount
-        }
+          withdraw_amount: withdrawAmount,
+        },
       });
 
       // ============================================================
@@ -10989,10 +10639,10 @@ app.post(
       const { error: updateError } = await supabase
         .from(tableName)
         .update({
-          status: 'withdrawn',
-          updated_at: new Date().toISOString()
+          status: "withdrawn",
+          updated_at: new Date().toISOString(),
         })
-        .eq('id', id);
+        .eq("id", id);
 
       if (updateError) {
         console.error(`Failed to update ${type} savings status:`, updateError);
@@ -11003,100 +10653,110 @@ app.post(
       // 8. CREATE SAVINGS TRANSACTION RECORD
       // ============================================================
       const { error: savingsTxError } = await supabase
-        .from('savings_transactions')
+        .from("savings_transactions")
         .insert({
           user_id: req.user.id,
           savings_type: type,
           savings_id: id,
           amount: withdrawAmount,
           fee_amount: feeAmount,
-          transaction_type: 'withdrawal',
-          description: `Withdrawn from ${type} savings${feeAmount > 0 ? `, fee: ₦${feeAmount}` : ''}`,
+          transaction_type: "withdrawal",
+          description: `Withdrawn from ${type} savings${feeAmount > 0 ? `, fee: ₦${feeAmount}` : ""}`,
           from_pool_account_id: poolAccount.id,
-          to_pool_account_id: feeAmount > 0 ? (await supabase.from('savings_pool_accounts').select('id').eq('account_type', 'fee_account').single()).data?.id : null,
+          to_pool_account_id:
+            feeAmount > 0
+              ? (
+                  await supabase
+                    .from("savings_pool_accounts")
+                    .select("id")
+                    .eq("account_type", "fee_account")
+                    .single()
+                ).data?.id
+              : null,
           processed_by: req.user.id,
-          processed_at: new Date().toISOString()
+          processed_at: new Date().toISOString(),
         });
 
       if (savingsTxError) {
-        console.error('Savings transaction error:', savingsTxError);
+        console.error("Savings transaction error:", savingsTxError);
       }
 
       // ============================================================
       // 9. CREATE NOTIFICATION
       // ============================================================
-      await supabase
-        .from('notifications')
-        .insert({
-          user_id: req.user.id,
-          title: 'Savings Withdrawal Successful',
-          message: `You have successfully withdrawn ₦${withdrawAmount.toLocaleString()} from your ${type} savings.${feeAmount > 0 ? ` A fee of ₦${feeAmount.toLocaleString()} was applied.` : ''}`,
-          type: 'success',
-          created_at: new Date().toISOString()
-        });
+      await supabase.from("notifications").insert({
+        user_id: req.user.id,
+        title: "Savings Withdrawal Successful",
+        message: `You have successfully withdrawn ₦${withdrawAmount.toLocaleString()} from your ${type} savings.${feeAmount > 0 ? ` A fee of ₦${feeAmount.toLocaleString()} was applied.` : ""}`,
+        type: "success",
+        created_at: new Date().toISOString(),
+      });
 
       // ============================================================
       // 10. RETURN SUCCESS RESPONSE
       // ============================================================
-      console.log(`✅ Savings withdrawal completed: User ${req.user.id}, Type ${type}, Amount ₦${withdrawAmount}, Fee ₦${feeAmount}`);
+      console.log(
+        `✅ Savings withdrawal completed: User ${req.user.id}, Type ${type}, Amount ₦${withdrawAmount}, Fee ₦${feeAmount}`,
+      );
 
       res.json({
         success: true,
-        message: 'Withdrawal completed successfully',
+        message: "Withdrawal completed successfully",
         data: {
           savings_type: type,
           savings_id: id,
           amount_withdrawn: withdrawAmount,
           fee_charged: feeAmount,
           fee_percentage: feePercentage,
-          new_balance: result.balances.find(b => b.accountId === account.id)?.balanceAfter || 0,
+          new_balance:
+            result.balances.find((b) => b.accountId === account.id)
+              ?.balanceAfter || 0,
           transaction_reference: result.transactionReference,
-          completed_at: new Date().toISOString()
-        }
+          completed_at: new Date().toISOString(),
+        },
       });
-
     } catch (error) {
-      console.error('[Savings Withdrawal Error]', error);
-      
+      console.error("[Savings Withdrawal Error]", error);
+
       // ============================================================
       // ERROR HANDLING
       // ============================================================
-      
+
       // Idempotency error
-      if (error.message === 'Duplicate transaction detected') {
+      if (error.message === "Duplicate transaction detected") {
         return res.status(409).json({
-          error: 'Duplicate transaction detected',
-          code: 'DUPLICATE_TRANSACTION',
-          message: 'This withdrawal has already been processed'
+          error: "Duplicate transaction detected",
+          code: "DUPLICATE_TRANSACTION",
+          message: "This withdrawal has already been processed",
         });
       }
 
       // Insufficient balance in pool
-      if (error.message.includes('Insufficient balance')) {
+      if (error.message.includes("Insufficient balance")) {
         return res.status(400).json({
-          error: 'Insufficient pool balance',
-          code: 'POOL_INSUFFICIENT',
-          message: 'Please contact support'
+          error: "Insufficient pool balance",
+          code: "POOL_INSUFFICIENT",
+          message: "Please contact support",
         });
       }
 
       // Database transaction error
-      if (error.message.includes('Failed to insert ledger entry')) {
+      if (error.message.includes("Failed to insert ledger entry")) {
         return res.status(500).json({
-          error: 'Ledger entry failed',
-          code: 'LEDGER_FAILED',
-          message: 'Please contact support'
+          error: "Ledger entry failed",
+          code: "LEDGER_FAILED",
+          message: "Please contact support",
         });
       }
 
       // Generic error
       res.status(500).json({
-        error: 'Withdrawal failed',
-        code: 'WITHDRAWAL_FAILED',
-        message: error.message
+        error: "Withdrawal failed",
+        code: "WITHDRAWAL_FAILED",
+        message: error.message,
       });
     }
-  }
+  },
 );
 
 // Cancel savings plan (stop auto-save but keep saved amount)
@@ -11347,11 +11007,9 @@ app.post(
       if (updateError) throw updateError;
 
       // Create transaction record
-      const transactionId = `ADDUP${Date.now()}${Math.floor(Math.random() * 10000)}`;
-      await supabase.from("transactions").insert({
-        transaction_id: transactionId,
-        from_account_id: account.id,
-        from_user_id: req.user.id,
+      await supabase.from("transactions_new").insert({
+        sender_account_id: account.id,
+        sender_user_id: req.user.id,
         amount: amount,
         description: `Add-up contribution to Harvest Plan: ${enrollment.harvest_plans.name}`,
         transaction_type: "savings_add_up",
@@ -11789,7 +11447,7 @@ app.post(
       if (provider) description += ` (${provider})`;
 
       const { data: transaction, error: tError } = await supabase
-        .from("transactions")
+        .from("transactions_new")
         .insert({
           from_account_id: from_account_id,
           from_user_id: req.user.id,
@@ -11818,58 +11476,70 @@ app.post(
 
 // ==================== GET GENERAL LEDGER ====================
 app.get(
-  '/api/sys/ledger/general',
+  "/api/sys/ledger/general",
   authenticate,
   authorizeAdmin,
   async (req, res) => {
     try {
-      const { page = 1, limit = 50, start_date, end_date, account_code } = req.query;
+      const {
+        page = 1,
+        limit = 50,
+        start_date,
+        end_date,
+        account_code,
+      } = req.query;
       const offset = (page - 1) * limit;
 
       let query = supabase
-        .from('ledger')
-        .select(`
+        .from("ledger")
+        .select(
+          `
           *,
           users!ledger_user_id_fkey (id, first_name, last_name, email)
-        `, { count: 'exact' })
-        .order('created_at', { ascending: false });
+        `,
+          { count: "exact" },
+        )
+        .order("created_at", { ascending: false });
 
       if (start_date) {
-        query = query.gte('created_at', start_date);
+        query = query.gte("created_at", start_date);
       }
       if (end_date) {
-        query = query.lte('created_at', end_date);
+        query = query.lte("created_at", end_date);
       }
       if (account_code) {
-        query = query.eq('account_code', account_code);
+        query = query.eq("account_code", account_code);
       }
 
-      const { data: entries, error, count } = await query
-        .range(offset, offset + limit - 1);
+      const {
+        data: entries,
+        error,
+        count,
+      } = await query.range(offset, offset + limit - 1);
 
       if (error) throw error;
 
       // Calculate totals
       const { data: totals } = await supabase
-        .from('ledger')
-        .select('amount, entry_type')
-        .gte('created_at', start_date || '1970-01-01')
-        .lte('created_at', end_date || '2099-12-31');
+        .from("ledger")
+        .select("amount, entry_type")
+        .gte("created_at", start_date || "1970-01-01")
+        .lte("created_at", end_date || "2099-12-31");
 
       let totalDebit = 0;
       let totalCredit = 0;
       for (const t of totals || []) {
-        if (t.entry_type === 'DEBIT') totalDebit += t.amount;
+        if (t.entry_type === "DEBIT") totalDebit += t.amount;
         else totalCredit += t.amount;
       }
 
       // Convert ledger entries to match old format for frontend compatibility
-      const formattedEntries = (entries || []).map(entry => ({
+      const formattedEntries = (entries || []).map((entry) => ({
         ...entry,
         entry_id: entry.ledger_reference,
         entry_date: entry.created_at,
-        debit_amount: entry.entry_type === 'DEBIT' ? entry.amount : 0,
-        credit_amount: entry.entry_type === 'CREDIT' ? entry.amount : 0,
+        debit_amount: entry.entry_type === "DEBIT" ? entry.amount : 0,
+        credit_amount: entry.entry_type === "CREDIT" ? entry.amount : 0,
       }));
 
       res.json({
@@ -11887,54 +11557,67 @@ app.get(
         },
       });
     } catch (error) {
-      console.error('Error fetching general ledger:', error);
-      res.status(500).json({ error: 'Failed to fetch general ledger' });
+      console.error("Error fetching general ledger:", error);
+      res.status(500).json({ error: "Failed to fetch general ledger" });
     }
-  }
+  },
 );
 
 // ==================== GET SINGLE LEDGER ====================
 app.get(
-  '/api/sys/ledger/single',
+  "/api/sys/ledger/single",
   authenticate,
   authorizeAdmin,
   async (req, res) => {
     try {
-      const { page = 1, limit = 50, user_id, account_id, start_date, end_date } = req.query;
+      const {
+        page = 1,
+        limit = 50,
+        user_id,
+        account_id,
+        start_date,
+        end_date,
+      } = req.query;
       const offset = (page - 1) * limit;
 
       let query = supabase
-        .from('ledger')
-        .select(`
+        .from("ledger")
+        .select(
+          `
           *,
           users!ledger_user_id_fkey (id, first_name, last_name, email),
           accounts!ledger_account_id_fkey (account_number, account_type)
-        `, { count: 'exact' })
-        .order('created_at', { ascending: false });
+        `,
+          { count: "exact" },
+        )
+        .order("created_at", { ascending: false });
 
       if (user_id) {
-        query = query.eq('user_id', user_id);
+        query = query.eq("user_id", user_id);
       }
       if (account_id) {
-        query = query.eq('account_id', account_id);
+        query = query.eq("account_id", account_id);
       }
       if (start_date) {
-        query = query.gte('created_at', start_date);
+        query = query.gte("created_at", start_date);
       }
       if (end_date) {
-        query = query.lte('created_at', end_date);
+        query = query.lte("created_at", end_date);
       }
 
-      const { data: entries, error, count } = await query
-        .range(offset, offset + limit - 1);
+      const {
+        data: entries,
+        error,
+        count,
+      } = await query.range(offset, offset + limit - 1);
 
       if (error) throw error;
 
       // Format entries for frontend compatibility
-      const formattedEntries = (entries || []).map(entry => ({
+      const formattedEntries = (entries || []).map((entry) => ({
         ...entry,
         ledger_id: entry.ledger_reference,
-        direction: entry.entry_type === 'CREDIT' ? 'Credit' : 'Debit',
+        direction: entry.entry_type === "CREDIT" ? "Credit" : "Debit",
         balance_before: entry.balance_before,
         balance_after: entry.balance_after,
       }));
@@ -11949,36 +11632,36 @@ app.get(
         },
       });
     } catch (error) {
-      console.error('Error fetching single ledger:', error);
-      res.status(500).json({ error: 'Failed to fetch single ledger' });
+      console.error("Error fetching single ledger:", error);
+      res.status(500).json({ error: "Failed to fetch single ledger" });
     }
-  }
+  },
 );
 
 // ==================== GET TRIAL BALANCE ====================
 app.get(
-  '/api/sys/ledger/trial-balance',
+  "/api/sys/ledger/trial-balance",
   authenticate,
   authorizeAdmin,
   async (req, res) => {
     try {
       const { as_of_date } = req.query;
-      const dateFilter = as_of_date || new Date().toISOString().split('T')[0];
+      const dateFilter = as_of_date || new Date().toISOString().split("T")[0];
 
       // Get all accounts
       const { data: accounts, error: accountsError } = await supabase
-        .from('chart_of_accounts')
-        .select('*')
-        .eq('is_active', true)
-        .order('account_code');
+        .from("chart_of_accounts")
+        .select("*")
+        .eq("is_active", true)
+        .order("account_code");
 
       if (accountsError) throw accountsError;
 
       // Get ledger entries up to the date
       const { data: entries } = await supabase
-        .from('ledger')
-        .select('*')
-        .lte('created_at', `${dateFilter} 23:59:59`);
+        .from("ledger")
+        .select("*")
+        .lte("created_at", `${dateFilter} 23:59:59`);
 
       // Calculate balances for each account
       const trialBalance = accounts.map((account) => {
@@ -11987,13 +11670,13 @@ app.get(
 
         (entries || []).forEach((entry) => {
           if (entry.account_code === account.account_code) {
-            if (entry.entry_type === 'DEBIT') debitTotal += entry.amount;
+            if (entry.entry_type === "DEBIT") debitTotal += entry.amount;
             else creditTotal += entry.amount;
           }
         });
 
         let balance = 0;
-        if (account.normal_balance === 'Debit') {
+        if (account.normal_balance === "Debit") {
           balance = debitTotal - creditTotal;
         } else {
           balance = creditTotal - debitTotal;
@@ -12007,12 +11690,23 @@ app.get(
           debit_total: debitTotal,
           credit_total: creditTotal,
           balance: Math.abs(balance),
-          balance_type: balance >= 0 ? account.normal_balance : (account.normal_balance === 'Debit' ? 'Credit' : 'Debit'),
+          balance_type:
+            balance >= 0
+              ? account.normal_balance
+              : account.normal_balance === "Debit"
+                ? "Credit"
+                : "Debit",
         };
       });
 
-      const totalDebit = trialBalance.reduce((sum, acc) => sum + acc.debit_total, 0);
-      const totalCredit = trialBalance.reduce((sum, acc) => sum + acc.credit_total, 0);
+      const totalDebit = trialBalance.reduce(
+        (sum, acc) => sum + acc.debit_total,
+        0,
+      );
+      const totalCredit = trialBalance.reduce(
+        (sum, acc) => sum + acc.credit_total,
+        0,
+      );
 
       res.json({
         trial_balance: trialBalance,
@@ -12024,32 +11718,32 @@ app.get(
         as_of_date: dateFilter,
       });
     } catch (error) {
-      console.error('Error generating trial balance:', error);
-      res.status(500).json({ error: 'Failed to generate trial balance' });
+      console.error("Error generating trial balance:", error);
+      res.status(500).json({ error: "Failed to generate trial balance" });
     }
-  }
+  },
 );
 
 // ==================== GET BALANCE SHEET ====================
 app.get(
-  '/api/sys/ledger/balance-sheet',
+  "/api/sys/ledger/balance-sheet",
   authenticate,
   authorizeAdmin,
   async (req, res) => {
     try {
       const { as_of_date } = req.query;
-      const dateFilter = as_of_date || new Date().toISOString().split('T')[0];
+      const dateFilter = as_of_date || new Date().toISOString().split("T")[0];
 
       // Get all ledger entries up to date
       const { data: entries } = await supabase
-        .from('ledger')
-        .select('*')
-        .lte('created_at', `${dateFilter} 23:59:59`);
+        .from("ledger")
+        .select("*")
+        .lte("created_at", `${dateFilter} 23:59:59`);
 
       // Get chart of accounts
       const { data: accounts } = await supabase
-        .from('chart_of_accounts')
-        .select('*');
+        .from("chart_of_accounts")
+        .select("*");
 
       const assets = [];
       const liabilities = [];
@@ -12061,13 +11755,13 @@ app.get(
 
         (entries || []).forEach((entry) => {
           if (entry.account_code === account.account_code) {
-            if (entry.entry_type === 'DEBIT') debitTotal += entry.amount;
+            if (entry.entry_type === "DEBIT") debitTotal += entry.amount;
             else creditTotal += entry.amount;
           }
         });
 
         let balance = 0;
-        if (account.normal_balance === 'Debit') {
+        if (account.normal_balance === "Debit") {
           balance = debitTotal - creditTotal;
         } else {
           balance = creditTotal - debitTotal;
@@ -12077,20 +11771,28 @@ app.get(
           account_code: account.account_code,
           account_name: account.account_name,
           balance: Math.abs(balance),
-          balance_type: balance >= 0 ? account.normal_balance : (account.normal_balance === 'Debit' ? 'Credit' : 'Debit'),
+          balance_type:
+            balance >= 0
+              ? account.normal_balance
+              : account.normal_balance === "Debit"
+                ? "Credit"
+                : "Debit",
         };
 
-        if (account.account_type === 'Asset') {
+        if (account.account_type === "Asset") {
           assets.push(accountData);
-        } else if (account.account_type === 'Liability') {
+        } else if (account.account_type === "Liability") {
           liabilities.push(accountData);
-        } else if (account.account_type === 'Equity') {
+        } else if (account.account_type === "Equity") {
           equity.push(accountData);
         }
       });
 
       const totalAssets = assets.reduce((sum, a) => sum + a.balance, 0);
-      const totalLiabilities = liabilities.reduce((sum, l) => sum + l.balance, 0);
+      const totalLiabilities = liabilities.reduce(
+        (sum, l) => sum + l.balance,
+        0,
+      );
       const totalEquity = equity.reduce((sum, e) => sum + e.balance, 0);
 
       res.json({
@@ -12102,15 +11804,15 @@ app.get(
         as_of_date: dateFilter,
       });
     } catch (error) {
-      console.error('Error generating balance sheet:', error);
-      res.status(500).json({ error: 'Failed to generate balance sheet' });
+      console.error("Error generating balance sheet:", error);
+      res.status(500).json({ error: "Failed to generate balance sheet" });
     }
-  }
+  },
 );
 
 // ==================== GET INCOME STATEMENT ====================
 app.get(
-  '/api/sys/ledger/income-statement',
+  "/api/sys/ledger/income-statement",
   authenticate,
   authorizeAdmin,
   async (req, res) => {
@@ -12118,32 +11820,37 @@ app.get(
       const { start_date, end_date } = req.query;
 
       if (!start_date || !end_date) {
-        return res.status(400).json({ error: 'Start date and end date required' });
+        return res
+          .status(400)
+          .json({ error: "Start date and end date required" });
       }
 
       // Get revenue and expense entries
       const { data: entries } = await supabase
-        .from('ledger')
-        .select('*')
-        .gte('created_at', start_date)
-        .lte('created_at', `${end_date} 23:59:59`);
+        .from("ledger")
+        .select("*")
+        .gte("created_at", start_date)
+        .lte("created_at", `${end_date} 23:59:59`);
 
       const { data: revenueAccounts } = await supabase
-        .from('chart_of_accounts')
-        .select('*')
-        .eq('account_type', 'Revenue');
+        .from("chart_of_accounts")
+        .select("*")
+        .eq("account_type", "Revenue");
 
       const { data: expenseAccounts } = await supabase
-        .from('chart_of_accounts')
-        .select('*')
-        .eq('account_type', 'Expense');
+        .from("chart_of_accounts")
+        .select("*")
+        .eq("account_type", "Expense");
 
       // Calculate revenue by account
       const revenues = (revenueAccounts || [])
         .map((account) => {
           let creditTotal = 0;
           (entries || []).forEach((entry) => {
-            if (entry.account_code === account.account_code && entry.entry_type === 'CREDIT') {
+            if (
+              entry.account_code === account.account_code &&
+              entry.entry_type === "CREDIT"
+            ) {
               creditTotal += entry.amount;
             }
           });
@@ -12159,7 +11866,10 @@ app.get(
         .map((account) => {
           let debitTotal = 0;
           (entries || []).forEach((entry) => {
-            if (entry.account_code === account.account_code && entry.entry_type === 'DEBIT') {
+            if (
+              entry.account_code === account.account_code &&
+              entry.entry_type === "DEBIT"
+            ) {
               debitTotal += entry.amount;
             }
           });
@@ -12179,46 +11889,54 @@ app.get(
         revenues: { items: revenues, total: totalRevenue },
         expenses: { items: expenses, total: totalExpenses },
         net_income: netIncome,
-        net_income_type: netIncome >= 0 ? 'Profit' : 'Loss',
+        net_income_type: netIncome >= 0 ? "Profit" : "Loss",
         period: { start_date, end_date },
       });
     } catch (error) {
-      console.error('Error generating income statement:', error);
-      res.status(500).json({ error: 'Failed to generate income statement' });
+      console.error("Error generating income statement:", error);
+      res.status(500).json({ error: "Failed to generate income statement" });
     }
-  }
+  },
 );
 
 // ==================== GET DAILY JOURNAL ====================
 app.get(
-  '/api/sys/ledger/daily-journal',
+  "/api/sys/ledger/daily-journal",
   authenticate,
   authorizeAdmin,
   async (req, res) => {
     try {
       const { date } = req.query;
-      const targetDate = date || new Date().toISOString().split('T')[0];
+      const targetDate = date || new Date().toISOString().split("T")[0];
 
       const { data: entries } = await supabase
-        .from('ledger')
-        .select(`
+        .from("ledger")
+        .select(
+          `
           *,
           users!ledger_user_id_fkey (id, first_name, last_name, email)
-        `)
-        .gte('created_at', `${targetDate} 00:00:00`)
-        .lte('created_at', `${targetDate} 23:59:59`)
-        .order('created_at', { ascending: true });
+        `,
+        )
+        .gte("created_at", `${targetDate} 00:00:00`)
+        .lte("created_at", `${targetDate} 23:59:59`)
+        .order("created_at", { ascending: true });
 
       // Format entries to match old format
-      const formattedEntries = (entries || []).map(entry => ({
+      const formattedEntries = (entries || []).map((entry) => ({
         ...entry,
         entry_date: entry.created_at,
-        debit_amount: entry.entry_type === 'DEBIT' ? entry.amount : 0,
-        credit_amount: entry.entry_type === 'CREDIT' ? entry.amount : 0,
+        debit_amount: entry.entry_type === "DEBIT" ? entry.amount : 0,
+        credit_amount: entry.entry_type === "CREDIT" ? entry.amount : 0,
       }));
 
-      const totalDebit = formattedEntries.reduce((sum, e) => sum + e.debit_amount, 0);
-      const totalCredit = formattedEntries.reduce((sum, e) => sum + e.credit_amount, 0);
+      const totalDebit = formattedEntries.reduce(
+        (sum, e) => sum + e.debit_amount,
+        0,
+      );
+      const totalCredit = formattedEntries.reduce(
+        (sum, e) => sum + e.credit_amount,
+        0,
+      );
 
       // Group by hour
       const groupedByHour = {};
@@ -12248,15 +11966,15 @@ app.get(
         },
       });
     } catch (error) {
-      console.error('Error fetching daily journal:', error);
-      res.status(500).json({ error: 'Failed to fetch daily journal' });
+      console.error("Error fetching daily journal:", error);
+      res.status(500).json({ error: "Failed to fetch daily journal" });
     }
-  }
+  },
 );
 
 // ==================== GET RECONCILIATION BALANCES ====================
 app.get(
-  '/api/sys/ledger/reconciliation-balances',
+  "/api/sys/ledger/reconciliation-balances",
   authenticate,
   authorizeAdmin,
   async (req, res) => {
@@ -12264,12 +11982,12 @@ app.get(
       const { user_id } = req.query;
 
       let query = supabase
-        .from('ledger')
-        .select('user_id, entry_type, amount')
-        .eq('status', 'completed');
+        .from("ledger")
+        .select("user_id, entry_type, amount")
+        .eq("status", "completed");
 
       if (user_id) {
-        query = query.eq('user_id', user_id);
+        query = query.eq("user_id", user_id);
       }
 
       const { data: entries, error } = await query;
@@ -12281,7 +11999,7 @@ app.get(
         if (!balances[entry.user_id]) {
           balances[entry.user_id] = 0;
         }
-        if (entry.entry_type === 'CREDIT') {
+        if (entry.entry_type === "CREDIT") {
           balances[entry.user_id] += entry.amount;
         } else {
           balances[entry.user_id] -= entry.amount;
@@ -12294,31 +12012,31 @@ app.get(
         res.json({ balances });
       }
     } catch (error) {
-      console.error('Reconciliation balances error:', error);
+      console.error("Reconciliation balances error:", error);
       res.status(500).json({ error: error.message });
     }
-  }
+  },
 );
 
 // ==================== GET RECONCILIATION ISSUES ====================
 app.get(
-  '/api/sys/ledger/reconciliation-issues',
+  "/api/sys/ledger/reconciliation-issues",
   authenticate,
   authorizeAdmin,
   async (req, res) => {
     try {
       // Get all users with their current balance
       const { data: users, error: userError } = await supabase
-        .from('users')
-        .select('id, first_name, last_name, email');
+        .from("users")
+        .select("id, first_name, last_name, email");
 
       if (userError) throw userError;
 
       // Get ledger balances from new ledger table
       const { data: ledgerEntries, error: ledgerError } = await supabase
-        .from('ledger')
-        .select('user_id, entry_type, amount')
-        .eq('status', 'completed');
+        .from("ledger")
+        .select("user_id, entry_type, amount")
+        .eq("status", "completed");
 
       if (ledgerError) throw ledgerError;
 
@@ -12328,7 +12046,7 @@ app.get(
         if (!ledgerBalances[entry.user_id]) {
           ledgerBalances[entry.user_id] = 0;
         }
-        if (entry.entry_type === 'CREDIT') {
+        if (entry.entry_type === "CREDIT") {
           ledgerBalances[entry.user_id] += entry.amount;
         } else {
           ledgerBalances[entry.user_id] -= entry.amount;
@@ -12337,9 +12055,9 @@ app.get(
 
       // Get current account balances
       const { data: accounts, error: accError } = await supabase
-        .from('accounts')
-        .select('user_id, balance')
-        .eq('account_type', 'checking');
+        .from("accounts")
+        .select("user_id, balance")
+        .eq("account_type", "checking");
 
       if (accError) throw accError;
 
@@ -12358,8 +12076,10 @@ app.get(
         if (Math.abs(difference) > 0.01) {
           issues.push({
             user_id: user.id,
-            user_name: `${user.first_name || ''} ${user.last_name || ''}`.trim() || 'Unknown',
-            user_email: user.email || '',
+            user_name:
+              `${user.first_name || ""} ${user.last_name || ""}`.trim() ||
+              "Unknown",
+            user_email: user.email || "",
             user_balance: userBalance,
             ledger_balance: ledgerBalance,
             difference: difference,
@@ -12369,15 +12089,15 @@ app.get(
 
       res.json({ issues });
     } catch (error) {
-      console.error('Reconciliation issues error:', error);
+      console.error("Reconciliation issues error:", error);
       res.status(500).json({ error: error.message });
     }
-  }
+  },
 );
 
 // ==================== GET USER RECONCILIATION DETAILS ====================
 app.get(
-  '/api/sys/users/:userId/reconciliation-details',
+  "/api/sys/users/:userId/reconciliation-details",
   authenticate,
   authorizeAdmin,
   async (req, res) => {
@@ -12386,25 +12106,29 @@ app.get(
 
       // Get operational balance
       const { data: account, error: accError } = await supabase
-        .from('accounts')
-        .select('balance')
-        .eq('user_id', userId)
-        .eq('account_type', 'checking')
+        .from("accounts")
+        .select("balance")
+        .eq("user_id", userId)
+        .eq("account_type", "checking")
         .single();
 
       if (accError) {
-        return res.status(404).json({ error: 'Account not found' });
+        return res.status(404).json({ error: "Account not found" });
       }
 
       const operationalBalance = account.balance || 0;
 
       // Get ledger balance from new ledger table
-      const { data: ledgerResult, error: ledgerError } = await supabase
-        .rpc('derive_ledger_balance', { p_user_id: userId });
+      const { data: ledgerResult, error: ledgerError } = await supabase.rpc(
+        "derive_ledger_balance",
+        { p_user_id: userId },
+      );
 
       if (ledgerError) {
-        console.error('Ledger balance error:', ledgerError);
-        return res.status(500).json({ error: 'Failed to derive ledger balance' });
+        console.error("Ledger balance error:", ledgerError);
+        return res
+          .status(500)
+          .json({ error: "Failed to derive ledger balance" });
       }
 
       const ledgerBalance = ledgerResult || 0;
@@ -12412,64 +12136,66 @@ app.get(
 
       // Get recent ledger entries
       const { data: ledgerEntries, error: entriesError } = await supabase
-        .from('ledger')
-        .select('*')
-        .eq('user_id', userId)
-        .order('created_at', { ascending: false })
+        .from("ledger")
+        .select("*")
+        .eq("user_id", userId)
+        .order("created_at", { ascending: false })
         .limit(20);
 
       if (entriesError) {
-        console.error('Ledger entries error:', entriesError);
+        console.error("Ledger entries error:", entriesError);
       }
 
       // Get user info
       const { data: user, error: userError } = await supabase
-        .from('users')
-        .select('first_name, last_name, email, is_frozen')
-        .eq('id', userId)
+        .from("users")
+        .select("first_name, last_name, email, is_frozen")
+        .eq("id", userId)
         .single();
 
       if (userError) {
-        console.error('User fetch error:', userError);
+        console.error("User fetch error:", userError);
       }
 
       res.json({
         user_id: userId,
-        user_name: user ? `${user.first_name || ''} ${user.last_name || ''}`.trim() : 'Unknown',
-        user_email: user?.email || '',
+        user_name: user
+          ? `${user.first_name || ""} ${user.last_name || ""}`.trim()
+          : "Unknown",
+        user_email: user?.email || "",
         is_frozen: user?.is_frozen || false,
         operational_balance: operationalBalance,
         ledger_balance: ledgerBalance,
         difference: difference,
-        ledger_entries: ledgerEntries || []
+        ledger_entries: ledgerEntries || [],
       });
     } catch (error) {
-      console.error('Reconciliation details error:', error);
+      console.error("Reconciliation details error:", error);
       res.status(500).json({ error: error.message });
     }
-  }
+  },
 );
 
 // ==================== RUN RECONCILIATION ====================
 app.post(
-  '/api/sys/ledger/reconcile-all',
+  "/api/sys/ledger/reconcile-all",
   authenticate,
   authorizeAdmin,
   async (req, res) => {
     try {
       // Get all users with accounts
       const { data: accounts, error: accError } = await supabase
-        .from('accounts')
-        .select('user_id, balance')
-        .eq('account_type', 'checking');
+        .from("accounts")
+        .select("user_id, balance")
+        .eq("account_type", "checking");
 
       if (accError) throw accError;
 
       // Get ledger balances from new ledger table
       const { data: ledgerEntries, error: ledgerError } = await supabase
-        .from('ledger')
-        .select('user_id, entry_type, amount')
-        .eq('status', 'completed');
+        .from("ledger")
+        .select("user_id, entry_type, amount")
+        .eq("status", "completed");
 
       if (ledgerError) throw ledgerError;
 
@@ -12479,7 +12205,7 @@ app.post(
         if (!ledgerBalances[entry.user_id]) {
           ledgerBalances[entry.user_id] = 0;
         }
-        if (entry.entry_type === 'CREDIT') {
+        if (entry.entry_type === "CREDIT") {
           ledgerBalances[entry.user_id] += entry.amount;
         } else {
           ledgerBalances[entry.user_id] -= entry.amount;
@@ -12501,19 +12227,19 @@ app.post(
             user_id: account.user_id,
             user_balance: userBalance,
             ledger_balance: ledgerBalance,
-            difference: difference
+            difference: difference,
           });
 
           // Create reconciliation alert for critical discrepancies
           if (Math.abs(difference) > 1000) {
-            await supabase.from('reconciliation_alerts').insert({
+            await supabase.from("reconciliation_alerts").insert({
               user_id: account.user_id,
               operational_balance: userBalance,
               ledger_balance: ledgerBalance,
               difference: difference,
-              status: 'open',
-              severity: 'critical',
-              created_at: new Date().toISOString()
+              status: "open",
+              severity: "critical",
+              created_at: new Date().toISOString(),
             });
           }
         }
@@ -12523,67 +12249,67 @@ app.post(
         success: true,
         discrepancies: discrepancyCount,
         issues: issues,
-        message: `Reconciliation complete. Found ${discrepancyCount} discrepancy(s).`
+        message: `Reconciliation complete. Found ${discrepancyCount} discrepancy(s).`,
       });
     } catch (error) {
-      console.error('Reconciliation error:', error);
+      console.error("Reconciliation error:", error);
       res.status(500).json({ error: error.message });
     }
-  }
+  },
 );
 
 // ==================== CREATE ADJUSTMENT ====================
 app.post(
-  '/api/sys/users/:userId/adjust-balance',
+  "/api/sys/users/:userId/adjust-balance",
   authenticate,
   authorizeAdmin,
   async (req, res) => {
     const { userId } = req.params;
     const { amount, direction, reason } = req.body;
-    const requestId = req.headers['idempotency-key'] || crypto.randomUUID();
+    const requestId = req.headers["idempotency-key"] || crypto.randomUUID();
 
     try {
       // Validate
       if (!amount || amount <= 0) {
         return res.status(400).json({
-          error: 'Invalid amount',
-          code: 'INVALID_AMOUNT'
+          error: "Invalid amount",
+          code: "INVALID_AMOUNT",
         });
       }
 
       if (!reason || reason.trim().length < 3) {
         return res.status(400).json({
-          error: 'Adjustment reason required (minimum 3 characters)',
-          code: 'REASON_REQUIRED'
+          error: "Adjustment reason required (minimum 3 characters)",
+          code: "REASON_REQUIRED",
         });
       }
 
       // Get user's checking account
       const { data: account, error: accountError } = await supabase
-        .from('accounts')
-        .select('id, user_id, balance, available_balance')
-        .eq('user_id', userId)
-        .eq('account_type', 'checking')
+        .from("accounts")
+        .select("id, user_id, balance, available_balance")
+        .eq("user_id", userId)
+        .eq("account_type", "checking")
         .single();
 
       if (accountError || !account) {
         return res.status(404).json({
-          error: 'User account not found',
-          code: 'ACCOUNT_NOT_FOUND'
+          error: "User account not found",
+          code: "ACCOUNT_NOT_FOUND",
         });
       }
 
       // Get adjustment account ID from system settings
       const { data: adjAccountSetting } = await supabase
-        .from('system_account_ids')
-        .select('account_id')
-        .eq('key', 'ADMIN_ADJUSTMENT_ACCOUNT')
+        .from("system_account_ids")
+        .select("account_id")
+        .eq("key", "ADMIN_ADJUSTMENT_ACCOUNT")
         .single();
 
       if (!adjAccountSetting || !adjAccountSetting.account_id) {
         return res.status(500).json({
-          error: 'Adjustment account not configured',
-          code: 'SYSTEM_CONFIG_ERROR'
+          error: "Adjustment account not configured",
+          code: "SYSTEM_CONFIG_ERROR",
         });
       }
 
@@ -12591,27 +12317,27 @@ app.post(
       let debits = [];
       let credits = [];
 
-      if (direction === 'credit') {
+      if (direction === "credit") {
         credits.push({
           accountId: account.id,
           amount: amount,
-          reason: `Admin credit adjustment: ${reason}`
+          reason: `Admin credit adjustment: ${reason}`,
         });
         debits.push({
           accountId: adjAccountSetting.account_id,
           amount: amount,
-          reason: `Admin credit to user ${userId}: ${reason}`
+          reason: `Admin credit to user ${userId}: ${reason}`,
         });
       } else {
         debits.push({
           accountId: account.id,
           amount: amount,
-          reason: `Admin debit adjustment: ${reason}`
+          reason: `Admin debit adjustment: ${reason}`,
         });
         credits.push({
           accountId: adjAccountSetting.account_id,
           amount: amount,
-          reason: `Admin debit from user ${userId}: ${reason}`
+          reason: `Admin debit from user ${userId}: ${reason}`,
         });
       }
 
@@ -12620,63 +12346,65 @@ app.post(
       const result = await transactionService.executeTransaction({
         requestId: requestId,
         userId: userId,
-        type: 'ADMIN_ADJUSTMENT',
+        type: "ADMIN_ADJUSTMENT",
         description: `Admin ${direction} adjustment: ${reason}`,
         debits: debits,
         credits: credits,
         metadata: {
           ip: req.ip,
-          userAgent: req.headers['user-agent'],
+          userAgent: req.headers["user-agent"],
           admin_id: req.user.id,
           reason: reason,
-          adjustment_direction: direction
-        }
+          adjustment_direction: direction,
+        },
       });
 
       // Log admin action
-      await supabase.from('admin_actions').insert({
+      await supabase.from("admin_actions").insert({
         admin_id: req.user.id,
-        action_type: 'adjust_balance',
+        action_type: "adjust_balance",
         target_user_id: userId,
         details: {
           amount: amount,
           direction: direction,
           reason: reason,
-          transaction_reference: result.transactionReference
+          transaction_reference: result.transactionReference,
         },
         ip_address: req.ip,
-        created_at: new Date().toISOString()
+        created_at: new Date().toISOString(),
       });
 
       // Create notification
-      await supabase.from('notifications').insert({
+      await supabase.from("notifications").insert({
         user_id: userId,
-        title: `Balance ${direction === 'credit' ? 'Credited' : 'Debited'}`,
-        message: `Your account has been ${direction === 'credit' ? 'credited' : 'debited'} with ₦${amount.toLocaleString()}. Reason: ${reason}`,
-        type: 'info',
-        created_at: new Date().toISOString()
+        title: `Balance ${direction === "credit" ? "Credited" : "Debited"}`,
+        message: `Your account has been ${direction === "credit" ? "credited" : "debited"} with ₦${amount.toLocaleString()}. Reason: ${reason}`,
+        type: "info",
+        created_at: new Date().toISOString(),
       });
 
       res.json({
         success: true,
         message: `Balance ${direction}ed successfully`,
         transaction_reference: result.transactionReference,
-        new_balance: result.balances.find(b => b.accountId === account.id)?.balanceAfter || 0
+        new_balance:
+          result.balances.find((b) => b.accountId === account.id)
+            ?.balanceAfter || 0,
       });
     } catch (error) {
-      console.error('Adjustment error:', error);
+      console.error("Adjustment error:", error);
       res.status(500).json({
-        error: 'Adjustment failed',
-        code: 'ADJUSTMENT_FAILED',
-        message: error.message
+        error: "Adjustment failed",
+        code: "ADJUSTMENT_FAILED",
+        message: error.message,
       });
     }
-  }
+  },
 );
 
 // ==================== EXPORT GENERAL LEDGER ====================
 app.get(
-  '/api/sys/ledger/general/export',
+  "/api/sys/ledger/general/export",
   authenticate,
   authorizeAdmin,
   async (req, res) => {
@@ -12684,12 +12412,12 @@ app.get(
       const { start_date, end_date } = req.query;
 
       let query = supabase
-        .from('ledger')
-        .select('*')
-        .order('created_at', { ascending: true });
+        .from("ledger")
+        .select("*")
+        .order("created_at", { ascending: true });
 
-      if (start_date) query = query.gte('created_at', start_date);
-      if (end_date) query = query.lte('created_at', `${end_date} 23:59:59`);
+      if (start_date) query = query.gte("created_at", start_date);
+      if (end_date) query = query.lte("created_at", `${end_date} 23:59:59`);
 
       const { data: entries, error } = await query;
 
@@ -12697,38 +12425,46 @@ app.get(
 
       // Create CSV
       const headers = [
-        'Entry ID', 'Date', 'Account Code', 'Account Name',
-        'Description', 'Reference', 'Debit', 'Credit', 'User ID', 'Reconciled'
+        "Entry ID",
+        "Date",
+        "Account Code",
+        "Account Name",
+        "Description",
+        "Reference",
+        "Debit",
+        "Credit",
+        "User ID",
+        "Reconciled",
       ];
-      const csvRows = [headers.join(',')];
+      const csvRows = [headers.join(",")];
 
       for (const entry of entries || []) {
         const row = [
-          `"${entry.ledger_reference || ''}"`,
+          `"${entry.ledger_reference || ""}"`,
           `"${entry.created_at}"`,
-          `"${entry.account_code || ''}"`,
-          `"${entry.account_name || ''}"`,
-          `"${(entry.description || '').replace(/"/g, '""')}"`,
-          `"${entry.reference || ''}"`,
-          entry.entry_type === 'DEBIT' ? entry.amount : 0,
-          entry.entry_type === 'CREDIT' ? entry.amount : 0,
-          `"${entry.user_id || ''}"`,
-          entry.is_reconciled ? 'Yes' : 'No',
+          `"${entry.account_code || ""}"`,
+          `"${entry.account_name || ""}"`,
+          `"${(entry.description || "").replace(/"/g, '""')}"`,
+          `"${entry.reference || ""}"`,
+          entry.entry_type === "DEBIT" ? entry.amount : 0,
+          entry.entry_type === "CREDIT" ? entry.amount : 0,
+          `"${entry.user_id || ""}"`,
+          entry.is_reconciled ? "Yes" : "No",
         ];
-        csvRows.push(row.join(','));
+        csvRows.push(row.join(","));
       }
 
-      res.setHeader('Content-Type', 'text/csv');
+      res.setHeader("Content-Type", "text/csv");
       res.setHeader(
-        'Content-Disposition',
-        `attachment; filename=general_ledger_${new Date().toISOString().split('T')[0]}.csv`
+        "Content-Disposition",
+        `attachment; filename=general_ledger_${new Date().toISOString().split("T")[0]}.csv`,
       );
-      res.send(csvRows.join('\n'));
+      res.send(csvRows.join("\n"));
     } catch (error) {
-      console.error('Export error:', error);
-      res.status(500).json({ error: 'Export failed' });
+      console.error("Export error:", error);
+      res.status(500).json({ error: "Export failed" });
     }
-  }
+  },
 );
 
 // ==================== LEDGER SYSTEM ROUTES ====================
@@ -14873,9 +14609,9 @@ app.get(
       today.setHours(0, 0, 0, 0);
 
       const { data: todayTransactions } = await supabase
-        .from("transactions")
+        .from("transactions_new")
         .select("amount")
-        .eq("from_user_id", userId)
+        .eq("sender_user_id", userId)
         .eq("status", "completed")
         .gte("created_at", today.toISOString());
 
@@ -14890,9 +14626,9 @@ app.get(
       );
 
       const { data: monthTransactions } = await supabase
-        .from("transactions")
+        .from("transactions_new")
         .select("amount")
-        .eq("from_user_id", userId)
+        .eq("sender_user_id", userId)
         .eq("status", "completed")
         .gte("created_at", firstDayOfMonth.toISOString());
 
@@ -15153,17 +14889,17 @@ app.get("/api/user/transactions/export", authenticate, async (req, res) => {
     const accountIds = accounts.map((a) => a.id);
 
     const { data: transactions } = await supabase
-      .from("transactions")
+      .from("transactions_new")
       .select("*")
       .or(
-        `from_account_id.in.(${accountIds.join(",")}),to_account_id.in.(${accountIds.join(",")})`,
+        `sender_account_id.in.(${accountIds.join(",")}),receiver_account_id.in.(${accountIds.join(",")})`,
       )
       .order("created_at", { ascending: false });
 
     let csv = "Date,Description,Type,Amount (NGN),Status\n";
 
     transactions.forEach((t) => {
-      const isCredit = t.to_user_id === req.user.id;
+      const isCredit = t.receiver_user_id === req.user.id;
       const ngnAmount = t.amount * 1500; // Convert to NGN
       csv += `${t.created_at},${t.description || t.transaction_type},${isCredit ? "Credit" : "Debit"},${ngnAmount.toFixed(2)},${t.status}\n`;
     });
@@ -16241,7 +15977,7 @@ app.post(
       }
 
       // Create refund transaction
-      const { error: transError } = await supabase.from("transactions").insert({
+      const { error: transError } = await supabase.from("transactions_new").insert({
         to_account_id: account.id,
         to_user_id: request.user_id,
         amount: request.amount,
@@ -16425,17 +16161,21 @@ app.post(
       }
 
       // Create refund transaction
-      const { error: transError } = await supabase.from("transactions").insert({
-        to_account_id: account.id,
-        to_user_id: request.user_id,
-        amount: refundAmount,
-        description: `Harvest Plan Withdrawal (Admin Approved) - Request ID: ${requestId}`,
-        transaction_type: "savings_withdrawal",
-        status: "completed",
-        completed_at: new Date().toISOString(),
-        is_admin_adjusted: true,
-        admin_note: `Harvest withdrawal approved by ${req.user.email}`,
-      });
+      const { error: transError } = await supabase
+        .from("transactions_new")
+        .insert({
+          receiver_account_id: account.id,
+          receiver_user_id: request.user_id,
+          amount: refundAmount,
+          description: `Harvest Plan Withdrawal (Admin Approved) - Request ID: ${requestId}`,
+          transaction_type: "savings_withdrawal",
+          status: "completed",
+          completed_at: new Date().toISOString(),
+          metadata: {
+            is_admin_adjusted: true,
+            admin_note: `Harvest withdrawal approved by ${req.user.email}`,
+          },
+        });
 
       if (transError) {
         console.error("Transaction creation error:", transError);
@@ -16636,7 +16376,7 @@ app.get("/api/user/check-close-eligibility", authenticate, async (req, res) => {
 
     // Check last transaction date
     const { data: lastTransaction, error: txError } = await supabase
-      .from("transactions")
+      .from("transactions_new")
       .select("created_at")
       .or(`from_user_id.eq.${req.user.id},to_user_id.eq.${req.user.id}`)
       .order("created_at", { ascending: false })
@@ -16989,16 +16729,18 @@ app.post(
           .eq("id", transfer.from_account_id);
 
         // Create refund transaction record
-        await supabase.from("transactions").insert({
-          to_account_id: transfer.from_account_id,
-          to_user_id: transfer.user_id,
+        await supabase.from("transactions_new").insert({
+          receiver_account_id: transfer.from_account_id,
+          receiver_user_id: transfer.user_id,
           amount: transfer.amount,
           description: `Refund: External transfer to ${transfer.bank_name} was rejected. Reason: ${reason || "Not specified"}`,
           transaction_type: "refund",
           status: "completed",
           completed_at: new Date().toISOString(),
-          is_admin_adjusted: true,
-          admin_note: `Rejected by ${req.user.email}. Refunded.`,
+          metadata: {
+            is_admin_adjusted: true,
+            admin_note: `Rejected by ${req.user.email}. Refunded.`,
+          },
         });
       }
 
@@ -17080,91 +16822,87 @@ app.get(
 // GET FLUTTERWAVE BANKS
 // ============================================================
 
-app.get(
-  '/api/flutterwave/banks',
-  authenticate,
-  async (req, res) => {
-    try {
-      // Check cache first (Redis recommended)
-      const cacheKey = 'flutterwave_banks';
-      const { data: cached } = await supabase
-        .from('flutterwave_banks')
-        .select('*')
-        .eq('is_active', true)
-        .order('sort_order', { ascending: true });
+app.get("/api/flutterwave/banks", authenticate, async (req, res) => {
+  try {
+    // Check cache first (Redis recommended)
+    const cacheKey = "flutterwave_banks";
+    const { data: cached } = await supabase
+      .from("flutterwave_banks")
+      .select("*")
+      .eq("is_active", true)
+      .order("sort_order", { ascending: true });
 
-      if (cached && cached.length > 0) {
-        return res.json({
-          success: true,
-          banks: cached,
-          source: 'cache'
-        });
-      }
-
-      // Fetch from Flutterwave
-      const response = await axios.get(
-        `${process.env.FLUTTERWAVE_BASE_URL}/banks/NG`,
-        {
-          headers: {
-            'Authorization': `Bearer ${process.env.FLUTTERWAVE_SECRET_KEY}`,
-            'Content-Type': 'application/json'
-          }
-        }
-      );
-
-      if (response.data.status === 'success') {
-        const banks = response.data.data.map(bank => ({
-          bank_code: bank.code,
-          bank_name: bank.name,
-          sort_order: bank.sort_order || 0,
-          is_active: true
-        }));
-
-        // Cache in database
-        await supabase
-          .from('flutterwave_banks')
-          .upsert(banks, { onConflict: 'bank_code' });
-
-        res.json({
-          success: true,
-          banks: banks,
-          source: 'api'
-        });
-      } else {
-        throw new Error('Failed to fetch banks');
-      }
-    } catch (error) {
-      console.error('Banks fetch error:', error);
-      
-      // Fallback to cached banks
-      const { data: fallback } = await supabase
-        .from('flutterwave_banks')
-        .select('*')
-        .eq('is_active', true)
-        .order('sort_order', { ascending: true });
-
-      if (fallback && fallback.length > 0) {
-        return res.json({
-          success: true,
-          banks: fallback,
-          source: 'fallback'
-        });
-      }
-
-      res.status(500).json({
-        error: 'Failed to fetch banks',
-        code: 'BANK_FETCH_FAILED'
+    if (cached && cached.length > 0) {
+      return res.json({
+        success: true,
+        banks: cached,
+        source: "cache",
       });
     }
+
+    // Fetch from Flutterwave
+    const response = await axios.get(
+      `${process.env.FLUTTERWAVE_BASE_URL}/banks/NG`,
+      {
+        headers: {
+          Authorization: `Bearer ${process.env.FLUTTERWAVE_SECRET_KEY}`,
+          "Content-Type": "application/json",
+        },
+      },
+    );
+
+    if (response.data.status === "success") {
+      const banks = response.data.data.map((bank) => ({
+        bank_code: bank.code,
+        bank_name: bank.name,
+        sort_order: bank.sort_order || 0,
+        is_active: true,
+      }));
+
+      // Cache in database
+      await supabase
+        .from("flutterwave_banks")
+        .upsert(banks, { onConflict: "bank_code" });
+
+      res.json({
+        success: true,
+        banks: banks,
+        source: "api",
+      });
+    } else {
+      throw new Error("Failed to fetch banks");
+    }
+  } catch (error) {
+    console.error("Banks fetch error:", error);
+
+    // Fallback to cached banks
+    const { data: fallback } = await supabase
+      .from("flutterwave_banks")
+      .select("*")
+      .eq("is_active", true)
+      .order("sort_order", { ascending: true });
+
+    if (fallback && fallback.length > 0) {
+      return res.json({
+        success: true,
+        banks: fallback,
+        source: "fallback",
+      });
+    }
+
+    res.status(500).json({
+      error: "Failed to fetch banks",
+      code: "BANK_FETCH_FAILED",
+    });
   }
-);
+});
 
 // ============================================================
 // VERIFY ACCOUNT - RESOLVE ACCOUNT NAME
 // ============================================================
 
 app.post(
-  '/api/flutterwave/verify-account',
+  "/api/flutterwave/verify-account",
   authenticate,
   checkAccountFrozen,
   async (req, res) => {
@@ -17173,17 +16911,17 @@ app.post(
 
       if (!bank_code || !account_number) {
         return res.status(400).json({
-          error: 'Bank code and account number required',
-          code: 'MISSING_FIELDS'
+          error: "Bank code and account number required",
+          code: "MISSING_FIELDS",
         });
       }
 
       // Validate account number format (10 digits for Nigeria)
       if (!/^\d{10}$/.test(account_number)) {
         return res.status(400).json({
-          error: 'Invalid account number format',
-          code: 'INVALID_ACCOUNT_NUMBER',
-          message: 'Account number must be 10 digits'
+          error: "Invalid account number format",
+          code: "INVALID_ACCOUNT_NUMBER",
+          message: "Account number must be 10 digits",
         });
       }
 
@@ -17192,73 +16930,73 @@ app.post(
         `${process.env.FLUTTERWAVE_BASE_URL}/accounts/resolve`,
         {
           account_number: account_number,
-          account_bank: bank_code
+          account_bank: bank_code,
         },
         {
           headers: {
-            'Authorization': `Bearer ${process.env.FLUTTERWAVE_SECRET_KEY}`,
-            'Content-Type': 'application/json'
-          }
-        }
+            Authorization: `Bearer ${process.env.FLUTTERWAVE_SECRET_KEY}`,
+            "Content-Type": "application/json",
+          },
+        },
       );
 
-      if (response.data.status === 'success') {
+      if (response.data.status === "success") {
         const accountData = response.data.data;
-        
+
         res.json({
           success: true,
           account_name: accountData.account_name,
           account_number: accountData.account_number,
           bank_code: bank_code,
-          verified: true
+          verified: true,
         });
       } else {
-        throw new Error(response.data.message || 'Verification failed');
+        throw new Error(response.data.message || "Verification failed");
       }
     } catch (error) {
-      console.error('Account verification error:', error);
+      console.error("Account verification error:", error);
 
       // Handle specific Flutterwave errors
-      if (error.response?.data?.status === 'error') {
+      if (error.response?.data?.status === "error") {
         const message = error.response.data.message;
-        if (message.includes('Invalid account number')) {
+        if (message.includes("Invalid account number")) {
           return res.status(400).json({
-            error: 'Invalid account number',
-            code: 'INVALID_ACCOUNT',
-            message: 'Please check the account number and try again'
+            error: "Invalid account number",
+            code: "INVALID_ACCOUNT",
+            message: "Please check the account number and try again",
           });
         }
-        if (message.includes('Invalid bank code')) {
+        if (message.includes("Invalid bank code")) {
           return res.status(400).json({
-            error: 'Invalid bank code',
-            code: 'INVALID_BANK',
-            message: 'Please select a valid bank'
+            error: "Invalid bank code",
+            code: "INVALID_BANK",
+            message: "Please select a valid bank",
           });
         }
-        if (message.includes('Account not found')) {
+        if (message.includes("Account not found")) {
           return res.status(404).json({
-            error: 'Account not found',
-            code: 'ACCOUNT_NOT_FOUND',
-            message: 'No account found with these details'
+            error: "Account not found",
+            code: "ACCOUNT_NOT_FOUND",
+            message: "No account found with these details",
           });
         }
       }
 
       res.status(500).json({
-        error: 'Verification failed',
-        code: 'VERIFICATION_FAILED',
-        message: error.message || 'Please try again later'
+        error: "Verification failed",
+        code: "VERIFICATION_FAILED",
+        message: error.message || "Please try again later",
       });
     }
-  }
+  },
 );
 
 // ============================================================
 // INITIATE FLUTTERWAVE TRANSFER
 // ============================================================
 
-app.post(
-  '/api/flutterwave/transfer',
+/*app.post(
+  "/api/flutterwave/transfer",
   authenticate,
   checkAccountFrozen,
   preventConcurrentTransfer,
@@ -17271,10 +17009,10 @@ app.post(
       amount,
       narration,
       beneficiary_name,
-      idempotency_key
+      idempotency_key,
     } = req.body;
 
-    const requestId = req.headers['x-request-id'] || crypto.randomUUID();
+    const requestId = req.headers["x-request-id"] || crypto.randomUUID();
 
     try {
       // ============================================================
@@ -17282,23 +17020,28 @@ app.post(
       // ============================================================
       if (!account_number || !bank_code || !amount || !beneficiary_name) {
         return res.status(400).json({
-          error: 'Missing required fields',
-          code: 'MISSING_FIELDS',
-          required: ['account_number', 'bank_code', 'amount', 'beneficiary_name']
+          error: "Missing required fields",
+          code: "MISSING_FIELDS",
+          required: [
+            "account_number",
+            "bank_code",
+            "amount",
+            "beneficiary_name",
+          ],
         });
       }
 
       if (!/^\d{10}$/.test(account_number)) {
         return res.status(400).json({
-          error: 'Invalid account number format',
-          code: 'INVALID_ACCOUNT_NUMBER'
+          error: "Invalid account number format",
+          code: "INVALID_ACCOUNT_NUMBER",
         });
       }
 
       if (amount <= 0) {
         return res.status(400).json({
-          error: 'Invalid amount',
-          code: 'INVALID_AMOUNT'
+          error: "Invalid amount",
+          code: "INVALID_AMOUNT",
         });
       }
 
@@ -17307,13 +17050,13 @@ app.post(
       // ============================================================
       if (idempotency_key) {
         const { data: existing } = await supabase
-          .from('flutterware_idempotency_keys')
-          .select('transfer_id, status, response')
-          .eq('key', idempotency_key)
-          .eq('user_id', req.user.id)
+          .from("flutterware_idempotency_keys")
+          .select("transfer_id, status, response")
+          .eq("key", idempotency_key)
+          .eq("user_id", req.user.id)
           .single();
 
-        if (existing && existing.status === 'completed') {
+        if (existing && existing.status === "completed") {
           return res.json(existing.response);
         }
       }
@@ -17329,7 +17072,7 @@ app.post(
           code: limits.code,
           limit: limits.limit,
           used: limits.used,
-          remaining: limits.remaining
+          remaining: limits.remaining,
         });
       }
 
@@ -17337,16 +17080,16 @@ app.post(
       // 4. GET USER ACCOUNT WITH LOCKING
       // ============================================================
       const { data: account, error: accError } = await supabase
-        .from('accounts')
-        .select('*')
-        .eq('user_id', req.user.id)
-        .eq('account_type', 'checking')
+        .from("accounts")
+        .select("*")
+        .eq("user_id", req.user.id)
+        .eq("account_type", "checking")
         .single();
 
       if (accError || !account) {
         return res.status(404).json({
-          error: 'Account not found',
-          code: 'ACCOUNT_NOT_FOUND'
+          error: "Account not found",
+          code: "ACCOUNT_NOT_FOUND",
         });
       }
 
@@ -17360,46 +17103,48 @@ app.post(
       // ============================================================
       // 6. CHECK AVAILABLE BALANCE
       // ============================================================
-      const availableBalance = account.available_balance - account.reserved_balance;
-      
+      const availableBalance =
+        account.available_balance - account.reserved_balance;
+
       if (availableBalance < totalDeduction) {
         return res.status(400).json({
-          error: 'Insufficient balance',
-          code: 'INSUFFICIENT_BALANCE',
+          error: "Insufficient balance",
+          code: "INSUFFICIENT_BALANCE",
           available: availableBalance,
-          required: totalDeduction
+          required: totalDeduction,
         });
       }
 
       // ============================================================
       // 7. START DATABASE TRANSACTION
       // ============================================================
-      const { data: result, error: txError } = await supabase
-        .rpc('begin_transaction');
+      const { data: result, error: txError } =
+        await supabase.rpc("begin_transaction");
 
       try {
         // 7a. LOCK ACCOUNT
         const { data: lockedAccount, error: lockError } = await supabase
-          .from('accounts')
-          .select('*')
-          .eq('id', account.id)
-          .eq('user_id', req.user.id)
+          .from("accounts")
+          .select("*")
+          .eq("id", account.id)
+          .eq("user_id", req.user.id)
           .single();
 
         if (lockError) throw lockError;
 
         // 7b. RESERVE FUNDS
-        const newReserved = (lockedAccount.reserved_balance || 0) + totalDeduction;
+        const newReserved =
+          (lockedAccount.reserved_balance || 0) + totalDeduction;
         const newAvailable = lockedAccount.available_balance - totalDeduction;
 
         const { error: updateError } = await supabase
-          .from('accounts')
+          .from("accounts")
           .update({
             reserved_balance: newReserved,
             available_balance: newAvailable,
-            updated_at: new Date().toISOString()
+            updated_at: new Date().toISOString(),
           })
-          .eq('id', lockedAccount.id);
+          .eq("id", lockedAccount.id);
 
         if (updateError) throw updateError;
 
@@ -17409,13 +17154,13 @@ app.post(
 
         // 7d. CREATE TRANSFER RECORD
         const { data: transfer, error: transferError } = await supabase
-          .from('flutterwave_transfers')
+          .from("flutterwave_transfers")
           .insert({
             id: transferId,
             user_id: req.user.id,
             from_account_id: lockedAccount.id,
             amount: amount,
-            currency: 'NGN',
+            currency: "NGN",
             narration: narration || `Transfer to ${beneficiary_name}`,
             transaction_reference: transactionReference,
             idempotency_key: idempotency_key,
@@ -17425,17 +17170,17 @@ app.post(
             account_number: account_number,
             fee_amount: feeAmount,
             total_deducted: totalDeduction,
-            status: 'initiated',
+            status: "initiated",
             balance_before: lockedAccount.balance,
             balance_after: lockedAccount.balance - totalDeduction,
             reserved_before: lockedAccount.reserved_balance || 0,
             reserved_after: newReserved,
             initiated_at: new Date().toISOString(),
             ip_address: req.ip,
-            user_agent: req.headers['user-agent'],
-            device_fingerprint: req.headers['x-device-fingerprint'],
+            user_agent: req.headers["user-agent"],
+            device_fingerprint: req.headers["x-device-fingerprint"],
             created_by: req.user.id,
-            request_id: requestId
+            request_id: requestId,
           })
           .select()
           .single();
@@ -17448,26 +17193,24 @@ app.post(
           account: lockedAccount,
           amount: amount,
           feeAmount: feeAmount,
-          totalDeduction: totalDeduction
+          totalDeduction: totalDeduction,
         });
 
         // 7f. COMMIT TRANSACTION
-        await supabase.rpc('commit_transaction');
+        await supabase.rpc("commit_transaction");
 
         // ============================================================
         // 8. STORE IDEMPOTENCY
         // ============================================================
         if (idempotency_key) {
-          await supabase
-            .from('flutterwave_idempotency_keys')
-            .insert({
-              key: idempotency_key,
-              request_id: requestId,
-              user_id: req.user.id,
-              transfer_id: transferId,
-              status: 'pending',
-              created_at: new Date().toISOString()
-            });
+          await supabase.from("flutterwave_idempotency_keys").insert({
+            key: idempotency_key,
+            request_id: requestId,
+            user_id: req.user.id,
+            transfer_id: transferId,
+            status: "pending",
+            created_at: new Date().toISOString(),
+          });
         }
 
         // ============================================================
@@ -17485,28 +17228,26 @@ app.post(
           beneficiary_name,
           account_number,
           bank_code,
-          transactionReference
+          transactionReference,
         });
 
         // ============================================================
         // 11. CREATE NOTIFICATION
         // ============================================================
-        await supabase
-          .from('notifications')
-          .insert({
-            user_id: req.user.id,
-            title: 'External Transfer Initiated',
-            message: `Your transfer of ₦${amount.toLocaleString()} to ${beneficiary_name} has been initiated.`,
-            type: 'info',
-            created_at: new Date().toISOString()
-          });
+        await supabase.from("notifications").insert({
+          user_id: req.user.id,
+          title: "External Transfer Initiated",
+          message: `Your transfer of ₦${amount.toLocaleString()} to ${beneficiary_name} has been initiated.`,
+          type: "info",
+          created_at: new Date().toISOString(),
+        });
 
         // ============================================================
         // 12. RETURN RESPONSE
         // ============================================================
         res.json({
           success: true,
-          message: 'Transfer initiated successfully',
+          message: "Transfer initiated successfully",
           data: {
             transfer_id: transferId,
             transaction_reference: transactionReference,
@@ -17516,29 +17257,27 @@ app.post(
             beneficiary_name: beneficiary_name,
             bank_name: bank_name,
             account_number: account_number,
-            status: 'pending',
+            status: "pending",
             new_available_balance: newAvailable,
             new_reserved_balance: newReserved,
-            estimated_completion: '2-3 minutes'
-          }
+            estimated_completion: "2-3 minutes",
+          },
         });
-
       } catch (error) {
         // ROLLBACK ON ERROR
-        await supabase.rpc('rollback_transaction');
+        await supabase.rpc("rollback_transaction");
         throw error;
       }
-
     } catch (error) {
-      console.error('Transfer error:', error);
-      
+      console.error("Transfer error:", error);
+
       res.status(500).json({
-        error: 'Transfer failed',
-        code: 'TRANSFER_FAILED',
-        message: error.message
+        error: "Transfer failed",
+        code: "TRANSFER_FAILED",
+        message: error.message,
       });
     }
-  }
+  },
 );
 
 // ============================================================
@@ -17548,38 +17287,38 @@ app.post(
 function generateTransferReference() {
   const date = new Date();
   const year = date.getFullYear();
-  const month = String(date.getMonth() + 1).padStart(2, '0');
-  const day = String(date.getDate()).padStart(2, '0');
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
   const random = Math.random().toString(36).substring(2, 10).toUpperCase();
   return `FEE-${year}${month}${day}-${random}`;
 }
 
 async function validateUserTransferLimits(userId, amount) {
   const today = new Date();
-  const todayStr = today.toISOString().split('T')[0];
+  const todayStr = today.toISOString().split("T")[0];
 
   // Get or create user limits
   const { data: limits, error } = await supabase
-    .from('flutterwave_transfer_limits')
-    .select('*')
-    .eq('user_id', userId)
+    .from("flutterwave_transfer_limits")
+    .select("*")
+    .eq("user_id", userId)
     .single();
 
-  if (error && error.code === 'PGRST116') {
+  if (error && error.code === "PGRST116") {
     // Create default limits
     const { data: newLimits } = await supabase
-      .from('flutterwave_transfer_limits')
+      .from("flutterwave_transfer_limits")
       .insert({
         user_id: userId,
         daily_limit: 500000,
         monthly_limit: 5000000,
         single_transaction_limit: 1000000,
         daily_reset_date: todayStr,
-        monthly_reset_date: todayStr
+        monthly_reset_date: todayStr,
       })
       .select()
       .single();
-    
+
     return validateLimits(newLimits, amount, todayStr);
   }
 
@@ -17593,9 +17332,9 @@ function validateLimits(limits, amount, todayStr) {
   if (amount > limits.single_transaction_limit) {
     return {
       allowed: false,
-      code: 'SINGLE_LIMIT_EXCEEDED',
+      code: "SINGLE_LIMIT_EXCEEDED",
       reason: `Single transaction limit is ₦${limits.single_transaction_limit.toLocaleString()}`,
-      limit: limits.single_transaction_limit
+      limit: limits.single_transaction_limit,
     };
   }
 
@@ -17608,11 +17347,11 @@ function validateLimits(limits, amount, todayStr) {
   if (limits.daily_used + amount > limits.daily_limit) {
     return {
       allowed: false,
-      code: 'DAILY_LIMIT_EXCEEDED',
+      code: "DAILY_LIMIT_EXCEEDED",
       reason: `Daily transfer limit is ₦${limits.daily_limit.toLocaleString()}`,
       limit: limits.daily_limit,
       used: limits.daily_used,
-      remaining: limits.daily_limit - limits.daily_used
+      remaining: limits.daily_limit - limits.daily_used,
     };
   }
 
@@ -17626,35 +17365,35 @@ function validateLimits(limits, amount, todayStr) {
   if (limits.monthly_used + amount > limits.monthly_limit) {
     return {
       allowed: false,
-      code: 'MONTHLY_LIMIT_EXCEEDED',
+      code: "MONTHLY_LIMIT_EXCEEDED",
       reason: `Monthly transfer limit is ₦${limits.monthly_limit.toLocaleString()}`,
       limit: limits.monthly_limit,
       used: limits.monthly_used,
-      remaining: limits.monthly_limit - limits.monthly_used
+      remaining: limits.monthly_limit - limits.monthly_used,
     };
   }
 
   return {
     allowed: true,
     daily_remaining: limits.daily_limit - limits.daily_used - amount,
-    monthly_remaining: limits.monthly_limit - limits.monthly_used - amount
+    monthly_remaining: limits.monthly_limit - limits.monthly_used - amount,
   };
 }
 
 async function updateUserTransferLimits(userId, amount) {
-  const today = new Date().toISOString().split('T')[0];
+  const today = new Date().toISOString().split("T")[0];
   const monthStr = today.substring(0, 7);
 
   await supabase
-    .from('flutterwave_transfer_limits')
+    .from("flutterwave_transfer_limits")
     .update({
-      daily_used: supabase.raw('daily_used + ?', amount),
-      monthly_used: supabase.raw('monthly_used + ?', amount),
+      daily_used: supabase.raw("daily_used + ?", amount),
+      monthly_used: supabase.raw("monthly_used + ?", amount),
       daily_reset_date: today,
       monthly_reset_date: today,
-      last_updated_at: new Date().toISOString()
+      last_updated_at: new Date().toISOString(),
     })
-    .eq('user_id', userId);
+    .eq("user_id", userId);
 }
 
 async function processFlutterwaveTransfer(transfer, details) {
@@ -17666,68 +17405,480 @@ async function processFlutterwaveTransfer(transfer, details) {
         account_bank: details.bank_code,
         account_number: details.account_number,
         amount: details.amount,
-        narration: details.narration || `Transfer to ${details.beneficiary_name}`,
-        currency: 'NGN',
+        narration:
+          details.narration || `Transfer to ${details.beneficiary_name}`,
+        currency: "NGN",
         reference: details.transactionReference,
         callback_url: `${process.env.FLUTTERWAVE_WEBHOOK_URL}`,
         beneficiary_name: details.beneficiary_name,
-        debit_currency: 'NGN'
+        debit_currency: "NGN",
       },
       {
         headers: {
-          'Authorization': `Bearer ${process.env.FLUTTERWAVE_SECRET_KEY}`,
-          'Content-Type': 'application/json'
-        }
-      }
+          Authorization: `Bearer ${process.env.FLUTTERWAVE_SECRET_KEY}`,
+          "Content-Type": "application/json",
+        },
+      },
     );
 
     // Update transfer with Flutterwave response
     await supabase
-      .from('flutterwave_transfers')
+      .from("flutterwave_transfers")
       .update({
         flutterwave_reference: response.data.data.id,
         flutterwave_status: response.data.data.status,
-        status: response.data.data.status === 'NEW' ? 'pending' : 'processing',
-        processed_at: new Date().toISOString()
+        status: response.data.data.status === "NEW" ? "pending" : "processing",
+        processed_at: new Date().toISOString(),
       })
-      .eq('id', transfer.id);
-
+      .eq("id", transfer.id);
   } catch (error) {
-    console.error('Flutterwave API error:', error);
-    
+    console.error("Flutterwave API error:", error);
+
     // Update transfer as failed
     await supabase
-      .from('flutterwave_transfers')
+      .from("flutterwave_transfers")
       .update({
-        status: 'failed',
+        status: "failed",
         failure_reason: error.response?.data?.message || error.message,
-        failure_code: error.response?.data?.code || 'API_ERROR',
-        failed_at: new Date().toISOString()
+        failure_code: error.response?.data?.code || "API_ERROR",
+        failed_at: new Date().toISOString(),
       })
-      .eq('id', transfer.id);
+      .eq("id", transfer.id);
 
     // Release reserved funds
     await releaseReservedFunds(transfer.user_id, transfer.total_deducted);
   }
+}*/
+
+app.post(
+  "/api/flutterwave/transfer",
+  authenticate,
+  checkAccountFrozen,
+  preventConcurrentTransfer,
+  releaseTransactionLock,
+  async (req, res) => {
+    const {
+      account_number,
+      bank_code,
+      bank_name,
+      amount,
+      narration,
+      beneficiary_name,
+      pin,
+    } = req.body;
+
+    const requestId =
+      req.headers["idempotency-key"] || req.body.idempotency_key || crypto.randomUUID();
+
+    try {
+      // ============================================================
+      // 1. VALIDATE INPUT
+      // ============================================================
+      if (!account_number || !bank_code || !amount || !beneficiary_name) {
+        return res.status(400).json({
+          error: "Missing required fields",
+          code: "MISSING_FIELDS",
+          required: ["account_number", "bank_code", "amount", "beneficiary_name"],
+        });
+      }
+
+      if (!/^\d{10}$/.test(account_number)) {
+        return res.status(400).json({
+          error: "Invalid account number format",
+          code: "INVALID_ACCOUNT_NUMBER",
+        });
+      }
+
+      if (amount <= 0) {
+        return res.status(400).json({ error: "Invalid amount", code: "INVALID_AMOUNT" });
+      }
+
+      if (!pin || !/^\d{4}$/.test(pin)) {
+        return res.status(400).json({
+          error: "Transaction PIN is required",
+          code: "PIN_REQUIRED",
+        });
+      }
+
+      // ============================================================
+      // 2. IDEMPOTENCY (fast-path short-circuit; reserve_external_transfer
+      // also enforces this atomically, this just saves a round trip on
+      // a known double-click)
+      // ============================================================
+      const { data: existingTransfer } = await supabase
+        .from("flutterwave_transfers")
+        .select("id, status, transaction_reference, amount, fee_amount, beneficiary_name, bank_name, account_number")
+        .eq("request_id_key", requestId)
+        .maybeSingle();
+
+      if (existingTransfer) {
+        return res.json({
+          success: true,
+          message: "Transfer already submitted",
+          data: {
+            transfer_id: existingTransfer.id,
+            transaction_reference: existingTransfer.transaction_reference,
+            amount: existingTransfer.amount,
+            fee: existingTransfer.fee_amount,
+            beneficiary_name: existingTransfer.beneficiary_name,
+            bank_name: existingTransfer.bank_name,
+            account_number: existingTransfer.account_number,
+            status: existingTransfer.status,
+          },
+        });
+      }
+
+      // ============================================================
+      // 3. VERIFY PIN — server-side, before anything else touches money.
+      // Reuses the same transfer_pin / pin_attempts fields the
+      // /user/verify-transfer-pin endpoint uses, so a freeze from one
+      // path is honored by the other.
+      // ============================================================
+      const { data: pinUser, error: pinUserErr } = await supabase
+        .from("users")
+        .select("transfer_pin, pin_attempts")
+        .eq("id", req.user.id)
+        .single();
+
+      if (pinUserErr || !pinUser || !pinUser.transfer_pin) {
+        return res.status(400).json({
+          error: "Transfer PIN not set",
+          code: "PIN_NOT_SET",
+        });
+      }
+
+      if ((pinUser.pin_attempts || 0) >= 4) {
+        return res.status(403).json({
+          error: "Too many incorrect PIN attempts. Account frozen.",
+          code: "PIN_FROZEN",
+        });
+      }
+
+      const pinValid = await bcrypt.compare(pin, pinUser.transfer_pin);
+      if (!pinValid) {
+        const newAttempts = (pinUser.pin_attempts || 0) + 1;
+        await supabase
+          .from("users")
+          .update({ pin_attempts: newAttempts, last_pin_attempt: new Date().toISOString() })
+          .eq("id", req.user.id);
+
+        if (newAttempts >= 4) {
+          await supabase.from("users").update({ is_frozen: true }).eq("id", req.user.id);
+        }
+
+        return res.status(401).json({
+          error: "Incorrect PIN",
+          code: "INVALID_PIN",
+          attempts_remaining: Math.max(0, 4 - newAttempts),
+        });
+      }
+
+      await supabase
+        .from("users")
+        .update({ pin_attempts: 0, last_pin_attempt: null })
+        .eq("id", req.user.id);
+
+      // ============================================================
+      // 4. VALIDATE LIMITS
+      // ============================================================
+      const limits = await validateUserTransferLimits(req.user.id, amount);
+      if (!limits.allowed) {
+        return res.status(400).json({
+          error: limits.reason,
+          code: limits.code,
+          limit: limits.limit,
+          used: limits.used,
+        });
+      }
+
+      // ============================================================
+      // 5. GET USER'S CHECKING ACCOUNT
+      // ============================================================
+      const { data: account, error: accError } = await supabase
+        .from("accounts")
+        .select("id")
+        .eq("user_id", req.user.id)
+        .eq("account_type", "checking")
+        .single();
+
+      if (accError || !account) {
+        return res.status(404).json({ error: "Account not found", code: "ACCOUNT_NOT_FOUND" });
+      }
+
+      // ============================================================
+      // 6. CALCULATE FEE
+      // ============================================================
+      const { data: feeSetting } = await supabase
+        .from("admin_settings")
+        .select("setting_value")
+        .eq("setting_key", "flutterwave_transfer_fee_percentage")
+        .maybeSingle();
+      const feePercentage = feeSetting ? parseFloat(feeSetting.setting_value) : 0.5;
+      const feeAmount = Math.round(amount * (feePercentage / 100) * 100) / 100;
+
+      const transactionReference = generateTransferReference();
+
+      // ============================================================
+      // 7. RESERVE FUNDS ATOMICALLY (row-locked, single DB call)
+      // ============================================================
+      const { data: reserveResult, error: reserveError } = await supabase.rpc(
+        "reserve_external_transfer",
+        {
+          p_request_id: requestId,
+          p_user_id: req.user.id,
+          p_from_account_id: account.id,
+          p_amount: amount,
+          p_fee_amount: feeAmount,
+          p_transaction_reference: transactionReference,
+          p_beneficiary_name: beneficiary_name,
+          p_bank_code: bank_code,
+          p_bank_name: bank_name,
+          p_account_number: account_number,
+          p_narration: narration || `Transfer to ${beneficiary_name}`,
+          p_ip_address: req.ip,
+          p_user_agent: req.headers["user-agent"],
+          p_device_fingerprint: req.headers["x-device-fingerprint"] || null,
+        },
+      );
+
+      if (reserveError) {
+        console.error("Reserve external transfer error:", reserveError);
+        if (reserveError.message?.includes("Insufficient balance")) {
+          return res.status(400).json({
+            error: "Insufficient balance",
+            code: "INSUFFICIENT_BALANCE",
+          });
+        }
+        return res.status(500).json({
+          error: "Transfer failed",
+          code: "TRANSFER_FAILED",
+          message: reserveError.message,
+        });
+      }
+
+      await updateUserTransferLimits(req.user.id, amount);
+
+      await supabase.from("notifications").insert({
+        user_id: req.user.id,
+        title: "External Transfer Initiated",
+        message: `Your transfer of ₦${amount.toLocaleString()} to ${beneficiary_name} has been initiated.`,
+        type: "info",
+        created_at: new Date().toISOString(),
+      });
+
+      // ============================================================
+      // 8. CALL FLUTTERWAVE (async — response is "processing", not final)
+      // ============================================================
+      processFlutterwaveTransfer(reserveResult.transfer_id, {
+        amount,
+        narration,
+        beneficiary_name,
+        account_number,
+        bank_code,
+        transactionReference,
+      });
+
+      // ============================================================
+      // 9. RESPOND
+      // ============================================================
+      res.json({
+        success: true,
+        message: "Transfer initiated successfully",
+        data: {
+          transfer_id: reserveResult.transfer_id,
+          transaction_reference: transactionReference,
+          amount,
+          fee: feeAmount,
+          total_deducted: amount + feeAmount,
+          beneficiary_name,
+          bank_name,
+          account_number,
+          status: "processing",
+          new_available_balance: reserveResult.available_balance,
+          estimated_completion: "2-3 minutes",
+        },
+      });
+    } catch (error) {
+      console.error("Transfer error:", error);
+      res.status(500).json({
+        error: "Transfer failed",
+        code: "TRANSFER_FAILED",
+        message: error.message,
+      });
+    }
+  },
+);
+
+// ============================================================
+// HELPER FUNCTIONS
+// ============================================================
+
+function generateTransferReference() {
+  const date = new Date();
+  const year = date.getFullYear();
+  const month = String(date.getMonth() + 1).padStart(2, "0");
+  const day = String(date.getDate()).padStart(2, "0");
+  const random = Math.random().toString(36).substring(2, 10).toUpperCase();
+  return `FEE-TRF-${year}${month}${day}-${random}`;
+}
+
+async function validateUserTransferLimits(userId, amount) {
+  const today = new Date();
+  const todayStr = today.toISOString().split("T")[0];
+
+  const { data: limits, error } = await supabase
+    .from("flutterwave_transfer_limits")
+    .select("*")
+    .eq("user_id", userId)
+    .single();
+
+  if (error && error.code === "PGRST116") {
+    const { data: newLimits } = await supabase
+      .from("flutterwave_transfer_limits")
+      .insert({
+        user_id: userId,
+        daily_limit: 500000,
+        monthly_limit: 5000000,
+        single_transaction_limit: 1000000,
+        daily_reset_date: todayStr,
+        monthly_reset_date: todayStr,
+      })
+      .select()
+      .single();
+
+    return validateLimits(newLimits, amount, todayStr);
+  }
+
+  if (error) throw error;
+  return validateLimits(limits, amount, todayStr);
+}
+
+function validateLimits(limits, amount, todayStr) {
+  if (amount > limits.single_transaction_limit) {
+    return {
+      allowed: false,
+      code: "SINGLE_LIMIT_EXCEEDED",
+      reason: `Single transaction limit is ₦${limits.single_transaction_limit.toLocaleString()}`,
+      limit: limits.single_transaction_limit,
+    };
+  }
+
+  let dailyUsed = limits.daily_used;
+  if (limits.daily_reset_date !== todayStr) dailyUsed = 0;
+
+  if (dailyUsed + amount > limits.daily_limit) {
+    return {
+      allowed: false,
+      code: "DAILY_LIMIT_EXCEEDED",
+      reason: `Daily transfer limit is ₦${limits.daily_limit.toLocaleString()}`,
+      limit: limits.daily_limit,
+      used: dailyUsed,
+    };
+  }
+
+  let monthlyUsed = limits.monthly_used;
+  if (limits.monthly_reset_date !== todayStr.slice(0, 7)) monthlyUsed = 0;
+
+  if (monthlyUsed + amount > limits.monthly_limit) {
+    return {
+      allowed: false,
+      code: "MONTHLY_LIMIT_EXCEEDED",
+      reason: `Monthly transfer limit is ₦${limits.monthly_limit.toLocaleString()}`,
+      limit: limits.monthly_limit,
+      used: monthlyUsed,
+    };
+  }
+
+  return { allowed: true };
+}
+
+async function updateUserTransferLimits(userId, amount) {
+  const todayStr = new Date().toISOString().split("T")[0];
+  const { data: limits } = await supabase
+    .from("flutterwave_transfer_limits")
+    .select("*")
+    .eq("user_id", userId)
+    .single();
+
+  if (!limits) return;
+
+  const dailyUsed = limits.daily_reset_date === todayStr ? limits.daily_used + amount : amount;
+  const monthlyUsed =
+    limits.monthly_reset_date?.slice(0, 7) === todayStr.slice(0, 7)
+      ? limits.monthly_used + amount
+      : amount;
+
+  await supabase
+    .from("flutterwave_transfer_limits")
+    .update({
+      daily_used: dailyUsed,
+      daily_reset_date: todayStr,
+      monthly_used: monthlyUsed,
+      monthly_reset_date: todayStr,
+      last_updated_at: new Date().toISOString(),
+    })
+    .eq("user_id", userId);
+}
+
+// Fire-and-forget: calls Flutterwave, records whatever reference/status
+// it hands back for tracing, but NEVER marks the transfer completed or
+// failed here — only finalize_external_transfer() (driven by the
+// verified webhook, or the reconciliation sweep) does that. If the API
+// call itself fails outright (network error, 4xx from Flutterwave
+// before it even queues the payout), that IS a definitive failure, so
+// this path does call finalize_external_transfer with 'failed' to
+// release the reservation immediately instead of leaving the user's
+// funds stuck for the full reconciliation window.
+async function processFlutterwaveTransfer(transferId, details) {
+  const result = await flutterwaveService.initiateTransfer({
+    accountNumber: details.account_number,
+    bankCode: details.bank_code,
+    amount: details.amount,
+    narration: details.narration,
+    beneficiaryName: details.beneficiary_name,
+    reference: details.transactionReference,
+    callbackUrl: process.env.FLUTTERWAVE_WEBHOOK_URL,
+  });
+
+  if (!result.success) {
+    await supabase.rpc("finalize_external_transfer", {
+      p_transfer_id: transferId,
+      p_final_status: "failed",
+      p_flutterwave_reference: null,
+      p_flutterwave_status: null,
+      p_failure_reason: result.error,
+    });
+    return;
+  }
+
+  await supabase
+    .from("flutterwave_transfers")
+    .update({
+      flutterwave_reference: String(result.data.id),
+      flutterwave_status: result.data.status,
+      status: "processing",
+      processed_at: new Date().toISOString(),
+    })
+    .eq("id", transferId);
 }
 
 async function releaseReservedFunds(userId, amount) {
   const { data: account } = await supabase
-    .from('accounts')
-    .select('*')
-    .eq('user_id', userId)
-    .eq('account_type', 'checking')
+    .from("accounts")
+    .select("*")
+    .eq("user_id", userId)
+    .eq("account_type", "checking")
     .single();
 
   if (account) {
     await supabase
-      .from('accounts')
+      .from("accounts")
       .update({
         reserved_balance: (account.reserved_balance || 0) - amount,
         available_balance: account.available_balance + amount,
-        updated_at: new Date().toISOString()
+        updated_at: new Date().toISOString(),
       })
-      .eq('id', account.id);
+      .eq("id", account.id);
   }
 }
 
@@ -17870,7 +18021,7 @@ app.post(
 
         // Create transaction record
         const { error: transError } = await supabase
-          .from("transactions")
+          .from("transactions_new")
           .insert({
             to_account_id: primaryAccount.id,
             to_user_id: request.user_id,
@@ -18310,16 +18461,18 @@ app.post(
       });
 
       // Create reversal transaction
-      await supabase.from("transactions").insert({
-        to_account_id: account.id,
-        to_user_id: userId,
+      await supabase.from("transactions_new").insert({
+        receiver_account_id: account.id,
+        receiver_user_id: userId,
         amount: Math.abs(oldBalance - correctBalance),
         description: `Balance correction: Rejected unauthorized balance change`,
         transaction_type: "admin_adjustment",
         status: "completed",
         completed_at: new Date().toISOString(),
-        is_admin_adjusted: true,
-        admin_note: `Balance restored by ${req.user.email} from ₦${oldBalance.toFixed(2)} to ₦${correctBalance.toFixed(2)}`,
+        metadata: {
+          is_admin_adjusted: true,
+          admin_note: `Balance restored by ${req.user.email} from ₦${oldBalance.toFixed(2)} to ₦${correctBalance.toFixed(2)}`,
+        },
       });
 
       // Log admin action
@@ -19221,7 +19374,7 @@ app.post(
       };
 
       const { data: transaction } = await supabase
-        .from("transactions")
+        .from("transactions_new")
         .insert(transactionData)
         .select()
         .single();
@@ -19339,7 +19492,7 @@ app.get(
       const offset = (page - 1) * limit;
 
       let query = supabase
-        .from("transactions")
+        .from("transactions_new")
         .select(
           "*, from_account:accounts!transactions_from_account_id_fkey(*), to_account:accounts!transactions_to_account_id_fkey(*)",
           { count: "exact" },
@@ -19402,7 +19555,7 @@ app.post(
       const { reason } = req.body;
 
       const { data: transaction } = await supabase
-        .from("transactions")
+        .from("transactions_new")
         .select("*")
         .eq("id", transactionId)
         .single();
@@ -19416,13 +19569,13 @@ app.post(
         const { data: fromAccount } = await supabase
           .from("accounts")
           .select("*")
-          .eq("id", transaction.from_account_id)
+          .eq("id", transaction.sender_account_id)
           .single();
 
         const { data: toAccount } = await supabase
           .from("accounts")
           .select("*")
-          .eq("id", transaction.to_account_id)
+          .eq("id", transaction.receiver_account_id)
           .single();
 
         // Update balances
@@ -19433,7 +19586,7 @@ app.post(
             available_balance:
               fromAccount.available_balance - transaction.amount,
           })
-          .eq("id", transaction.from_account_id);
+          .eq("id", transaction.sender_account_id);
 
         await supabase
           .from("accounts")
@@ -19441,10 +19594,10 @@ app.post(
             balance: toAccount.balance + transaction.amount,
             available_balance: toAccount.available_balance + transaction.amount,
           })
-          .eq("id", transaction.to_account_id);
+          .eq("id", transaction.receiver_account_id);
 
         await supabase
-          .from("transactions")
+          .from("transactions_new")
           .update({
             status: "completed",
             completed_at: new Date(),
@@ -19452,7 +19605,7 @@ app.post(
           .eq("id", transactionId);
       } else if (action === "reject") {
         await supabase
-          .from("transactions")
+          .from("transactions_new")
           .update({
             status: "rejected",
             description:
@@ -19465,7 +19618,7 @@ app.post(
       await supabase.from("admin_actions").insert({
         admin_id: req.user.id,
         action_type: `${action}_transaction`,
-        target_user_id: transaction.from_user_id,
+        target_user_id: transaction.sender_user_id,
         details: { transaction_id: transactionId, reason },
       });
 
@@ -19639,9 +19792,9 @@ app.get(
   async (req, res) => {
     try {
       const { data, error } = await supabase
-        .from("transactions")
+        .from("transactions_new")
         .select("amount, description, created_at, status")
-        .eq("from_user_id", req.user.id) // outgoing only
+        .eq("sender_user_id", req.user.id) // outgoing only
         .eq("status", "completed")
         .gte(
           "created_at",
@@ -19743,7 +19896,7 @@ app.get(
 
       // Get recent transactions (last 50)
       const { data: transactions } = await supabase
-        .from("transactions")
+        .from("transactions_new")
         .select(
           `
           id,
@@ -20112,7 +20265,7 @@ app.get(
       const { transactionId } = req.params;
 
       const { data: transaction, error } = await supabase
-        .from("transactions")
+        .from("transactions_new")
         .select(
           `
                 *,
@@ -20479,368 +20632,479 @@ const ONESIGNAL_APP_ID = process.env.ONESIGNAL_APP_ID;
 const ONESIGNAL_REST_API_KEY = process.env.ONESIGNAL_REST_API_KEY;
 
 // Helper: Send push via OneSignal
-async function sendOneSignalPush(playerIds, title, message, data = {}, options = {}) {
-    if (!ONESIGNAL_APP_ID || !ONESIGNAL_REST_API_KEY) {
-        console.error("[OneSignal] Missing API keys");
-        return { success: false, error: "Missing API keys" };
+async function sendOneSignalPush(
+  playerIds,
+  title,
+  message,
+  data = {},
+  options = {},
+) {
+  if (!ONESIGNAL_APP_ID || !ONESIGNAL_REST_API_KEY) {
+    console.error("[OneSignal] Missing API keys");
+    return { success: false, error: "Missing API keys" };
+  }
+
+  const playerIdArray = Array.isArray(playerIds) ? playerIds : [playerIds];
+
+  if (playerIdArray.length === 0) {
+    return { success: false, error: "No player IDs provided" };
+  }
+
+  const requestBody = {
+    app_id: ONESIGNAL_APP_ID,
+    headings: { en: title },
+    contents: { en: message },
+    include_player_ids: playerIdArray,
+    data: data,
+    priority: options.priority || 10,
+    ttl: options.ttl || 86400,
+    small_icon: "ic_stat_onesignal_default",
+    large_icon: "ic_stat_onesignal_default",
+  };
+
+  if (options.iosSound) requestBody.ios_sound = options.iosSound;
+  if (options.androidSound) requestBody.android_sound = options.androidSound;
+
+  try {
+    const response = await fetch("https://onesignal.com/api/v1/notifications", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Basic ${ONESIGNAL_REST_API_KEY}`,
+      },
+      body: JSON.stringify(requestBody),
+    });
+
+    const result = await response.json();
+
+    if (result.id) {
+      return {
+        success: true,
+        notification_id: result.id,
+        recipients: playerIdArray.length,
+      };
+    } else {
+      return {
+        success: false,
+        error: result.errors?.join(", ") || "Unknown error",
+      };
     }
-    
-    const playerIdArray = Array.isArray(playerIds) ? playerIds : [playerIds];
-    
-    if (playerIdArray.length === 0) {
-        return { success: false, error: "No player IDs provided" };
-    }
-    
-    const requestBody = {
-        app_id: ONESIGNAL_APP_ID,
-        headings: { en: title },
-        contents: { en: message },
-        include_player_ids: playerIdArray,
-        data: data,
-        priority: options.priority || 10,
-        ttl: options.ttl || 86400,
-        small_icon: "ic_stat_onesignal_default",
-        large_icon: "ic_stat_onesignal_default"
-    };
-    
-    if (options.iosSound) requestBody.ios_sound = options.iosSound;
-    if (options.androidSound) requestBody.android_sound = options.androidSound;
-    
-    try {
-        const response = await fetch("https://onesignal.com/api/v1/notifications", {
-            method: "POST",
-            headers: {
-                "Content-Type": "application/json",
-                "Authorization": `Basic ${ONESIGNAL_REST_API_KEY}`
-            },
-            body: JSON.stringify(requestBody)
-        });
-        
-        const result = await response.json();
-        
-        if (result.id) {
-            return { success: true, notification_id: result.id, recipients: playerIdArray.length };
-        } else {
-            return { success: false, error: result.errors?.join(", ") || "Unknown error" };
-        }
-    } catch (error) {
-        console.error("[OneSignal] Send error:", error);
-        return { success: false, error: error.message };
-    }
+  } catch (error) {
+    console.error("[OneSignal] Send error:", error);
+    return { success: false, error: error.message };
+  }
 }
 
 // Helper: Get push tokens for users
 async function getUserPushTokens(userIds) {
-    const { data: tokens, error } = await supabase
-        .from("user_push_tokens")
-        .select("user_id, push_token")
-        .in("user_id", userIds)
-        .eq("platform", "onesignal")
-        .eq("is_active", true);
-    
-    if (error || !tokens) return [];
-    return tokens;
+  const { data: tokens, error } = await supabase
+    .from("user_push_tokens")
+    .select("user_id, push_token")
+    .in("user_id", userIds)
+    .eq("platform", "onesignal")
+    .eq("is_active", true);
+
+  if (error || !tokens) return [];
+  return tokens;
 }
 
 // GET: Available user groups for push targeting
-app.get("/api/sys/push/user-groups", authenticate, authorizeAdmin, async (req, res) => {
+app.get(
+  "/api/sys/push/user-groups",
+  authenticate,
+  authorizeAdmin,
+  async (req, res) => {
     try {
-        // Get counts for different user groups
-        const [
-            { count: totalUsers },
-            { count: frozenUsers },
-            { count: activeSavingsUsers },
-            { count: hasPushTokenUsers }
-        ] = await Promise.all([
-            supabase.from("users").select("*", { count: "exact", head: true }).eq("is_active", true),
-            supabase.from("users").select("*", { count: "exact", head: true }).eq("is_frozen", true),
-            supabase.from("user_harvest_enrollments").select("user_id", { count: "exact", head: true }).eq("status", "active"),
-            supabase.from("user_push_tokens").select("user_id", { count: "exact", head: true }).eq("platform", "onesignal").eq("is_active", true)
-        ]);
-        
-        res.json({
-            groups: [
-                { id: "all", name: "All Active Users", count: totalUsers || 0, description: "Send to all active users" },
-                { id: "has_push_token", name: "Users with Push Enabled", count: hasPushTokenUsers || 0, description: "Users who have enabled push notifications" },
-                { id: "frozen", name: "Frozen Accounts", count: frozenUsers || 0, description: "Users with frozen accounts" },
-                { id: "active_savings", name: "Active Savings Users", count: activeSavingsUsers || 0, description: "Users with active savings plans" },
-                { id: "recent_active", name: "Recently Active", count: 0, description: "Users active in last 7 days (requires tracking)" },
-                { id: "specific", name: "Specific Users", count: 0, description: "Select individual users" }
-            ]
-        });
+      // Get counts for different user groups
+      const [
+        { count: totalUsers },
+        { count: frozenUsers },
+        { count: activeSavingsUsers },
+        { count: hasPushTokenUsers },
+      ] = await Promise.all([
+        supabase
+          .from("users")
+          .select("*", { count: "exact", head: true })
+          .eq("is_active", true),
+        supabase
+          .from("users")
+          .select("*", { count: "exact", head: true })
+          .eq("is_frozen", true),
+        supabase
+          .from("user_harvest_enrollments")
+          .select("user_id", { count: "exact", head: true })
+          .eq("status", "active"),
+        supabase
+          .from("user_push_tokens")
+          .select("user_id", { count: "exact", head: true })
+          .eq("platform", "onesignal")
+          .eq("is_active", true),
+      ]);
+
+      res.json({
+        groups: [
+          {
+            id: "all",
+            name: "All Active Users",
+            count: totalUsers || 0,
+            description: "Send to all active users",
+          },
+          {
+            id: "has_push_token",
+            name: "Users with Push Enabled",
+            count: hasPushTokenUsers || 0,
+            description: "Users who have enabled push notifications",
+          },
+          {
+            id: "frozen",
+            name: "Frozen Accounts",
+            count: frozenUsers || 0,
+            description: "Users with frozen accounts",
+          },
+          {
+            id: "active_savings",
+            name: "Active Savings Users",
+            count: activeSavingsUsers || 0,
+            description: "Users with active savings plans",
+          },
+          {
+            id: "recent_active",
+            name: "Recently Active",
+            count: 0,
+            description: "Users active in last 7 days (requires tracking)",
+          },
+          {
+            id: "specific",
+            name: "Specific Users",
+            count: 0,
+            description: "Select individual users",
+          },
+        ],
+      });
     } catch (error) {
-        console.error("Error fetching user groups:", error);
-        res.status(500).json({ error: error.message });
+      console.error("Error fetching user groups:", error);
+      res.status(500).json({ error: error.message });
     }
-});
+  },
+);
 
 // GET: Search users for specific targeting
-app.get("/api/sys/push/search-users", authenticate, authorizeAdmin, async (req, res) => {
+app.get(
+  "/api/sys/push/search-users",
+  authenticate,
+  authorizeAdmin,
+  async (req, res) => {
     try {
-        const { q, limit = 20 } = req.query;
-        
-        if (!q || q.length < 2) {
-            return res.json({ users: [] });
-        }
-        
-        const { data: users, error } = await supabase
-            .from("users")
-            .select("id, email, first_name, last_name, is_frozen, is_active")
-            .or(`email.ilike.%${q}%,first_name.ilike.%${q}%,last_name.ilike.%${q}%`)
-            .limit(parseInt(limit));
-        
-        if (error) throw error;
-        
-        // Check which users have push tokens
-        const userIds = users.map(u => u.id);
-        const { data: tokens } = await supabase
-            .from("user_push_tokens")
-            .select("user_id")
-            .in("user_id", userIds)
-            .eq("platform", "onesignal")
-            .eq("is_active", true);
-        
-        const pushEnabledUserIds = new Set(tokens?.map(t => t.user_id) || []);
-        
-        const enrichedUsers = users.map(user => ({
-            ...user,
-            has_push_token: pushEnabledUserIds.has(user.id),
-            name: `${user.first_name || ""} ${user.last_name || ""}`.trim() || user.email
-        }));
-        
-        res.json({ users: enrichedUsers });
+      const { q, limit = 20 } = req.query;
+
+      if (!q || q.length < 2) {
+        return res.json({ users: [] });
+      }
+
+      const { data: users, error } = await supabase
+        .from("users")
+        .select("id, email, first_name, last_name, is_frozen, is_active")
+        .or(`email.ilike.%${q}%,first_name.ilike.%${q}%,last_name.ilike.%${q}%`)
+        .limit(parseInt(limit));
+
+      if (error) throw error;
+
+      // Check which users have push tokens
+      const userIds = users.map((u) => u.id);
+      const { data: tokens } = await supabase
+        .from("user_push_tokens")
+        .select("user_id")
+        .in("user_id", userIds)
+        .eq("platform", "onesignal")
+        .eq("is_active", true);
+
+      const pushEnabledUserIds = new Set(tokens?.map((t) => t.user_id) || []);
+
+      const enrichedUsers = users.map((user) => ({
+        ...user,
+        has_push_token: pushEnabledUserIds.has(user.id),
+        name:
+          `${user.first_name || ""} ${user.last_name || ""}`.trim() ||
+          user.email,
+      }));
+
+      res.json({ users: enrichedUsers });
     } catch (error) {
-        console.error("Error searching users:", error);
-        res.status(500).json({ error: error.message });
+      console.error("Error searching users:", error);
+      res.status(500).json({ error: error.message });
     }
-});
+  },
+);
 
 // POST: Send push notification (admin)
-app.post("/api/sys/push/send", authenticate, authorizeAdmin, async (req, res) => {
+app.post(
+  "/api/sys/push/send",
+  authenticate,
+  authorizeAdmin,
+  async (req, res) => {
     try {
-        const { title, message, target_type, target_user_ids, data = {}, schedule_time } = req.body;
-        
-        // Validation
-        if (!title || !title.trim()) {
-            return res.status(400).json({ error: "Title is required" });
-        }
-        if (!message || !message.trim()) {
-            return res.status(400).json({ error: "Message is required" });
-        }
-        if (!target_type) {
-            return res.status(400).json({ error: "Target type is required" });
-        }
-        
-        let userIds = [];
-        let pushTokens = [];
-        
-        // Get users based on target type
-        switch (target_type) {
-            case "all":
-                // All active users
-                const { data: allUsers } = await supabase
-                    .from("users")
-                    .select("id")
-                    .eq("is_active", true);
-                userIds = allUsers?.map(u => u.id) || [];
-                break;
-                
-            case "has_push_token":
-                // Users with push tokens
-                const { data: tokenUsers } = await supabase
-                    .from("user_push_tokens")
-                    .select("user_id")
-                    .eq("platform", "onesignal")
-                    .eq("is_active", true);
-                userIds = [...new Set(tokenUsers?.map(t => t.user_id) || [])];
-                break;
-                
-            case "frozen":
-                const { data: frozenUsers } = await supabase
-                    .from("users")
-                    .select("id")
-                    .eq("is_frozen", true);
-                userIds = frozenUsers?.map(u => u.id) || [];
-                break;
-                
-            case "active_savings":
-                // Users with active harvest plans
-                const { data: savingsUsers } = await supabase
-                    .from("user_harvest_enrollments")
-                    .select("user_id")
-                    .eq("status", "active");
-                userIds = [...new Set(savingsUsers?.map(s => s.user_id) || [])];
-                break;
-                
-            case "recent_active":
-                // Users active in last 7 days (based on last_login)
-                const sevenDaysAgo = new Date();
-                sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
-                const { data: recentUsers } = await supabase
-                    .from("users")
-                    .select("id")
-                    .gte("last_login", sevenDaysAgo.toISOString());
-                userIds = recentUsers?.map(u => u.id) || [];
-                break;
-                
-            case "specific":
-                if (!target_user_ids || target_user_ids.length === 0) {
-                    return res.status(400).json({ error: "Please select at least one user" });
-                }
-                userIds = target_user_ids;
-                break;
-                
-            default:
-                return res.status(400).json({ error: "Invalid target type" });
-        }
-        
-        if (userIds.length === 0) {
-            return res.status(400).json({ error: "No users found for the selected target group" });
-        }
-        
-        // Get push tokens for these users
-        const tokens = await getUserPushTokens(userIds);
-        
-        if (tokens.length === 0) {
-            return res.status(400).json({ error: "None of the selected users have push notifications enabled" });
-        }
-        
-        // Group by push token (deduplicate)
-        const uniqueTokens = [...new Map(tokens.map(t => [t.push_token, t])).values()];
-        const playerIds = uniqueTokens.map(t => t.push_token);
-        
-        // Send push via OneSignal
-        const pushResult = await sendOneSignalPush(playerIds, title, message, {
-            type: "admin_push",
-            admin_id: req.user.id,
-            timestamp: new Date().toISOString(),
-            ...data
-        });
-        
-        // Log the push
-        const { error: logError } = await supabase
-            .from("admin_push_logs")
-            .insert({
-                admin_id: req.user.id,
-                title: title,
-                message: message,
-                target_type: target_type,
-                target_user_ids: target_type === "specific" ? target_user_ids : null,
-                recipient_count: userIds.length,
-                success_count: pushResult.success ? playerIds.length : 0,
-                failed_count: pushResult.success ? 0 : playerIds.length,
-                onesignal_notification_id: pushResult.notification_id || null
-            });
-        
-        if (logError) console.error("Failed to log push:", logError);
-        
-        // Create in-app notifications for all targeted users
-        for (const userId of userIds.slice(0, 100)) { // Limit to 100 to avoid timeout
-            await supabase
-                .from("notifications")
-                .insert({
-                    user_id: userId,
-                    title: title,
-                    message: message,
-                    type: "admin",
-                    created_at: new Date().toISOString(),
-                    is_read: false
-                })
-                .catch(e => console.error("Failed to create notification for:", userId, e));
-        }
-        
-        res.json({
-            success: pushResult.success,
-            notification_id: pushResult.notification_id,
-            recipients_found: userIds.length,
-            push_sent: playerIds.length,
-            message: pushResult.success 
-                ? `Push notification sent to ${playerIds.length} device(s)`
-                : `Failed to send: ${pushResult.error}`
-        });
-        
-    } catch (error) {
-        console.error("Send push error:", error);
-        res.status(500).json({ error: error.message });
-    }
-});
+      const {
+        title,
+        message,
+        target_type,
+        target_user_ids,
+        data = {},
+        schedule_time,
+      } = req.body;
 
-// GET: Push notification history (admin)
-app.get("/api/sys/push/history", authenticate, authorizeAdmin, async (req, res) => {
-    try {
-        const { page = 1, limit = 20 } = req.query;
-        const offset = (page - 1) * limit;
-        
-        const { data: logs, error, count } = await supabase
-            .from("admin_push_logs")
-            .select(`
-                *,
-                admin:admin_id (id, email, first_name, last_name)
-            `, { count: "exact" })
-            .order("created_at", { ascending: false })
-            .range(offset, offset + limit - 1);
-        
-        if (error) throw error;
-        
-        res.json({
-            logs: logs || [],
-            pagination: {
-                page: parseInt(page),
-                limit: parseInt(limit),
-                total: count || 0,
-                pages: Math.ceil((count || 0) / limit)
-            }
-        });
-    } catch (error) {
-        console.error("Error fetching push history:", error);
-        res.status(500).json({ error: error.message });
-    }
-});
+      // Validation
+      if (!title || !title.trim()) {
+        return res.status(400).json({ error: "Title is required" });
+      }
+      if (!message || !message.trim()) {
+        return res.status(400).json({ error: "Message is required" });
+      }
+      if (!target_type) {
+        return res.status(400).json({ error: "Target type is required" });
+      }
 
-// Send push to specific user via OneSignal
-app.post("/api/notifications/send-push", authenticate, authorizeAdmin, async (req, res) => {
-    try {
-        const { user_id, title, message, data } = req.body;
-        
-        // Get user's OneSignal player ID
-        const { data: tokens } = await supabase
+      let userIds = [];
+      let pushTokens = [];
+
+      // Get users based on target type
+      switch (target_type) {
+        case "all":
+          // All active users
+          const { data: allUsers } = await supabase
+            .from("users")
+            .select("id")
+            .eq("is_active", true);
+          userIds = allUsers?.map((u) => u.id) || [];
+          break;
+
+        case "has_push_token":
+          // Users with push tokens
+          const { data: tokenUsers } = await supabase
             .from("user_push_tokens")
-            .select("push_token")
-            .eq("user_id", user_id)
+            .select("user_id")
             .eq("platform", "onesignal")
             .eq("is_active", true);
-        
-        if (!tokens || tokens.length === 0) {
-            return res.json({ success: false, message: "No push token found" });
-        }
-        
-        const playerIds = tokens.map(t => t.push_token);
-        
-        // Send via OneSignal API
-        const response = await fetch("https://onesignal.com/api/v1/notifications", {
-            method: "POST",
-            headers: {
-                "Content-Type": "application/json",
-                "Authorization": `Basic ${process.env.ONESIGNAL_REST_API_KEY}`
-            },
-            body: JSON.stringify({
-                app_id: process.env.ONESIGNAL_APP_ID,
-                headings: { en: title },
-                contents: { en: message },
-                include_player_ids: playerIds,
-                data: data || {},
-                priority: 10
-            })
+          userIds = [...new Set(tokenUsers?.map((t) => t.user_id) || [])];
+          break;
+
+        case "frozen":
+          const { data: frozenUsers } = await supabase
+            .from("users")
+            .select("id")
+            .eq("is_frozen", true);
+          userIds = frozenUsers?.map((u) => u.id) || [];
+          break;
+
+        case "active_savings":
+          // Users with active harvest plans
+          const { data: savingsUsers } = await supabase
+            .from("user_harvest_enrollments")
+            .select("user_id")
+            .eq("status", "active");
+          userIds = [...new Set(savingsUsers?.map((s) => s.user_id) || [])];
+          break;
+
+        case "recent_active":
+          // Users active in last 7 days (based on last_login)
+          const sevenDaysAgo = new Date();
+          sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
+          const { data: recentUsers } = await supabase
+            .from("users")
+            .select("id")
+            .gte("last_login", sevenDaysAgo.toISOString());
+          userIds = recentUsers?.map((u) => u.id) || [];
+          break;
+
+        case "specific":
+          if (!target_user_ids || target_user_ids.length === 0) {
+            return res
+              .status(400)
+              .json({ error: "Please select at least one user" });
+          }
+          userIds = target_user_ids;
+          break;
+
+        default:
+          return res.status(400).json({ error: "Invalid target type" });
+      }
+
+      if (userIds.length === 0) {
+        return res
+          .status(400)
+          .json({ error: "No users found for the selected target group" });
+      }
+
+      // Get push tokens for these users
+      const tokens = await getUserPushTokens(userIds);
+
+      if (tokens.length === 0) {
+        return res
+          .status(400)
+          .json({
+            error: "None of the selected users have push notifications enabled",
+          });
+      }
+
+      // Group by push token (deduplicate)
+      const uniqueTokens = [
+        ...new Map(tokens.map((t) => [t.push_token, t])).values(),
+      ];
+      const playerIds = uniqueTokens.map((t) => t.push_token);
+
+      // Send push via OneSignal
+      const pushResult = await sendOneSignalPush(playerIds, title, message, {
+        type: "admin_push",
+        admin_id: req.user.id,
+        timestamp: new Date().toISOString(),
+        ...data,
+      });
+
+      // Log the push
+      const { error: logError } = await supabase
+        .from("admin_push_logs")
+        .insert({
+          admin_id: req.user.id,
+          title: title,
+          message: message,
+          target_type: target_type,
+          target_user_ids: target_type === "specific" ? target_user_ids : null,
+          recipient_count: userIds.length,
+          success_count: pushResult.success ? playerIds.length : 0,
+          failed_count: pushResult.success ? 0 : playerIds.length,
+          onesignal_notification_id: pushResult.notification_id || null,
         });
-        
-        const result = await response.json();
-        res.json({ success: result.id, notification_id: result.id });
-        
+
+      if (logError) console.error("Failed to log push:", logError);
+
+      // Create in-app notifications for all targeted users
+      for (const userId of userIds.slice(0, 100)) {
+        // Limit to 100 to avoid timeout
+        await supabase
+          .from("notifications")
+          .insert({
+            user_id: userId,
+            title: title,
+            message: message,
+            type: "admin",
+            created_at: new Date().toISOString(),
+            is_read: false,
+          })
+          .catch((e) =>
+            console.error("Failed to create notification for:", userId, e),
+          );
+      }
+
+      res.json({
+        success: pushResult.success,
+        notification_id: pushResult.notification_id,
+        recipients_found: userIds.length,
+        push_sent: playerIds.length,
+        message: pushResult.success
+          ? `Push notification sent to ${playerIds.length} device(s)`
+          : `Failed to send: ${pushResult.error}`,
+      });
     } catch (error) {
-        console.error("Push send error:", error);
-        res.status(500).json({ error: error.message });
+      console.error("Send push error:", error);
+      res.status(500).json({ error: error.message });
     }
-});
+  },
+);
+
+// GET: Push notification history (admin)
+app.get(
+  "/api/sys/push/history",
+  authenticate,
+  authorizeAdmin,
+  async (req, res) => {
+    try {
+      const { page = 1, limit = 20 } = req.query;
+      const offset = (page - 1) * limit;
+
+      const {
+        data: logs,
+        error,
+        count,
+      } = await supabase
+        .from("admin_push_logs")
+        .select(
+          `
+                *,
+                admin:admin_id (id, email, first_name, last_name)
+            `,
+          { count: "exact" },
+        )
+        .order("created_at", { ascending: false })
+        .range(offset, offset + limit - 1);
+
+      if (error) throw error;
+
+      res.json({
+        logs: logs || [],
+        pagination: {
+          page: parseInt(page),
+          limit: parseInt(limit),
+          total: count || 0,
+          pages: Math.ceil((count || 0) / limit),
+        },
+      });
+    } catch (error) {
+      console.error("Error fetching push history:", error);
+      res.status(500).json({ error: error.message });
+    }
+  },
+);
+
+// Send push to specific user via OneSignal
+app.post(
+  "/api/notifications/send-push",
+  authenticate,
+  authorizeAdmin,
+  async (req, res) => {
+    try {
+      const { user_id, title, message, data } = req.body;
+
+      // Get user's OneSignal player ID
+      const { data: tokens } = await supabase
+        .from("user_push_tokens")
+        .select("push_token")
+        .eq("user_id", user_id)
+        .eq("platform", "onesignal")
+        .eq("is_active", true);
+
+      if (!tokens || tokens.length === 0) {
+        return res.json({ success: false, message: "No push token found" });
+      }
+
+      const playerIds = tokens.map((t) => t.push_token);
+
+      // Send via OneSignal API
+      const response = await fetch(
+        "https://onesignal.com/api/v1/notifications",
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Basic ${process.env.ONESIGNAL_REST_API_KEY}`,
+          },
+          body: JSON.stringify({
+            app_id: process.env.ONESIGNAL_APP_ID,
+            headings: { en: title },
+            contents: { en: message },
+            include_player_ids: playerIds,
+            data: data || {},
+            priority: 10,
+          }),
+        },
+      );
+
+      const result = await response.json();
+      res.json({ success: result.id, notification_id: result.id });
+    } catch (error) {
+      console.error("Push send error:", error);
+      res.status(500).json({ error: error.message });
+    }
+  },
+);
 
 // Process bulk operations (admin)
 app.post(
@@ -20874,16 +21138,15 @@ app.post(
                 })
                 .eq("id", account.id);
 
-              await supabase.from("transactions").insert({
-                to_account_id: account.id,
-                to_user_id: userId,
+              await supabase.from("transactions_new").insert({
+                receiver_account_id: account.id,
+                receiver_user_id: userId,
                 amount,
                 description: description || "Bulk deposit",
                 transaction_type: "bulk_deposit",
                 status: "completed",
                 completed_at: new Date(),
-                is_bulk: true,
-                bulk_reference: bulkReference,
+                metadata: { is_bulk: true, bulk_reference: bulkReference },
               });
 
               results.push({ userId, status: "success" });
@@ -21081,13 +21344,13 @@ app.get("/api/sys/stats", authenticate, authorizeAdmin, async (req, res) => {
     const today = new Date();
     today.setHours(0, 0, 0, 0);
     const { count: todayTransactions } = await supabase
-      .from("transactions")
+      .from("transactions_new")
       .select("*", { count: "exact", head: true })
       .gte("created_at", today.toISOString());
 
     // Total volume today
     const { data: volumeData } = await supabase
-      .from("transactions")
+      .from("transactions_new")
       .select("amount")
       .gte("created_at", today.toISOString())
       .eq("status", "completed");

@@ -121,7 +121,217 @@ function verifyWebhookSignature(headerHash) {
   return crypto.timingSafeEqual(Buffer.from(headerHash), Buffer.from(expected));
 }
 
+/**
+ * Verifies a transaction directly with Flutterwave's API. Webhook payloads
+ * must never be trusted on their own — this confirms amount, currency,
+ * status, and the destination account straight from Flutterwave before any
+ * wallet is credited.
+ *
+ * @param {string|number} transactionId - Flutterwave's `data.id` from the webhook
+ * @returns {Promise<{success: boolean, data?: object, error?: string}>}
+ */
+async function verifyTransaction(transactionId) {
+  let response;
+  try {
+    response = await fetch(
+      `${FLW_BASE_URL}/transactions/${transactionId}/verify`,
+      {
+        method: "GET",
+        headers: { Authorization: `Bearer ${getSecretKey()}` },
+      },
+    );
+  } catch (networkErr) {
+    return {
+      success: false,
+      error: `Network error verifying transaction: ${networkErr.message}`,
+    };
+  }
+
+  let json;
+  try {
+    json = await response.json();
+  } catch (parseErr) {
+    return {
+      success: false,
+      error: `Invalid JSON verifying transaction (HTTP ${response.status})`,
+    };
+  }
+
+  if (!response.ok || json.status !== "success") {
+    return {
+      success: false,
+      error: json.message || `Verify failed (HTTP ${response.status})`,
+    };
+  }
+
+  const d = json.data;
+  return {
+    success: true,
+    data: {
+      id: d.id,
+      tx_ref: d.tx_ref,
+      flw_ref: d.flw_ref,
+      amount: d.amount,
+      currency: d.currency,
+      status: d.status, // "successful", "failed", "pending"
+      account_number:
+        d.account_number || (d.meta && d.meta.originatoraccountnumber) || null,
+      // For dedicated virtual account credits, Flutterwave includes the
+      // receiving account's details under `data.account_id` /
+      // `data.card`/`data.meta` depending on payment type — the safest
+      // universal field for NUBAN transfers into a virtual account is
+      // `data.customer.email` combined with `data.narration`, but the
+      // account number match below is the authoritative check.
+      narration: d.narration,
+      customer_email: d.customer && d.customer.email,
+      // Best-effort sender details for bank-transfer deposits — field
+      // names vary by how the sending bank populates Flutterwave's meta;
+      // confirm exact keys against a real sandbox payload.
+      sender_name:
+        (d.meta && (d.meta.originatorname || d.meta.originator_name)) || null,
+      sender_account:
+        (d.meta &&
+          (d.meta.originatoraccountnumber ||
+            d.meta.originator_account_number)) ||
+        null,
+      sender_bank:
+        (d.meta && (d.meta.originatorbank || d.meta.originator_bank)) || null,
+    },
+  };
+}
+
+/**
+ * Verifies a payout/transfer directly with Flutterwave's API. Used by
+ * the transfer webhook handler and the reconciliation sweep — a
+ * transfer.completed/transfer.failed webhook body is never trusted on
+ * its own; this confirms the real status, amount and reference before
+ * finalize_external_transfer() is ever called.
+ *
+ * @param {string|number} transferId - Flutterwave's `data.id` from the webhook
+ * @returns {Promise<{success: boolean, data?: object, error?: string}>}
+ */
+async function verifyTransferStatus(transferId) {
+  let response;
+  try {
+    response = await fetch(`${FLW_BASE_URL}/transfers/${transferId}`, {
+      method: "GET",
+      headers: { Authorization: `Bearer ${getSecretKey()}` },
+    });
+  } catch (networkErr) {
+    return {
+      success: false,
+      error: `Network error verifying transfer: ${networkErr.message}`,
+    };
+  }
+
+  let json;
+  try {
+    json = await response.json();
+  } catch (parseErr) {
+    return {
+      success: false,
+      error: `Invalid JSON verifying transfer (HTTP ${response.status})`,
+    };
+  }
+
+  if (!response.ok || json.status !== "success") {
+    return {
+      success: false,
+      error: json.message || `Verify failed (HTTP ${response.status})`,
+    };
+  }
+
+  const d = json.data;
+  return {
+    success: true,
+    data: {
+      id: d.id,
+      reference: d.reference,
+      amount: d.amount,
+      currency: d.currency,
+      // Flutterwave payout statuses: NEW, PENDING, SUCCESSFUL, FAILED
+      status: d.status,
+      complete_message: d.complete_message,
+      account_number: d.account_number,
+      bank_name: d.bank_name,
+    },
+  };
+}
+
+/**
+ * Initiates a payout/transfer with Flutterwave. Called only after
+ * reserve_external_transfer() has already reserved the funds
+ * atomically — this call's response is never trusted as final; the
+ * webhook (verified via verifyTransferStatus) is the source of truth.
+ */
+async function initiateTransfer({
+  accountNumber,
+  bankCode,
+  amount,
+  narration,
+  beneficiaryName,
+  reference,
+  callbackUrl,
+}) {
+  let response;
+  try {
+    response = await fetch(`${FLW_BASE_URL}/transfers`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${getSecretKey()}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        account_bank: bankCode,
+        account_number: accountNumber,
+        amount,
+        narration: narration || `Transfer to ${beneficiaryName}`,
+        currency: "NGN",
+        reference,
+        callback_url: callbackUrl,
+        beneficiary_name: beneficiaryName,
+        debit_currency: "NGN",
+      }),
+    });
+  } catch (networkErr) {
+    return {
+      success: false,
+      error: `Network error contacting Flutterwave: ${networkErr.message}`,
+    };
+  }
+
+  let json;
+  try {
+    json = await response.json();
+  } catch (parseErr) {
+    return {
+      success: false,
+      error: `Invalid JSON from Flutterwave (HTTP ${response.status})`,
+    };
+  }
+
+  if (!response.ok || json.status !== "success") {
+    return {
+      success: false,
+      error: json.message || `Flutterwave error (HTTP ${response.status})`,
+      raw: json,
+    };
+  }
+
+  return {
+    success: true,
+    data: {
+      id: json.data.id,
+      status: json.data.status,
+      reference: json.data.reference,
+    },
+  };
+}
+
 module.exports = {
   createVirtualAccount,
   verifyWebhookSignature,
+  verifyTransaction,
+  verifyTransferStatus,
+  initiateTransfer,
 };
