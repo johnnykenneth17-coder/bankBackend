@@ -7262,6 +7262,455 @@ app.get("/api/accounts/recipient", authenticate, async (req, res) => {
   }
 });
 
+// Get available fintech providers
+/*app.get("/api/external/providers", authenticate, async (req, res) => {
+  try {
+    const providers = [
+      {
+        id: "paypal",
+        name: "PayPal",
+        logo: "https://cdn.jsdelivr.net/gh/simple-icons/simple-icons/icons/paypal.svg",
+        color: "#003087",
+        fields: [
+          {
+            name: "recipient_email",
+            label: "PayPal Email",
+            type: "email",
+            required: true,
+          },
+          {
+            name: "recipient_name",
+            label: "Full Name",
+            type: "text",
+            required: true,
+          },
+        ],
+      },
+      {
+        id: "stripe",
+        name: "Stripe",
+        logo: "https://cdn.jsdelivr.net/gh/simple-icons/simple-icons/icons/stripe.svg",
+        color: "#635bff",
+        fields: [
+          {
+            name: "recipient_email",
+            label: "Stripe Account Email",
+            type: "email",
+            required: true,
+          },
+          {
+            name: "recipient_name",
+            label: "Business/Individual Name",
+            type: "text",
+            required: true,
+          },
+        ],
+      },
+      {
+        id: "flutterwave",
+        name: "Flutterwave",
+        logo: "https://cdn.jsdelivr.net/gh/simple-icons/simple-icons/icons/flutterwave.svg",
+        color: "#f9a825",
+        fields: [
+          {
+            name: "recipient_account",
+            label: "Account Number",
+            type: "text",
+            required: true,
+          },
+          {
+            name: "recipient_name",
+            label: "Account Holder Name",
+            type: "text",
+            required: true,
+          },
+          {
+            name: "recipient_email",
+            label: "Email (Optional)",
+            type: "email",
+            required: false,
+          },
+        ],
+      },
+      {
+        id: "paystack",
+        name: "Paystack",
+        logo: "https://cdn.jsdelivr.net/gh/simple-icons/simple-icons/icons/paystack.svg",
+        color: "#25c3f0",
+        fields: [
+          {
+            name: "recipient_account",
+            label: "Account Number",
+            type: "text",
+            required: true,
+          },
+          {
+            name: "recipient_name",
+            label: "Account Holder Name",
+            type: "text",
+            required: true,
+          },
+          {
+            name: "recipient_phone",
+            label: "Phone Number",
+            type: "tel",
+            required: true,
+          },
+        ],
+      },
+      {
+        id: "wise",
+        name: "Wise (TransferWise)",
+        logo: "https://cdn.jsdelivr.net/gh/simple-icons/simple-icons/icons/wise.svg",
+        color: "#00b9b9",
+        fields: [
+          {
+            name: "recipient_email",
+            label: "Wise Email",
+            type: "email",
+            required: true,
+          },
+          {
+            name: "recipient_name",
+            label: "Recipient Name",
+            type: "text",
+            required: true,
+          },
+          {
+            name: "recipient_account",
+            label: "Account Number (if applicable)",
+            type: "text",
+            required: false,
+          },
+        ],
+      },
+      {
+        id: "remitly",
+        name: "Remitly",
+        logo: "https://cdn.jsdelivr.net/gh/simple-icons/simple-icons/icons/remitly.svg",
+        color: "#00b9b9",
+        fields: [
+          {
+            name: "recipient_name",
+            label: "Recipient Name",
+            type: "text",
+            required: true,
+          },
+          {
+            name: "recipient_phone",
+            label: "Phone Number",
+            type: "tel",
+            required: true,
+          },
+          {
+            name: "recipient_country",
+            label: "Recipient Country",
+            type: "text",
+            required: true,
+          },
+        ],
+      },
+      {
+        id: "worldremit",
+        name: "WorldRemit",
+        logo: "https://cdn.jsdelivr.net/gh/simple-icons/simple-icons/icons/worldremit.svg",
+        color: "#00b9b9",
+        fields: [
+          {
+            name: "recipient_name",
+            label: "Recipient Name",
+            type: "text",
+            required: true,
+          },
+          {
+            name: "recipient_phone",
+            label: "Phone Number",
+            type: "tel",
+            required: true,
+          },
+        ],
+      },
+      {
+        id: "bank_transfer",
+        name: "Bank Transfer",
+        logo: "https://cdn.jsdelivr.net/gh/simple-icons/simple-icons/icons/bank.svg",
+        color: "#4f46e5",
+        fields: [
+          {
+            name: "bank_name",
+            label: "Bank Name",
+            type: "text",
+            required: true,
+          },
+          {
+            name: "recipient_account",
+            label: "Account Number",
+            type: "text",
+            required: true,
+          },
+          {
+            name: "recipient_name",
+            label: "Account Holder Name",
+            type: "text",
+            required: true,
+          },
+          {
+            name: "routing_number",
+            label: "Routing Number",
+            type: "text",
+            required: true,
+          },
+          {
+            name: "swift_code",
+            label: "SWIFT/BIC Code",
+            type: "text",
+            required: false,
+          },
+        ],
+      },
+    ];
+
+    res.json(providers);
+  } catch (error) {
+    console.error("Error fetching providers:", error);
+    res.status(500).json({ error: "Failed to fetch providers" });
+  }
+});
+
+// Create external transfer request
+app.post(
+  "/api/user/external-transfer",
+  authenticate,
+  checkAccountFrozen,
+  async (req, res) => {
+    console.log("=== External Transfer Request Received ===");
+    console.log("User ID:", req.user?.id);
+    console.log("Request body:", req.body);
+
+    try {
+      const {
+        from_account_id,
+        provider_id,
+        recipient_name,
+        recipient_account,
+        recipient_email,
+        recipient_phone,
+        amount,
+        description,
+        bank_name,
+      } = req.body;
+
+      console.log("Parsed data:", {
+        from_account_id,
+        provider_id,
+        amount,
+        bank_name,
+      });
+
+      // Validate amount
+      if (!amount || amount <= 0) {
+        console.log("Invalid amount:", amount);
+        return res.status(400).json({ error: "Invalid amount" });
+      }
+
+      if (amount < 10000) {
+        return res
+          .status(400)
+          .json({ error: "Minimum external transfer amount is ₦10,000" });
+      }
+
+      if (amount > 15000000) {
+        return res
+          .status(400)
+          .json({ error: "Maximum external transfer amount is ₦15,000,000" });
+      }
+
+      // Get source account
+      console.log("Fetching source account:", from_account_id);
+      const { data: fromAccount, error: accountError } = await supabase
+        .from("accounts")
+        .select("*")
+        .eq("id", from_account_id)
+        .eq("user_id", req.user.id)
+        .single();
+
+      if (accountError) {
+        console.error("Account fetch error:", accountError);
+        return res.status(404).json({
+          error: "Source account not found",
+          details: accountError.message,
+        });
+      }
+
+      if (!fromAccount) {
+        console.log("No account found for ID:", from_account_id);
+        return res.status(404).json({ error: "Source account not found" });
+      }
+
+      console.log(
+        "Source account found:",
+        fromAccount.account_number,
+        "Balance:",
+        fromAccount.available_balance,
+      );
+
+      // Check sufficient funds
+      if (fromAccount.available_balance < amount) {
+        return res.status(400).json({ error: "Insufficient funds" });
+      }
+
+      // Get provider name
+      let providerName = bank_name;
+      if (provider_id) {
+        const providers = {
+          paypal: "PayPal",
+          stripe: "Stripe",
+          flutterwave: "Flutterwave",
+          paystack: "Paystack",
+          wise: "Wise",
+          remitly: "Remitly",
+          worldremit: "WorldRemit",
+          bank_transfer: "Bank Transfer",
+        };
+        providerName = providers[provider_id] || bank_name || provider_id;
+      }
+
+      // Create external transfer record
+      const transferData = {
+        user_id: req.user.id,
+        from_account_id: fromAccount.id,
+        bank_name: providerName,
+        recipient_name: recipient_name,
+        recipient_account: recipient_account || null,
+        recipient_email: recipient_email || null,
+        recipient_phone: recipient_phone || null,
+        amount: amount,
+        description: description || `External transfer to ${providerName}`,
+        status: "pending",
+        created_at: new Date().toISOString(),
+      };
+
+      console.log("Inserting transfer record:", transferData);
+
+      const { data: transfer, error: insertError } = await supabase
+        .from("external_transfers")
+        .insert(transferData)
+        .select()
+        .single();
+
+      if (insertError) {
+        console.error("Insert error:", insertError);
+        return res.status(500).json({
+          error: "Failed to create transfer record",
+          details: insertError.message,
+        });
+      }
+
+      console.log("Transfer record created:", transfer.id);
+
+      // Immediately deduct amount from user balance
+      const { error: updateError } = await supabase
+        .from("accounts")
+        .update({
+          balance: fromAccount.balance - amount,
+          available_balance: fromAccount.available_balance - amount,
+          updated_at: new Date().toISOString(),
+        })
+        .eq("id", fromAccount.id);
+
+      if (updateError) {
+        console.error("Balance update error:", updateError);
+        // Rollback would be ideal here, but for now log it
+      }
+
+      // Create transaction record for the deduction
+      // NOTE: this /api/user/external-transfer route predates the
+      // Flutterwave payout integration (/api/flutterwave/transfer) —
+      // confirm whether it's still reachable from the frontend or safe
+      // to remove, since it duplicates that flow.
+      const { error: transError } = await supabase.from("transactions_new").insert({
+        sender_account_id: fromAccount.id,
+        sender_user_id: req.user.id,
+        amount: amount,
+        description: `External transfer to ${providerName} - ${recipient_name} (Pending approval)`,
+        transaction_type: "external_transfer",
+        status: "completed",
+        completed_at: new Date().toISOString(),
+        metadata: { is_admin_adjusted: false },
+      });
+
+      if (transError) {
+        console.error("Transaction creation error:", transError);
+      }
+
+      // Create notification for user
+      await supabase.from("notifications").insert({
+        user_id: req.user.id,
+        title: "External Transfer Initiated",
+        message: `Your transfer of $${amount} to ${providerName} has been initiated. Funds have been deducted from your account and will be processed within 2-3 business days after approval.`,
+        type: "info",
+        created_at: new Date().toISOString(),
+      });
+
+      console.log("External transfer completed successfully");
+      res.json({
+        success: true,
+        message:
+          "External transfer initiated successfully. Funds will be processed within 2-3 business days.",
+        transfer: transfer,
+        estimated_completion: "2-3 business days",
+      });
+    } catch (error) {
+      console.error("External transfer error - FULL DETAILS:", error);
+      console.error("Error stack:", error.stack);
+      res.status(500).json({
+        error: "Failed to process external transfer",
+        details: error.message,
+        stack: process.env.NODE_ENV === "development" ? error.stack : undefined,
+      });
+    }
+  },
+);
+
+// Get user's external transfer history
+app.get("/api/user/external-transfers", authenticate, async (req, res) => {
+  try {
+    const { page = 1, limit = 20, status } = req.query;
+    const offset = (page - 1) * limit;
+
+    let query = supabase
+      .from("external_transfers")
+      .select("*", { count: "exact" })
+      .eq("user_id", req.user.id)
+      .order("created_at", { ascending: false });
+
+    if (status && status !== "all") {
+      query = query.eq("status", status);
+    }
+
+    const {
+      data: transfers,
+      error,
+      count,
+    } = await query.range(offset, offset + limit - 1);
+
+    if (error) throw error;
+
+    res.json({
+      transfers: transfers || [],
+      pagination: {
+        page: parseInt(page),
+        limit: parseInt(limit),
+        total: count || 0,
+        pages: Math.ceil((count || 0) / limit),
+      },
+    });
+  } catch (error) {
+    console.error("Error fetching external transfers:", error);
+    res.status(500).json({ error: "Failed to fetch external transfers" });
+  }
+});*/
+
 // Verify OTP and complete transaction
 app.post("/api/user/verify-otp", authenticate, async (req, res) => {
   try {
@@ -16992,463 +17441,26 @@ app.post(
 );
 
 // ============================================================
-// INITIATE FLUTTERWAVE TRANSFER
+// EXTERNAL TRANSFER (Flutterwave payout) — reservation-based
 // ============================================================
+// The old inline implementation here (begin_transaction/commit_transaction
+// RPC calls that never shared a real Postgres transaction, a call to
+// createTransferLedgerEntries() that was never defined anywhere in this
+// codebase, an idempotency check against a misspelled table that was
+// never written to, and a fire-and-forget call to Flutterwave with no
+// job queue behind it) has been removed. See external-transfer-service.js,
+// external-transfer-worker.js, transfer-webhook-service.js, and
+// sql/migration_008_external_transfer_reservation.sql.
+const externalTransferService = require("./external-transfer-service");
+const externalTransferWorker = require("./external-transfer-worker");
+const transferWebhookService = require("./transfer-webhook-service");
 
-/*app.post(
-  "/api/flutterwave/transfer",
+app.post(
+  "/api/flutterwave/verify-transfer-pin",
   authenticate,
   checkAccountFrozen,
-  preventConcurrentTransfer,
-  releaseTransactionLock,
-  async (req, res) => {
-    const {
-      account_number,
-      bank_code,
-      bank_name,
-      amount,
-      narration,
-      beneficiary_name,
-      idempotency_key,
-    } = req.body;
-
-    const requestId = req.headers["x-request-id"] || crypto.randomUUID();
-
-    try {
-      // ============================================================
-      // 1. VALIDATE INPUT
-      // ============================================================
-      if (!account_number || !bank_code || !amount || !beneficiary_name) {
-        return res.status(400).json({
-          error: "Missing required fields",
-          code: "MISSING_FIELDS",
-          required: [
-            "account_number",
-            "bank_code",
-            "amount",
-            "beneficiary_name",
-          ],
-        });
-      }
-
-      if (!/^\d{10}$/.test(account_number)) {
-        return res.status(400).json({
-          error: "Invalid account number format",
-          code: "INVALID_ACCOUNT_NUMBER",
-        });
-      }
-
-      if (amount <= 0) {
-        return res.status(400).json({
-          error: "Invalid amount",
-          code: "INVALID_AMOUNT",
-        });
-      }
-
-      // ============================================================
-      // 2. CHECK IDEMPOTENCY
-      // ============================================================
-      if (idempotency_key) {
-        const { data: existing } = await supabase
-          .from("flutterware_idempotency_keys")
-          .select("transfer_id, status, response")
-          .eq("key", idempotency_key)
-          .eq("user_id", req.user.id)
-          .single();
-
-        if (existing && existing.status === "completed") {
-          return res.json(existing.response);
-        }
-      }
-
-      // ============================================================
-      // 3. VALIDATE LIMITS
-      // ============================================================
-      const limits = await validateUserTransferLimits(req.user.id, amount);
-
-      if (!limits.allowed) {
-        return res.status(400).json({
-          error: limits.reason,
-          code: limits.code,
-          limit: limits.limit,
-          used: limits.used,
-          remaining: limits.remaining,
-        });
-      }
-
-      // ============================================================
-      // 4. GET USER ACCOUNT WITH LOCKING
-      // ============================================================
-      const { data: account, error: accError } = await supabase
-        .from("accounts")
-        .select("*")
-        .eq("user_id", req.user.id)
-        .eq("account_type", "checking")
-        .single();
-
-      if (accError || !account) {
-        return res.status(404).json({
-          error: "Account not found",
-          code: "ACCOUNT_NOT_FOUND",
-        });
-      }
-
-      // ============================================================
-      // 5. CALCULATE FEES
-      // ============================================================
-      const feePercentage = await getTransferFeePercentage();
-      const feeAmount = amount * (feePercentage / 100);
-      const totalDeduction = amount + feeAmount;
-
-      // ============================================================
-      // 6. CHECK AVAILABLE BALANCE
-      // ============================================================
-      const availableBalance =
-        account.available_balance - account.reserved_balance;
-
-      if (availableBalance < totalDeduction) {
-        return res.status(400).json({
-          error: "Insufficient balance",
-          code: "INSUFFICIENT_BALANCE",
-          available: availableBalance,
-          required: totalDeduction,
-        });
-      }
-
-      // ============================================================
-      // 7. START DATABASE TRANSACTION
-      // ============================================================
-      const { data: result, error: txError } =
-        await supabase.rpc("begin_transaction");
-
-      try {
-        // 7a. LOCK ACCOUNT
-        const { data: lockedAccount, error: lockError } = await supabase
-          .from("accounts")
-          .select("*")
-          .eq("id", account.id)
-          .eq("user_id", req.user.id)
-          .single();
-
-        if (lockError) throw lockError;
-
-        // 7b. RESERVE FUNDS
-        const newReserved =
-          (lockedAccount.reserved_balance || 0) + totalDeduction;
-        const newAvailable = lockedAccount.available_balance - totalDeduction;
-
-        const { error: updateError } = await supabase
-          .from("accounts")
-          .update({
-            reserved_balance: newReserved,
-            available_balance: newAvailable,
-            updated_at: new Date().toISOString(),
-          })
-          .eq("id", lockedAccount.id);
-
-        if (updateError) throw updateError;
-
-        // 7c. GENERATE TRANSACTION REFERENCE
-        const transactionReference = generateTransferReference();
-        const transferId = crypto.randomUUID();
-
-        // 7d. CREATE TRANSFER RECORD
-        const { data: transfer, error: transferError } = await supabase
-          .from("flutterwave_transfers")
-          .insert({
-            id: transferId,
-            user_id: req.user.id,
-            from_account_id: lockedAccount.id,
-            amount: amount,
-            currency: "NGN",
-            narration: narration || `Transfer to ${beneficiary_name}`,
-            transaction_reference: transactionReference,
-            idempotency_key: idempotency_key,
-            beneficiary_name: beneficiary_name,
-            bank_code: bank_code,
-            bank_name: bank_name,
-            account_number: account_number,
-            fee_amount: feeAmount,
-            total_deducted: totalDeduction,
-            status: "initiated",
-            balance_before: lockedAccount.balance,
-            balance_after: lockedAccount.balance - totalDeduction,
-            reserved_before: lockedAccount.reserved_balance || 0,
-            reserved_after: newReserved,
-            initiated_at: new Date().toISOString(),
-            ip_address: req.ip,
-            user_agent: req.headers["user-agent"],
-            device_fingerprint: req.headers["x-device-fingerprint"],
-            created_by: req.user.id,
-            request_id: requestId,
-          })
-          .select()
-          .single();
-
-        if (transferError) throw transferError;
-
-        // 7e. CREATE LEDGER ENTRIES
-        await createTransferLedgerEntries({
-          transfer: transfer,
-          account: lockedAccount,
-          amount: amount,
-          feeAmount: feeAmount,
-          totalDeduction: totalDeduction,
-        });
-
-        // 7f. COMMIT TRANSACTION
-        await supabase.rpc("commit_transaction");
-
-        // ============================================================
-        // 8. STORE IDEMPOTENCY
-        // ============================================================
-        if (idempotency_key) {
-          await supabase.from("flutterwave_idempotency_keys").insert({
-            key: idempotency_key,
-            request_id: requestId,
-            user_id: req.user.id,
-            transfer_id: transferId,
-            status: "pending",
-            created_at: new Date().toISOString(),
-          });
-        }
-
-        // ============================================================
-        // 9. UPDATE LIMITS
-        // ============================================================
-        await updateUserTransferLimits(req.user.id, totalDeduction);
-
-        // ============================================================
-        // 10. CALL FLUTTERWAVE API (ASYNC)
-        // ============================================================
-        // Send to Flutterwave (fire and forget)
-        processFlutterwaveTransfer(transfer, {
-          amount,
-          narration,
-          beneficiary_name,
-          account_number,
-          bank_code,
-          transactionReference,
-        });
-
-        // ============================================================
-        // 11. CREATE NOTIFICATION
-        // ============================================================
-        await supabase.from("notifications").insert({
-          user_id: req.user.id,
-          title: "External Transfer Initiated",
-          message: `Your transfer of ₦${amount.toLocaleString()} to ${beneficiary_name} has been initiated.`,
-          type: "info",
-          created_at: new Date().toISOString(),
-        });
-
-        // ============================================================
-        // 12. RETURN RESPONSE
-        // ============================================================
-        res.json({
-          success: true,
-          message: "Transfer initiated successfully",
-          data: {
-            transfer_id: transferId,
-            transaction_reference: transactionReference,
-            amount: amount,
-            fee: feeAmount,
-            total_deducted: totalDeduction,
-            beneficiary_name: beneficiary_name,
-            bank_name: bank_name,
-            account_number: account_number,
-            status: "pending",
-            new_available_balance: newAvailable,
-            new_reserved_balance: newReserved,
-            estimated_completion: "2-3 minutes",
-          },
-        });
-      } catch (error) {
-        // ROLLBACK ON ERROR
-        await supabase.rpc("rollback_transaction");
-        throw error;
-      }
-    } catch (error) {
-      console.error("Transfer error:", error);
-
-      res.status(500).json({
-        error: "Transfer failed",
-        code: "TRANSFER_FAILED",
-        message: error.message,
-      });
-    }
-  },
+  externalTransferService.handleVerifyTransferPinForTransfer,
 );
-
-// ============================================================
-// HELPER FUNCTIONS
-// ============================================================
-
-function generateTransferReference() {
-  const date = new Date();
-  const year = date.getFullYear();
-  const month = String(date.getMonth() + 1).padStart(2, "0");
-  const day = String(date.getDate()).padStart(2, "0");
-  const random = Math.random().toString(36).substring(2, 10).toUpperCase();
-  return `FEE-${year}${month}${day}-${random}`;
-}
-
-async function validateUserTransferLimits(userId, amount) {
-  const today = new Date();
-  const todayStr = today.toISOString().split("T")[0];
-
-  // Get or create user limits
-  const { data: limits, error } = await supabase
-    .from("flutterwave_transfer_limits")
-    .select("*")
-    .eq("user_id", userId)
-    .single();
-
-  if (error && error.code === "PGRST116") {
-    // Create default limits
-    const { data: newLimits } = await supabase
-      .from("flutterwave_transfer_limits")
-      .insert({
-        user_id: userId,
-        daily_limit: 500000,
-        monthly_limit: 5000000,
-        single_transaction_limit: 1000000,
-        daily_reset_date: todayStr,
-        monthly_reset_date: todayStr,
-      })
-      .select()
-      .single();
-
-    return validateLimits(newLimits, amount, todayStr);
-  }
-
-  if (error) throw error;
-
-  return validateLimits(limits, amount, todayStr);
-}
-
-function validateLimits(limits, amount, todayStr) {
-  // Check single transaction limit
-  if (amount > limits.single_transaction_limit) {
-    return {
-      allowed: false,
-      code: "SINGLE_LIMIT_EXCEEDED",
-      reason: `Single transaction limit is ₦${limits.single_transaction_limit.toLocaleString()}`,
-      limit: limits.single_transaction_limit,
-    };
-  }
-
-  // Check daily limit
-  if (limits.daily_reset_date !== todayStr) {
-    limits.daily_used = 0;
-    limits.daily_reset_date = todayStr;
-  }
-
-  if (limits.daily_used + amount > limits.daily_limit) {
-    return {
-      allowed: false,
-      code: "DAILY_LIMIT_EXCEEDED",
-      reason: `Daily transfer limit is ₦${limits.daily_limit.toLocaleString()}`,
-      limit: limits.daily_limit,
-      used: limits.daily_used,
-      remaining: limits.daily_limit - limits.daily_used,
-    };
-  }
-
-  // Check monthly limit
-  const monthStr = todayStr.substring(0, 7);
-  if (limits.monthly_reset_date.substring(0, 7) !== monthStr) {
-    limits.monthly_used = 0;
-    limits.monthly_reset_date = todayStr;
-  }
-
-  if (limits.monthly_used + amount > limits.monthly_limit) {
-    return {
-      allowed: false,
-      code: "MONTHLY_LIMIT_EXCEEDED",
-      reason: `Monthly transfer limit is ₦${limits.monthly_limit.toLocaleString()}`,
-      limit: limits.monthly_limit,
-      used: limits.monthly_used,
-      remaining: limits.monthly_limit - limits.monthly_used,
-    };
-  }
-
-  return {
-    allowed: true,
-    daily_remaining: limits.daily_limit - limits.daily_used - amount,
-    monthly_remaining: limits.monthly_limit - limits.monthly_used - amount,
-  };
-}
-
-async function updateUserTransferLimits(userId, amount) {
-  const today = new Date().toISOString().split("T")[0];
-  const monthStr = today.substring(0, 7);
-
-  await supabase
-    .from("flutterwave_transfer_limits")
-    .update({
-      daily_used: supabase.raw("daily_used + ?", amount),
-      monthly_used: supabase.raw("monthly_used + ?", amount),
-      daily_reset_date: today,
-      monthly_reset_date: today,
-      last_updated_at: new Date().toISOString(),
-    })
-    .eq("user_id", userId);
-}
-
-async function processFlutterwaveTransfer(transfer, details) {
-  try {
-    // Call Flutterwave API
-    const response = await axios.post(
-      `${process.env.FLUTTERWAVE_BASE_URL}/transfers`,
-      {
-        account_bank: details.bank_code,
-        account_number: details.account_number,
-        amount: details.amount,
-        narration:
-          details.narration || `Transfer to ${details.beneficiary_name}`,
-        currency: "NGN",
-        reference: details.transactionReference,
-        callback_url: `${process.env.FLUTTERWAVE_WEBHOOK_URL}`,
-        beneficiary_name: details.beneficiary_name,
-        debit_currency: "NGN",
-      },
-      {
-        headers: {
-          Authorization: `Bearer ${process.env.FLUTTERWAVE_SECRET_KEY}`,
-          "Content-Type": "application/json",
-        },
-      },
-    );
-
-    // Update transfer with Flutterwave response
-    await supabase
-      .from("flutterwave_transfers")
-      .update({
-        flutterwave_reference: response.data.data.id,
-        flutterwave_status: response.data.data.status,
-        status: response.data.data.status === "NEW" ? "pending" : "processing",
-        processed_at: new Date().toISOString(),
-      })
-      .eq("id", transfer.id);
-  } catch (error) {
-    console.error("Flutterwave API error:", error);
-
-    // Update transfer as failed
-    await supabase
-      .from("flutterwave_transfers")
-      .update({
-        status: "failed",
-        failure_reason: error.response?.data?.message || error.message,
-        failure_code: error.response?.data?.code || "API_ERROR",
-        failed_at: new Date().toISOString(),
-      })
-      .eq("id", transfer.id);
-
-    // Release reserved funds
-    await releaseReservedFunds(transfer.user_id, transfer.total_deducted);
-  }
-}*/
 
 app.post(
   "/api/flutterwave/transfer",
@@ -17456,431 +17468,26 @@ app.post(
   checkAccountFrozen,
   preventConcurrentTransfer,
   releaseTransactionLock,
-  async (req, res) => {
-    const {
-      account_number,
-      bank_code,
-      bank_name,
-      amount,
-      narration,
-      beneficiary_name,
-      pin,
-    } = req.body;
-
-    const requestId =
-      req.headers["idempotency-key"] || req.body.idempotency_key || crypto.randomUUID();
-
-    try {
-      // ============================================================
-      // 1. VALIDATE INPUT
-      // ============================================================
-      if (!account_number || !bank_code || !amount || !beneficiary_name) {
-        return res.status(400).json({
-          error: "Missing required fields",
-          code: "MISSING_FIELDS",
-          required: ["account_number", "bank_code", "amount", "beneficiary_name"],
-        });
-      }
-
-      if (!/^\d{10}$/.test(account_number)) {
-        return res.status(400).json({
-          error: "Invalid account number format",
-          code: "INVALID_ACCOUNT_NUMBER",
-        });
-      }
-
-      if (amount <= 0) {
-        return res.status(400).json({ error: "Invalid amount", code: "INVALID_AMOUNT" });
-      }
-
-      if (!pin || !/^\d{4}$/.test(pin)) {
-        return res.status(400).json({
-          error: "Transaction PIN is required",
-          code: "PIN_REQUIRED",
-        });
-      }
-
-      // ============================================================
-      // 2. IDEMPOTENCY (fast-path short-circuit; reserve_external_transfer
-      // also enforces this atomically, this just saves a round trip on
-      // a known double-click)
-      // ============================================================
-      const { data: existingTransfer } = await supabase
-        .from("flutterwave_transfers")
-        .select("id, status, transaction_reference, amount, fee_amount, beneficiary_name, bank_name, account_number")
-        .eq("request_id_key", requestId)
-        .maybeSingle();
-
-      if (existingTransfer) {
-        return res.json({
-          success: true,
-          message: "Transfer already submitted",
-          data: {
-            transfer_id: existingTransfer.id,
-            transaction_reference: existingTransfer.transaction_reference,
-            amount: existingTransfer.amount,
-            fee: existingTransfer.fee_amount,
-            beneficiary_name: existingTransfer.beneficiary_name,
-            bank_name: existingTransfer.bank_name,
-            account_number: existingTransfer.account_number,
-            status: existingTransfer.status,
-          },
-        });
-      }
-
-      // ============================================================
-      // 3. VERIFY PIN — server-side, before anything else touches money.
-      // Reuses the same transfer_pin / pin_attempts fields the
-      // /user/verify-transfer-pin endpoint uses, so a freeze from one
-      // path is honored by the other.
-      // ============================================================
-      const { data: pinUser, error: pinUserErr } = await supabase
-        .from("users")
-        .select("transfer_pin, pin_attempts")
-        .eq("id", req.user.id)
-        .single();
-
-      if (pinUserErr || !pinUser || !pinUser.transfer_pin) {
-        return res.status(400).json({
-          error: "Transfer PIN not set",
-          code: "PIN_NOT_SET",
-        });
-      }
-
-      if ((pinUser.pin_attempts || 0) >= 4) {
-        return res.status(403).json({
-          error: "Too many incorrect PIN attempts. Account frozen.",
-          code: "PIN_FROZEN",
-        });
-      }
-
-      const pinValid = await bcrypt.compare(pin, pinUser.transfer_pin);
-      if (!pinValid) {
-        const newAttempts = (pinUser.pin_attempts || 0) + 1;
-        await supabase
-          .from("users")
-          .update({ pin_attempts: newAttempts, last_pin_attempt: new Date().toISOString() })
-          .eq("id", req.user.id);
-
-        if (newAttempts >= 4) {
-          await supabase.from("users").update({ is_frozen: true }).eq("id", req.user.id);
-        }
-
-        return res.status(401).json({
-          error: "Incorrect PIN",
-          code: "INVALID_PIN",
-          attempts_remaining: Math.max(0, 4 - newAttempts),
-        });
-      }
-
-      await supabase
-        .from("users")
-        .update({ pin_attempts: 0, last_pin_attempt: null })
-        .eq("id", req.user.id);
-
-      // ============================================================
-      // 4. VALIDATE LIMITS
-      // ============================================================
-      const limits = await validateUserTransferLimits(req.user.id, amount);
-      if (!limits.allowed) {
-        return res.status(400).json({
-          error: limits.reason,
-          code: limits.code,
-          limit: limits.limit,
-          used: limits.used,
-        });
-      }
-
-      // ============================================================
-      // 5. GET USER'S CHECKING ACCOUNT
-      // ============================================================
-      const { data: account, error: accError } = await supabase
-        .from("accounts")
-        .select("id")
-        .eq("user_id", req.user.id)
-        .eq("account_type", "checking")
-        .single();
-
-      if (accError || !account) {
-        return res.status(404).json({ error: "Account not found", code: "ACCOUNT_NOT_FOUND" });
-      }
-
-      // ============================================================
-      // 6. CALCULATE FEE
-      // ============================================================
-      const { data: feeSetting } = await supabase
-        .from("admin_settings")
-        .select("setting_value")
-        .eq("setting_key", "flutterwave_transfer_fee_percentage")
-        .maybeSingle();
-      const feePercentage = feeSetting ? parseFloat(feeSetting.setting_value) : 0.5;
-      const feeAmount = Math.round(amount * (feePercentage / 100) * 100) / 100;
-
-      const transactionReference = generateTransferReference();
-
-      // ============================================================
-      // 7. RESERVE FUNDS ATOMICALLY (row-locked, single DB call)
-      // ============================================================
-      const { data: reserveResult, error: reserveError } = await supabase.rpc(
-        "reserve_external_transfer",
-        {
-          p_request_id: requestId,
-          p_user_id: req.user.id,
-          p_from_account_id: account.id,
-          p_amount: amount,
-          p_fee_amount: feeAmount,
-          p_transaction_reference: transactionReference,
-          p_beneficiary_name: beneficiary_name,
-          p_bank_code: bank_code,
-          p_bank_name: bank_name,
-          p_account_number: account_number,
-          p_narration: narration || `Transfer to ${beneficiary_name}`,
-          p_ip_address: req.ip,
-          p_user_agent: req.headers["user-agent"],
-          p_device_fingerprint: req.headers["x-device-fingerprint"] || null,
-        },
-      );
-
-      if (reserveError) {
-        console.error("Reserve external transfer error:", reserveError);
-        if (reserveError.message?.includes("Insufficient balance")) {
-          return res.status(400).json({
-            error: "Insufficient balance",
-            code: "INSUFFICIENT_BALANCE",
-          });
-        }
-        return res.status(500).json({
-          error: "Transfer failed",
-          code: "TRANSFER_FAILED",
-          message: reserveError.message,
-        });
-      }
-
-      await updateUserTransferLimits(req.user.id, amount);
-
-      await supabase.from("notifications").insert({
-        user_id: req.user.id,
-        title: "External Transfer Initiated",
-        message: `Your transfer of ₦${amount.toLocaleString()} to ${beneficiary_name} has been initiated.`,
-        type: "info",
-        created_at: new Date().toISOString(),
-      });
-
-      // ============================================================
-      // 8. CALL FLUTTERWAVE (async — response is "processing", not final)
-      // ============================================================
-      processFlutterwaveTransfer(reserveResult.transfer_id, {
-        amount,
-        narration,
-        beneficiary_name,
-        account_number,
-        bank_code,
-        transactionReference,
-      });
-
-      // ============================================================
-      // 9. RESPOND
-      // ============================================================
-      res.json({
-        success: true,
-        message: "Transfer initiated successfully",
-        data: {
-          transfer_id: reserveResult.transfer_id,
-          transaction_reference: transactionReference,
-          amount,
-          fee: feeAmount,
-          total_deducted: amount + feeAmount,
-          beneficiary_name,
-          bank_name,
-          account_number,
-          status: "processing",
-          new_available_balance: reserveResult.available_balance,
-          estimated_completion: "2-3 minutes",
-        },
-      });
-    } catch (error) {
-      console.error("Transfer error:", error);
-      res.status(500).json({
-        error: "Transfer failed",
-        code: "TRANSFER_FAILED",
-        message: error.message,
-      });
-    }
-  },
+  externalTransferService.handleCreateTransfer,
 );
 
-// ============================================================
-// HELPER FUNCTIONS
-// ============================================================
+// Cron sweep safety net — add this path to Vercel's crons in vercel.json
+// alongside the existing virtual-account-worker and deposit-webhook-service
+// cron entries.
+app.get("/api/cron/external-transfers", externalTransferWorker.cronHandler);
 
-function generateTransferReference() {
-  const date = new Date();
-  const year = date.getFullYear();
-  const month = String(date.getMonth() + 1).padStart(2, "0");
-  const day = String(date.getDate()).padStart(2, "0");
-  const random = Math.random().toString(36).substring(2, 10).toUpperCase();
-  return `FEE-TRF-${year}${month}${day}-${random}`;
-}
-
-async function validateUserTransferLimits(userId, amount) {
-  const today = new Date();
-  const todayStr = today.toISOString().split("T")[0];
-
-  const { data: limits, error } = await supabase
-    .from("flutterwave_transfer_limits")
-    .select("*")
-    .eq("user_id", userId)
-    .single();
-
-  if (error && error.code === "PGRST116") {
-    const { data: newLimits } = await supabase
-      .from("flutterwave_transfer_limits")
-      .insert({
-        user_id: userId,
-        daily_limit: 500000,
-        monthly_limit: 5000000,
-        single_transaction_limit: 1000000,
-        daily_reset_date: todayStr,
-        monthly_reset_date: todayStr,
-      })
-      .select()
-      .single();
-
-    return validateLimits(newLimits, amount, todayStr);
-  }
-
-  if (error) throw error;
-  return validateLimits(limits, amount, todayStr);
-}
-
-function validateLimits(limits, amount, todayStr) {
-  if (amount > limits.single_transaction_limit) {
-    return {
-      allowed: false,
-      code: "SINGLE_LIMIT_EXCEEDED",
-      reason: `Single transaction limit is ₦${limits.single_transaction_limit.toLocaleString()}`,
-      limit: limits.single_transaction_limit,
-    };
-  }
-
-  let dailyUsed = limits.daily_used;
-  if (limits.daily_reset_date !== todayStr) dailyUsed = 0;
-
-  if (dailyUsed + amount > limits.daily_limit) {
-    return {
-      allowed: false,
-      code: "DAILY_LIMIT_EXCEEDED",
-      reason: `Daily transfer limit is ₦${limits.daily_limit.toLocaleString()}`,
-      limit: limits.daily_limit,
-      used: dailyUsed,
-    };
-  }
-
-  let monthlyUsed = limits.monthly_used;
-  if (limits.monthly_reset_date !== todayStr.slice(0, 7)) monthlyUsed = 0;
-
-  if (monthlyUsed + amount > limits.monthly_limit) {
-    return {
-      allowed: false,
-      code: "MONTHLY_LIMIT_EXCEEDED",
-      reason: `Monthly transfer limit is ₦${limits.monthly_limit.toLocaleString()}`,
-      limit: limits.monthly_limit,
-      used: monthlyUsed,
-    };
-  }
-
-  return { allowed: true };
-}
-
-async function updateUserTransferLimits(userId, amount) {
-  const todayStr = new Date().toISOString().split("T")[0];
-  const { data: limits } = await supabase
-    .from("flutterwave_transfer_limits")
-    .select("*")
-    .eq("user_id", userId)
-    .single();
-
-  if (!limits) return;
-
-  const dailyUsed = limits.daily_reset_date === todayStr ? limits.daily_used + amount : amount;
-  const monthlyUsed =
-    limits.monthly_reset_date?.slice(0, 7) === todayStr.slice(0, 7)
-      ? limits.monthly_used + amount
-      : amount;
-
-  await supabase
-    .from("flutterwave_transfer_limits")
-    .update({
-      daily_used: dailyUsed,
-      daily_reset_date: todayStr,
-      monthly_used: monthlyUsed,
-      monthly_reset_date: todayStr,
-      last_updated_at: new Date().toISOString(),
-    })
-    .eq("user_id", userId);
-}
-
-// Fire-and-forget: calls Flutterwave, records whatever reference/status
-// it hands back for tracing, but NEVER marks the transfer completed or
-// failed here — only finalize_external_transfer() (driven by the
-// verified webhook, or the reconciliation sweep) does that. If the API
-// call itself fails outright (network error, 4xx from Flutterwave
-// before it even queues the payout), that IS a definitive failure, so
-// this path does call finalize_external_transfer with 'failed' to
-// release the reservation immediately instead of leaving the user's
-// funds stuck for the full reconciliation window.
-async function processFlutterwaveTransfer(transferId, details) {
-  const result = await flutterwaveService.initiateTransfer({
-    accountNumber: details.account_number,
-    bankCode: details.bank_code,
-    amount: details.amount,
-    narration: details.narration,
-    beneficiaryName: details.beneficiary_name,
-    reference: details.transactionReference,
-    callbackUrl: process.env.FLUTTERWAVE_WEBHOOK_URL,
-  });
-
-  if (!result.success) {
-    await supabase.rpc("finalize_external_transfer", {
-      p_transfer_id: transferId,
-      p_final_status: "failed",
-      p_flutterwave_reference: null,
-      p_flutterwave_status: null,
-      p_failure_reason: result.error,
-    });
-    return;
-  }
-
-  await supabase
-    .from("flutterwave_transfers")
-    .update({
-      flutterwave_reference: String(result.data.id),
-      flutterwave_status: result.data.status,
-      status: "processing",
-      processed_at: new Date().toISOString(),
-    })
-    .eq("id", transferId);
-}
-
-async function releaseReservedFunds(userId, amount) {
-  const { data: account } = await supabase
-    .from("accounts")
-    .select("*")
-    .eq("user_id", userId)
-    .eq("account_type", "checking")
-    .single();
-
-  if (account) {
-    await supabase
-      .from("accounts")
-      .update({
-        reserved_balance: (account.reserved_balance || 0) - amount,
-        available_balance: account.available_balance + amount,
-        updated_at: new Date().toISOString(),
-      })
-      .eq("id", account.id);
-  }
-}
+// Outbound transfer webhook — point a SEPARATE Flutterwave webhook URL
+// at this path (transfer.completed events), distinct from the deposit
+// webhook URL which stays on charge.completed events only.
+app.post(
+  "/api/webhooks/flutterwave-transfers",
+  express.json({
+    verify: (req, res, buf) => {
+      req.rawBody = buf;
+    },
+  }),
+  transferWebhookService.handleFlutterwaveTransferWebhook,
+);
 
 // ==================== ADMIN ROUTES ================
 
@@ -20938,11 +20545,9 @@ app.post(
       const tokens = await getUserPushTokens(userIds);
 
       if (tokens.length === 0) {
-        return res
-          .status(400)
-          .json({
-            error: "None of the selected users have push notifications enabled",
-          });
+        return res.status(400).json({
+          error: "None of the selected users have push notifications enabled",
+        });
       }
 
       // Group by push token (deduplicate)

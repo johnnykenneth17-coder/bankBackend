@@ -106,6 +106,130 @@ async function createVirtualAccount({
 }
 
 /**
+ * Initiates a payout (external transfer) via Flutterwave's Transfers API.
+ * This is the ONLY place in the codebase that should call POST /transfers.
+ */
+async function initiateTransfer({
+  accountBank,
+  accountNumber,
+  amount,
+  narration,
+  reference,
+  beneficiaryName,
+}) {
+  let response;
+  try {
+    response = await fetch(`${FLW_BASE_URL}/transfers`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${getSecretKey()}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        account_bank: accountBank,
+        account_number: accountNumber,
+        amount,
+        narration: narration || `Transfer to ${beneficiaryName}`,
+        currency: "NGN",
+        reference,
+        callback_url: process.env.FLUTTERWAVE_TRANSFER_WEBHOOK_URL,
+        beneficiary_name: beneficiaryName,
+        debit_currency: "NGN",
+      }),
+    });
+  } catch (networkErr) {
+    return {
+      success: false,
+      error: `Network error contacting Flutterwave transfers API: ${networkErr.message}`,
+      retryable: true,
+    };
+  }
+
+  let json;
+  try {
+    json = await response.json();
+  } catch (parseErr) {
+    return {
+      success: false,
+      error: `Invalid JSON from Flutterwave transfers API (HTTP ${response.status})`,
+      retryable: true,
+    };
+  }
+
+  if (!response.ok || json.status !== "success") {
+    return {
+      success: false,
+      error:
+        json.message || `Flutterwave transfer error (HTTP ${response.status})`,
+      retryable: response.status >= 500,
+      raw: json,
+    };
+  }
+
+  const d = json.data;
+  return {
+    success: true,
+    data: {
+      flw_id: d.id,
+      status: d.status,
+      reference: d.reference,
+    },
+    raw: json,
+  };
+}
+
+/**
+ * Checks the current status of a previously-initiated transfer directly
+ * with Flutterwave. Used by the retry worker and the outbound webhook
+ * handler to confirm status before crediting/debiting anything.
+ */
+async function getTransferStatus(flwTransferId) {
+  let response;
+  try {
+    response = await fetch(`${FLW_BASE_URL}/transfers/${flwTransferId}`, {
+      method: "GET",
+      headers: { Authorization: `Bearer ${getSecretKey()}` },
+    });
+  } catch (networkErr) {
+    return {
+      success: false,
+      error: `Network error checking transfer status: ${networkErr.message}`,
+    };
+  }
+
+  let json;
+  try {
+    json = await response.json();
+  } catch (parseErr) {
+    return {
+      success: false,
+      error: `Invalid JSON checking transfer status (HTTP ${response.status})`,
+    };
+  }
+
+  if (!response.ok || json.status !== "success") {
+    return {
+      success: false,
+      error: json.message || `Status check failed (HTTP ${response.status})`,
+    };
+  }
+
+  const d = json.data;
+  return {
+    success: true,
+    data: {
+      id: d.id,
+      reference: d.reference,
+      status: d.status,
+      complete_message: d.complete_message,
+      amount: d.amount,
+      account_number: d.account_number,
+      bank_code: d.bank_code,
+    },
+  };
+}
+
+/**
  * Verifies a Flutterwave webhook signature.
  * Flutterwave sends the secret hash you configured in the dashboard back
  * verbatim in the `verif-hash` header — no HMAC computation needed, just a
@@ -200,138 +324,10 @@ async function verifyTransaction(transactionId) {
   };
 }
 
-/**
- * Verifies a payout/transfer directly with Flutterwave's API. Used by
- * the transfer webhook handler and the reconciliation sweep — a
- * transfer.completed/transfer.failed webhook body is never trusted on
- * its own; this confirms the real status, amount and reference before
- * finalize_external_transfer() is ever called.
- *
- * @param {string|number} transferId - Flutterwave's `data.id` from the webhook
- * @returns {Promise<{success: boolean, data?: object, error?: string}>}
- */
-async function verifyTransferStatus(transferId) {
-  let response;
-  try {
-    response = await fetch(`${FLW_BASE_URL}/transfers/${transferId}`, {
-      method: "GET",
-      headers: { Authorization: `Bearer ${getSecretKey()}` },
-    });
-  } catch (networkErr) {
-    return {
-      success: false,
-      error: `Network error verifying transfer: ${networkErr.message}`,
-    };
-  }
-
-  let json;
-  try {
-    json = await response.json();
-  } catch (parseErr) {
-    return {
-      success: false,
-      error: `Invalid JSON verifying transfer (HTTP ${response.status})`,
-    };
-  }
-
-  if (!response.ok || json.status !== "success") {
-    return {
-      success: false,
-      error: json.message || `Verify failed (HTTP ${response.status})`,
-    };
-  }
-
-  const d = json.data;
-  return {
-    success: true,
-    data: {
-      id: d.id,
-      reference: d.reference,
-      amount: d.amount,
-      currency: d.currency,
-      // Flutterwave payout statuses: NEW, PENDING, SUCCESSFUL, FAILED
-      status: d.status,
-      complete_message: d.complete_message,
-      account_number: d.account_number,
-      bank_name: d.bank_name,
-    },
-  };
-}
-
-/**
- * Initiates a payout/transfer with Flutterwave. Called only after
- * reserve_external_transfer() has already reserved the funds
- * atomically — this call's response is never trusted as final; the
- * webhook (verified via verifyTransferStatus) is the source of truth.
- */
-async function initiateTransfer({
-  accountNumber,
-  bankCode,
-  amount,
-  narration,
-  beneficiaryName,
-  reference,
-  callbackUrl,
-}) {
-  let response;
-  try {
-    response = await fetch(`${FLW_BASE_URL}/transfers`, {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${getSecretKey()}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        account_bank: bankCode,
-        account_number: accountNumber,
-        amount,
-        narration: narration || `Transfer to ${beneficiaryName}`,
-        currency: "NGN",
-        reference,
-        callback_url: callbackUrl,
-        beneficiary_name: beneficiaryName,
-        debit_currency: "NGN",
-      }),
-    });
-  } catch (networkErr) {
-    return {
-      success: false,
-      error: `Network error contacting Flutterwave: ${networkErr.message}`,
-    };
-  }
-
-  let json;
-  try {
-    json = await response.json();
-  } catch (parseErr) {
-    return {
-      success: false,
-      error: `Invalid JSON from Flutterwave (HTTP ${response.status})`,
-    };
-  }
-
-  if (!response.ok || json.status !== "success") {
-    return {
-      success: false,
-      error: json.message || `Flutterwave error (HTTP ${response.status})`,
-      raw: json,
-    };
-  }
-
-  return {
-    success: true,
-    data: {
-      id: json.data.id,
-      status: json.data.status,
-      reference: json.data.reference,
-    },
-  };
-}
-
 module.exports = {
   createVirtualAccount,
   verifyWebhookSignature,
   verifyTransaction,
-  verifyTransferStatus,
   initiateTransfer,
+  getTransferStatus,
 };
