@@ -324,10 +324,154 @@ async function verifyTransaction(transactionId) {
   };
 }
 
+/**
+ * Purchases airtime via Flutterwave's Bills API. This is the ONLY place
+ * in the codebase that should call POST /v3/bills for airtime.
+ *
+ * Flutterwave resolves the network (MTN/GLO/AIRTEL/9MOBILE) from the
+ * phone number itself — we don't ask the user to pick it, and we don't
+ * guess it client-side.
+ *
+ * Per Flutterwave's own docs: a call here can come back success,
+ * pending, or failed. "Pending" is common enough that callers (the
+ * bills worker) must be ready to poll getBillStatus() rather than
+ * treat this response as final on its own.
+ */
+async function purchaseAirtime({ phoneNumber, amount, reference }) {
+  let response;
+  try {
+    response = await fetch(`${FLW_BASE_URL}/bills`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${getSecretKey()}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        country: "NG",
+        customer: phoneNumber,
+        amount,
+        recurrence: "ONCE",
+        type: "AIRTIME",
+        reference,
+      }),
+    });
+  } catch (networkErr) {
+    return {
+      success: false,
+      error: `Network error contacting Flutterwave bills API: ${networkErr.message}`,
+      retryable: true,
+    };
+  }
+
+  let json;
+  try {
+    json = await response.json();
+  } catch (parseErr) {
+    return {
+      success: false,
+      error: `Invalid JSON from Flutterwave bills API (HTTP ${response.status})`,
+      retryable: true,
+    };
+  }
+
+  if (!response.ok || json.status !== "success") {
+    return {
+      success: false,
+      error: json.message || `Flutterwave bills error (HTTP ${response.status})`,
+      retryable: response.status >= 500,
+      raw: json,
+    };
+  }
+
+  const d = json.data || {};
+  return {
+    success: true,
+    // Flutterwave's create-bill response doesn't always carry an
+    // explicit final status field the way transfers do — a 200 here
+    // means "accepted", not necessarily "delivered". The caller
+    // should still confirm via getBillStatus() before treating this
+    // as a completed purchase.
+    data: {
+      flw_ref: d.flw_ref || null,
+      tx_ref: d.tx_ref || reference,
+      network: d.network || null,
+      phone_number: d.phone_number || phoneNumber,
+      amount: d.amount || amount,
+    },
+    raw: json,
+  };
+}
+
+/**
+ * Checks the status of a previously-submitted bill payment directly
+ * with Flutterwave. Used by the bills worker to confirm outcome before
+ * calling finalize_bill_payment() — never trust the create-bill
+ * response alone as final.
+ *
+ * @param {string} reference - the reference we originally sent when
+ *   creating the bill payment (Flutterwave's `customer_reference`).
+ */
+async function getBillStatus(reference) {
+  let response;
+  try {
+    response = await fetch(`${FLW_BASE_URL}/bills/${reference}`, {
+      method: "GET",
+      headers: { Authorization: `Bearer ${getSecretKey()}` },
+    });
+  } catch (networkErr) {
+    return {
+      success: false,
+      error: `Network error checking bill status: ${networkErr.message}`,
+    };
+  }
+
+  let json;
+  try {
+    json = await response.json();
+  } catch (parseErr) {
+    return {
+      success: false,
+      error: `Invalid JSON checking bill status (HTTP ${response.status})`,
+    };
+  }
+
+  if (!response.ok || json.status !== "success") {
+    return {
+      success: false,
+      error: json.message || `Bill status check failed (HTTP ${response.status})`,
+    };
+  }
+
+  const d = json.data || {};
+  // Flutterwave's status payload confirms the record exists and
+  // returns its details (flw_ref, transaction_date, amount, product)
+  // but does not carry an explicit SUCCESSFUL/FAILED enum the way
+  // /v3/transfers/:id does. A populated transaction_date + flw_ref is
+  // the strongest signal available that the bill was actually
+  // processed; absence of those after a reasonable number of retries
+  // is treated as still-pending by the caller, never assumed failed.
+  return {
+    success: true,
+    data: {
+      flw_ref: d.flw_ref || null,
+      tx_ref: d.tx_ref || null,
+      customer_reference: d.customer_reference || reference,
+      amount: d.amount,
+      product: d.product,
+      network: d.network || null,
+      transaction_date: d.transaction_date || null,
+      confirmed: Boolean(d.flw_ref && d.transaction_date),
+    },
+    raw: json,
+  };
+}
+
 module.exports = {
   createVirtualAccount,
   verifyWebhookSignature,
   verifyTransaction,
   initiateTransfer,
   getTransferStatus,
+  purchaseAirtime,
+  getBillStatus,
 };

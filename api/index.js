@@ -231,6 +231,9 @@ app.get("/api/cron/virtual-accounts", virtualAccountWorker.cronHandler);
 
 // Deposit webhook endpoint — intentionally NOT behind the authenticate
 // middleware, Flutterwave calls this directly.
+
+const statementService = require("./statement-service");
+
 app.post(
   "/api/webhooks/flutterwave",
   depositWebhookService.handleFlutterwaveWebhook,
@@ -5505,6 +5508,20 @@ app.get("/api/user/accounts", authenticate, async (req, res) => {
   }
 });
 
+app.get(
+  "/api/user/accounts/:accountId/statement",
+  authenticate,
+  statementService.statementLimiter,
+  statementService.handleGetStatementJson,
+);
+
+app.get(
+  "/api/user/accounts/:accountId/statement/pdf",
+  authenticate,
+  statementService.statementLimiter,
+  statementService.handleGetStatementPdf,
+);
+
 // Get user transactions - FIXED VERSION
 app.get(
   "/api/user/transactions",
@@ -8073,7 +8090,7 @@ app.post(
 );
 
 // Pay bill
-app.post(
+/*app.post(
   "/api/user/pay-bill/:billId",
   authenticate,
   checkAccountFrozen,
@@ -8171,7 +8188,26 @@ app.post(
       res.status(500).json({ error: "Failed to pay bill" });
     }
   },
+);*/
+
+const billsService = require("./bills-service");
+const billsWorker = require("./bills-worker");
+
+app.post(
+  "/api/user/bills/verify-pin",
+  authenticate,
+  checkAccountFrozen,
+  billsService.handleVerifyBillPaymentPin,
 );
+app.post(
+  "/api/user/bills",
+  authenticate,
+  checkAccountFrozen,
+  billsService.billPaymentLimiter,
+  billsService.handleCreateBillPayment,
+);
+app.get("/api/cron/process-bills", billsWorker.cronHandler); // add to vercel.json cron config, same pattern as your other workers
+
 
 // Get exchange rates
 app.get("/api/user/exchange-rates", authenticate, async (req, res) => {
