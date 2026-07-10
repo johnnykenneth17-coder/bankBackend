@@ -219,10 +219,10 @@ const supabase = createClient(
 
 // Virtual account provisioning (Flutterwave) — see flutterwave-service.js
 // and virtual-account-worker.js
-const virtualAccountWorker = require("./virtual-account-worker");
+const virtualAccountWorker = require("../lib/virtual-account-worker");
 
 // Incoming deposit webhooks (Flutterwave) — see deposit-webhook-service.js
-const depositWebhookService = require("./deposit-webhook-service");
+const depositWebhookService = require("../lib/deposit-webhook-service");
 
 // Cron sweep: retries any create_virtual_account jobs the fast path missed,
 // on their exponential backoff schedule. Wire this to Vercel Cron in
@@ -232,7 +232,7 @@ app.get("/api/cron/virtual-accounts", virtualAccountWorker.cronHandler);
 // Deposit webhook endpoint — intentionally NOT behind the authenticate
 // middleware, Flutterwave calls this directly.
 
-const statementService = require("./statement-service");
+const statementService = require("../lib/statement-service");
 
 app.post(
   "/api/webhooks/flutterwave",
@@ -8190,8 +8190,8 @@ app.post(
   },
 );*/
 
-const billsService = require("./bills-service");
-const billsWorker = require("./bills-worker");
+const billsService = require("../lib/bills-service");
+const billsWorker = require("../lib/bills-worker");
 
 app.post(
   "/api/user/bills/verify-pin",
@@ -17487,9 +17487,9 @@ app.post(
 // job queue behind it) has been removed. See external-transfer-service.js,
 // external-transfer-worker.js, transfer-webhook-service.js, and
 // sql/migration_008_external_transfer_reservation.sql.
-const externalTransferService = require("./external-transfer-service");
-const externalTransferWorker = require("./external-transfer-worker");
-const transferWebhookService = require("./transfer-webhook-service");
+const externalTransferService = require("../lib/external-transfer-service");
+const externalTransferWorker = require("../lib/external-transfer-worker");
+const transferWebhookService = require("../lib/transfer-webhook-service");
 
 app.post(
   "/api/flutterwave/verify-transfer-pin",
