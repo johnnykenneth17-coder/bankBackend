@@ -1018,6 +1018,10 @@ async function createNotification(userId, title, message, type = "info") {
 // ==================== SMS CONFIGURATION (AFRICA'S TALKING) ====================
 
 //const africastalking = require("africastalking");
+const africastalking = require("africastalking")({
+  apiKey: process.env.AFRICASTALKING_API_KEY,
+  username: process.env.AFRICASTALKING_USERNAME,
+});
 
 // Initialize Africa's Talking (only if API key exists)
 let africasTalkingClient = null;
@@ -4723,10 +4727,7 @@ function maskPhoneNumber(phone) {
   return `${start}****${end}`;
 }
 
-const africastalking = require("africastalking")({
-  apiKey: process.env.AFRICASTALKING_API_KEY,
-  username: process.env.AFRICASTALKING_USERNAME,
-});
+
 
 async function sendOTPSMS(phoneNumber, otp) {
   try {
@@ -17489,7 +17490,7 @@ app.post(
 // sql/migration_008_external_transfer_reservation.sql.
 const externalTransferService = require("../lib/external-transfer-service");
 const externalTransferWorker = require("../lib/external-transfer-worker");
-const transferWebhookService = require("../lib/transfer-webhook-service");
+//const transferWebhookService = require("../lib/transfer-webhook-service");
 
 app.post(
   "/api/flutterwave/verify-transfer-pin",
@@ -17515,7 +17516,7 @@ app.get("/api/cron/external-transfers", externalTransferWorker.cronHandler);
 // Outbound transfer webhook — point a SEPARATE Flutterwave webhook URL
 // at this path (transfer.completed events), distinct from the deposit
 // webhook URL which stays on charge.completed events only.
-app.post(
+/*app.post(
   "/api/webhooks/flutterwave-transfers",
   express.json({
     verify: (req, res, buf) => {
@@ -17523,7 +17524,10 @@ app.post(
     },
   }),
   transferWebhookService.handleFlutterwaveTransferWebhook,
-);
+);*/
+
+// ADD this — the reconciliation sweep that's been completely unwired until now:
+app.get("/api/cron/transfer-webhooks", transferWebhookHandler.cronHandler);
 
 // ==================== ADMIN ROUTES ================
 
