@@ -217,6 +217,11 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_KEY,
 );
 
+//const africastalking = require("africastalking");
+/*const africastalking = require("africastalking")({
+  apiKey: process.env.AFRICASTALKING_API_KEY,
+  username: process.env.AFRICASTALKING_USERNAME,
+});*/
 // Virtual account provisioning (Flutterwave) — see flutterwave-service.js
 // and virtual-account-worker.js
 const virtualAccountWorker = require("../lib/virtual-account-worker");
