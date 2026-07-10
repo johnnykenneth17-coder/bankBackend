@@ -1024,10 +1024,7 @@ async function createNotification(userId, title, message, type = "info") {
 // function". One factory call, one guard, one variable used everywhere.
 let africasTalkingClient = null;
 try {
-  if (
-    process.env.AFRICASTALKING_API_KEY &&
-    process.env.AFRICASTALKING_USERNAME
-  ) {
+  if (process.env.AFRICASTALKING_API_KEY && process.env.AFRICASTALKING_USERNAME) {
     africasTalkingClient = require("africastalking")({
       apiKey: process.env.AFRICASTALKING_API_KEY,
       username: process.env.AFRICASTALKING_USERNAME,
@@ -4725,6 +4722,8 @@ function maskPhoneNumber(phone) {
   return `${start}****${end}`;
 }
 
+
+
 // NOTE: a second `function sendOTPSMS` used to be declared here, calling
 // the raw `africastalking` client directly with no null-guard and
 // re-throwing on any error. Since both declarations shared the same
@@ -8199,6 +8198,7 @@ app.post(
   billsService.handleCreateBillPayment,
 );
 app.get("/api/cron/process-bills", billsWorker.cronHandler); // add to vercel.json cron config, same pattern as your other workers
+
 
 // Get exchange rates
 app.get("/api/user/exchange-rates", authenticate, async (req, res) => {
@@ -17480,7 +17480,8 @@ app.post(
 // sql/migration_008_external_transfer_reservation.sql.
 const externalTransferService = require("../lib/external-transfer-service");
 const externalTransferWorker = require("../lib/external-transfer-worker");
-//const transferWebhookService = require("../lib/transfer-webhook-service");
+const transferWebhookHandler = require("../lib/transfer-webhook-handler");
+//const transferWebhookService = require("../lib/transfer-webhook-service"); // retired — see notes above
 
 app.post(
   "/api/flutterwave/verify-transfer-pin",
