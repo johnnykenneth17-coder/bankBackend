@@ -217,11 +217,6 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_KEY,
 );
 
-//const africastalking = require("africastalking");
-/*const africastalking = require("africastalking")({
-  apiKey: process.env.AFRICASTALKING_API_KEY,
-  username: process.env.AFRICASTALKING_USERNAME,
-});*/
 // Virtual account provisioning (Flutterwave) — see flutterwave-service.js
 // and virtual-account-worker.js
 const virtualAccountWorker = require("../lib/virtual-account-worker");
@@ -1021,23 +1016,21 @@ async function createNotification(userId, title, message, type = "info") {
 }
 
 // ==================== SMS CONFIGURATION (AFRICA'S TALKING) ====================
-
-//const africastalking = require("africastalking");
-const africastalking = require("africastalking")({
-  apiKey: process.env.AFRICASTALKING_API_KEY,
-  username: process.env.AFRICASTALKING_USERNAME,
-});
-
-// Initialize Africa's Talking (only if API key exists)
+// Single initialization, guarded by env vars actually being present.
+// The previous version called require("africastalking")(...) unconditionally
+// on this line AND tried to call the result as a function again a few lines
+// below — that second call was invoking an already-initialized client
+// object, not the factory, which is exactly "africastalking is not a
+// function". One factory call, one guard, one variable used everywhere.
 let africasTalkingClient = null;
 try {
   if (
     process.env.AFRICASTALKING_API_KEY &&
     process.env.AFRICASTALKING_USERNAME
   ) {
-    africasTalkingClient = africastalking({
+    africasTalkingClient = require("africastalking")({
       apiKey: process.env.AFRICASTALKING_API_KEY,
-      username: process.env.AFRICASTALKING_USERNAME, // Your actual username, not "sandbox"
+      username: process.env.AFRICASTALKING_USERNAME,
     });
     console.log("✅ Africa's Talking initialized for SMS");
   } else {
@@ -4732,21 +4725,14 @@ function maskPhoneNumber(phone) {
   return `${start}****${end}`;
 }
 
-
-
-async function sendOTPSMS(phoneNumber, otp) {
-  try {
-    const result = await africastalking.SMS.send({
-      to: phoneNumber,
-      message: `Your FEECENT verification code is: ${otp}. Valid for 10 minutes. DO NOT share this code.`,
-      from: process.env.AFRICASTALKING_SENDER_ID,
-    });
-    console.log("SMS sent:", result);
-  } catch (error) {
-    console.error("SMS error:", error);
-    throw error;
-  }
-}
+// NOTE: a second `function sendOTPSMS` used to be declared here, calling
+// the raw `africastalking` client directly with no null-guard and
+// re-throwing on any error. Since both declarations shared the same
+// function name in the same scope, this one silently overrode the safer
+// version defined earlier (the one with phone number formatting, a
+// null-guard, and graceful `return false` on failure) for every call site
+// in the file, with no warning from Node. Removed — there is now exactly
+// one sendOTPSMS, defined once, near the Africa's Talking initialization.
 
 // Check and freeze account if balance exceeds tier limit
 async function checkAndFreezeIfBalanceExceeds(userId) {
@@ -8213,7 +8199,6 @@ app.post(
   billsService.handleCreateBillPayment,
 );
 app.get("/api/cron/process-bills", billsWorker.cronHandler); // add to vercel.json cron config, same pattern as your other workers
-
 
 // Get exchange rates
 app.get("/api/user/exchange-rates", authenticate, async (req, res) => {
