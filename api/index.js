@@ -219,6 +219,24 @@ const supabase = createClient(
   process.env.SUPABASE_SERVICE_KEY,
 );
 
+// Hard timeout wrapper for Supabase/Postgres calls. Without this, a stalled
+// query (paused project, connection issue, degraded query) hangs the whole
+// request indefinitely — Express has no built-in server-side timeout, so
+// the client eventually gives up on its own, but the server-side handler
+// just sits there the entire time. Uses Supabase's built-in .abortSignal()
+// support so the underlying HTTP request is actually cancelled on timeout,
+// not just abandoned while it keeps running in the background.
+// Usage: await withDbTimeout(supabase.from("users").select("id").eq(...), 8000)
+function withDbTimeout(queryBuilder, ms = 8000) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), ms);
+  const builder =
+    typeof queryBuilder.abortSignal === "function"
+      ? queryBuilder.abortSignal(controller.signal)
+      : queryBuilder;
+  return Promise.resolve(builder).finally(() => clearTimeout(timer));
+}
+
 // Virtual account provisioning (Flutterwave) — see flutterwave-service.js
 // and virtual-account-worker.js
 const virtualAccountWorker = require("../lib/virtual-account-worker");
@@ -2949,6 +2967,10 @@ app.post("/api/auth/check-passcode", async (req, res) => {
   try {
     const { identifier } = req.body;
 
+    if (!identifier || typeof identifier !== "string") {
+      return res.status(400).json({ error: "Identifier is required" });
+    }
+
     console.log(`Check passcode for identifier: ${identifier}`);
 
     let query = supabase
@@ -2963,7 +2985,9 @@ app.post("/api/auth/check-passcode", async (req, res) => {
       const cleanPhone = identifier.trim().replace(/\s/g, "");
 
       // Try exact match first
-      let { data: user, error } = await query.eq("phone", cleanPhone).single();
+      let { data: user, error } = await withDbTimeout(
+        query.eq("phone", cleanPhone).single(),
+      );
 
       if (!user) {
         // Try with +234 prefix (Nigeria)
@@ -2978,11 +3002,13 @@ app.post("/api/auth/check-passcode", async (req, res) => {
           }
         }
 
-        const { data: userWithPrefix } = await supabase
-          .from("users")
-          .select("id, email, first_name, last_name, passcode_hash, phone")
-          .eq("phone", withPrefix)
-          .single();
+        const { data: userWithPrefix } = await withDbTimeout(
+          supabase
+            .from("users")
+            .select("id, email, first_name, last_name, passcode_hash, phone")
+            .eq("phone", withPrefix)
+            .single(),
+        );
 
         if (userWithPrefix) {
           user = userWithPrefix;
@@ -2995,11 +3021,13 @@ app.post("/api/auth/check-passcode", async (req, res) => {
             withoutPrefix = "0" + cleanPhone.substring(3);
           }
 
-          const { data: userWithoutPrefix } = await supabase
-            .from("users")
-            .select("id, email, first_name, last_name, passcode_hash, phone")
-            .eq("phone", withoutPrefix)
-            .single();
+          const { data: userWithoutPrefix } = await withDbTimeout(
+            supabase
+              .from("users")
+              .select("id, email, first_name, last_name, passcode_hash, phone")
+              .eq("phone", withoutPrefix)
+              .single(),
+          );
 
           if (userWithoutPrefix) {
             user = userWithoutPrefix;
@@ -3025,7 +3053,7 @@ app.post("/api/auth/check-passcode", async (req, res) => {
       });
     }
 
-    const { data: user, error } = await query.single();
+    const { data: user, error } = await withDbTimeout(query.single());
 
     if (error || !user) {
       console.log(`No user found for identifier: ${identifier}`);
@@ -3045,6 +3073,11 @@ app.post("/api/auth/check-passcode", async (req, res) => {
     });
   } catch (error) {
     console.error("Check passcode error:", error);
+    if (error.message && error.message.includes("aborted")) {
+      return res
+        .status(504)
+        .json({ error: "Database is not responding, please try again" });
+    }
     res.status(500).json({ error: "Failed to check passcode" });
   }
 });
