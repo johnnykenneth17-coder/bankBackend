@@ -226,6 +226,15 @@ const virtualAccountWorker = require("../lib/virtual-account-worker");
 // Incoming deposit webhooks (Flutterwave) — see deposit-webhook-service.js
 const depositWebhookService = require("../lib/deposit-webhook-service");
 
+// Redis cache layer (cache-aside, fail-open) — see cache-service.js
+// header for the full design rationale before wiring more routes to
+// this. Currently applied to: GET /api/user/notifications.
+const {
+  cacheware,
+  getUserCacheVersion,
+  bumpUserCacheVersion,
+} = require("../lib/cache-service");
+
 // Cron sweep: retries any create_virtual_account jobs the fast path missed,
 // on their exponential backoff schedule. Wire this to Vercel Cron in
 // vercel.json — see the deployment notes.
@@ -4779,6 +4788,8 @@ async function checkAndFreezeIfBalanceExceeds(userId) {
         })
         .eq("id", userId);
 
+      await bumpUserCacheVersion("authuser", userId);
+
       await supabase.from("notifications").insert({
         user_id: userId,
         title: "Account Frozen - Balance Limit Exceeded",
@@ -4803,6 +4814,8 @@ async function checkAndFreezeIfBalanceExceeds(userId) {
           updated_at: new Date(),
         })
         .eq("id", userId);
+
+      await bumpUserCacheVersion("authuser", userId);
     }
   } catch (error) {
     console.error("Balance check error:", error);
@@ -8452,90 +8465,113 @@ app.post(
 // ==================== IMPROVED NOTIFICATION ROUTES ====================
 
 // Get notifications with pagination and unread count
-app.get("/api/user/notifications", authenticate, async (req, res) => {
-  try {
-    const { page = 1, limit = 20, unread_only = false } = req.query;
-    const offset = (parseInt(page) - 1) * parseInt(limit);
+// Cache key: versioned per-user, so bumpUserCacheVersion("notif", userId)
+// -- called from the three mutation routes below -- instantly
+// invalidates every page/limit/filter variant this user has ever
+// requested, without tracking each one down individually.
+async function buildNotificationsCacheKey(req) {
+  const { page = 1, limit = 20, unread_only = false } = req.query;
+  const version = await getUserCacheVersion("notif", req.user.id);
+  return `notif:v${version}:u:${req.user.id}:p:${page}:l:${limit}:uo:${unread_only}`;
+}
 
-    // First, check if the table exists and has the right structure
-    const { error: tableCheckError } = await supabase
-      .from("notifications")
-      .select("id")
-      .limit(1);
+// TTL is a safety net, not the primary invalidation mechanism -- this
+// endpoint is polled every 10-30s from the dashboard, so even a fully
+// missed invalidation call self-heals within one poll cycle.
+app.get(
+  "/api/user/notifications",
+  authenticate,
+  cacheware(buildNotificationsCacheKey, 20),
+  async (req, res) => {
+    try {
+      const { page = 1, limit = 20, unread_only = false } = req.query;
+      const offset = (parseInt(page) - 1) * parseInt(limit);
 
-    if (tableCheckError && tableCheckError.code === "42P01") {
-      // Table doesn't exist, create it
-      console.log("Notifications table doesn't exist, creating...");
-      await createNotificationsTable();
-    }
+      // REMOVED: a "does the notifications table exist" check (select id
+      // limit 1, then conditionally CREATE TABLE) used to run on every
+      // single call to this route. The table has existed since initial
+      // setup; this was a wasted extra round trip on literally every poll
+      // (dashboard hits this endpoint every 10-30s per open session), for
+      // a condition (42P01 — table missing) that in practice never fires
+      // in a deployed app. createNotificationsTable() is still defined
+      // below for one-off manual/migration use if ever genuinely needed.
 
-    let query = supabase
-      .from("notifications")
-      .select("*", { count: "exact" })
-      .eq("user_id", req.user.id)
-      .order("created_at", { ascending: false });
+      let query = supabase
+        .from("notifications")
+        .select("*", { count: "exact" })
+        .eq("user_id", req.user.id)
+        .order("created_at", { ascending: false });
 
-    if (unread_only === "true") {
-      query = query.eq("is_read", false);
-    }
+      if (unread_only === "true") {
+        query = query.eq("is_read", false);
+      }
 
-    const {
-      data: notifications,
-      error,
-      count,
-    } = await query.range(offset, offset + parseInt(limit) - 1);
+      const {
+        data: notifications,
+        error,
+        count,
+      } = await query.range(offset, offset + parseInt(limit) - 1);
 
-    if (error) {
-      console.error("Supabase notifications error:", error);
-      // Return empty array instead of error
-      return res.json({
-        notifications: [],
-        unread_count: 0,
+      if (error) {
+        console.error("Supabase notifications error:", error);
+        // Return empty array instead of error
+        return res.json({
+          notifications: [],
+          unread_count: 0,
+          pagination: {
+            page: parseInt(page),
+            limit: parseInt(limit),
+            total: 0,
+            pages: 0,
+          },
+        });
+      }
+
+      // FIXED: when the caller already asked for unread_only, `count`
+      // above IS the unread count — a second exact COUNT(*) round trip
+      // for the exact same rows was pure waste. Only fire the separate
+      // query when the listing itself wasn't already scoped to unread,
+      // i.e. when we genuinely need a different number than `count`.
+      let unreadCount = count;
+      if (unread_only !== "true") {
+        const { count: uc, error: unreadError } = await supabase
+          .from("notifications")
+          .select("*", { count: "exact", head: true })
+          .eq("user_id", req.user.id)
+          .eq("is_read", false);
+
+        if (unreadError) {
+          console.error("Unread count error:", unreadError);
+        }
+        unreadCount = uc;
+      }
+
+      res.json({
+        notifications: notifications || [],
+        unread_count: unreadCount || 0,
         pagination: {
           page: parseInt(page),
           limit: parseInt(limit),
+          total: count || 0,
+          pages: Math.ceil((count || 0) / parseInt(limit)),
+        },
+      });
+    } catch (error) {
+      console.error("Notifications fetch error:", error);
+      // Return empty array instead of error
+      res.json({
+        notifications: [],
+        unread_count: 0,
+        pagination: {
+          page: 1,
+          limit: 20,
           total: 0,
           pages: 0,
         },
       });
     }
-
-    // Get unread count for badge
-    const { count: unreadCount, error: unreadError } = await supabase
-      .from("notifications")
-      .select("*", { count: "exact", head: true })
-      .eq("user_id", req.user.id)
-      .eq("is_read", false);
-
-    if (unreadError) {
-      console.error("Unread count error:", unreadError);
-    }
-
-    res.json({
-      notifications: notifications || [],
-      unread_count: unreadCount || 0,
-      pagination: {
-        page: parseInt(page),
-        limit: parseInt(limit),
-        total: count || 0,
-        pages: Math.ceil((count || 0) / parseInt(limit)),
-      },
-    });
-  } catch (error) {
-    console.error("Notifications fetch error:", error);
-    // Return empty array instead of error
-    res.json({
-      notifications: [],
-      unread_count: 0,
-      pagination: {
-        page: 1,
-        limit: 20,
-        total: 0,
-        pages: 0,
-      },
-    });
-  }
-});
+  },
+);
 
 // Helper function to create notifications table if it doesn't exist
 async function createNotificationsTable() {
@@ -8617,6 +8653,8 @@ app.post("/api/user/notifications/:id/read", authenticate, async (req, res) => {
       throw error;
     }
 
+    await bumpUserCacheVersion("notif", req.user.id);
+
     res.json({ success: true });
   } catch (error) {
     console.error("Notification update error:", error);
@@ -8644,6 +8682,8 @@ app.post(
         throw error;
       }
 
+      await bumpUserCacheVersion("notif", req.user.id);
+
       res.json({ success: true });
     } catch (error) {
       console.error("Mark all read error:", error);
@@ -8664,6 +8704,8 @@ app.delete("/api/user/notifications/:id", authenticate, async (req, res) => {
       .eq("user_id", req.user.id);
 
     if (error) throw error;
+
+    await bumpUserCacheVersion("notif", req.user.id);
 
     res.json({ success: true });
   } catch (error) {
@@ -11728,6 +11770,8 @@ app.post("/api/user/verify-unfreeze-otp", authenticate, async (req, res) => {
         freeze_reason: null,
       })
       .eq("id", req.user.id);
+
+    await bumpUserCacheVersion("authuser", req.user.id);
 
     // Create notification
     await supabase.from("notifications").insert({
@@ -15348,6 +15392,8 @@ app.post(
 
       if (error) throw error;
 
+      await bumpUserCacheVersion("authuser", req.user.id);
+
       res.json({ success: true });
     } catch (error) {
       console.error("Freeze error:", error);
@@ -16928,6 +16974,8 @@ app.post("/api/user/close-account", authenticate, async (req, res) => {
       })
       .eq("id", req.user.id);
 
+    await bumpUserCacheVersion("authuser", req.user.id);
+
     // Clear sensitive data
     await supabase
       .from("users")
@@ -16959,6 +17007,8 @@ app.post("/api/user/lock-account", authenticate, async (req, res) => {
         updated_at: new Date(),
       })
       .eq("id", req.user.id);
+
+    await bumpUserCacheVersion("authuser", req.user.id);
 
     res.json({ success: true, message: "Account frozen successfully" });
   } catch (error) {
@@ -18876,6 +18926,8 @@ app.post(
 
       if (error) throw error;
 
+      await bumpUserCacheVersion("authuser", userId);
+
       // Create notification for user
       await supabase.from("notifications").insert({
         user_id: userId,
@@ -19783,6 +19835,13 @@ app.put(
           .status(500)
           .json({ error: "Failed to update user: " + updateError.message });
       }
+
+      // This route can change is_active/is_frozen/role (see
+      // allowedFields above) — invalidate unconditionally rather than
+      // checking which fields were actually touched, since missing a
+      // case here is a security gap and the invalidation itself is
+      // just a cheap INCR.
+      await bumpUserCacheVersion("authuser", userId);
 
       // Log admin action for audit
       await supabase.from("admin_actions").insert({

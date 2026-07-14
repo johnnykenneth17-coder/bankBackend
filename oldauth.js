@@ -3,8 +3,6 @@ const { createClient } = require("@supabase/supabase-js");
 
 const crypto = require("crypto");
 
-const { getCachedUser, bumpUserCacheVersion } = require("../lib/cache-service");
-
 const supabase = createClient(
   process.env.SUPABASE_URL,
   process.env.SUPABASE_SERVICE_KEY,
@@ -26,32 +24,14 @@ const authenticate = async (req, res, next) => {
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
     console.log("Token decoded for user:", decoded.userId);
 
-    // Cache-aside on the per-request user lookup. This one query runs
-    // on every one of ~70+ authenticated routes, so it's the single
-    // hottest read in the app. TTL is short (5s) and is the PRIMARY
-    // safety net here, not a backstop the way notif-cache's TTL is:
-    // is_active/is_frozen/role are security-relevant, so every known
-    // place that flips them (toggle-freeze, the generic admin user-edit
-    // route, auto-freeze-on-balance-limit, freeze-due-to-pin-attempts,
-    // unfreeze-via-otp, self-lock-account, close-account) also calls
-    // bumpUserCacheVersion("authuser", userId) explicitly for
-    // near-instant invalidation on those paths. The 5s TTL exists so
-    // that even an update site nobody has wired invalidation into yet
-    // (or one added later and missed) is bounded to a few seconds of
-    // staleness, not "until someone notices a frozen account still
-    // transacting."
-    const user = await getCachedUser(decoded.userId, 5, async () => {
-      const { data, error } = await supabase
-        .from("users")
-        .select("*")
-        .eq("id", decoded.userId)
-        .single();
-      if (error || !data) return null;
-      return data;
-    });
+    const { data: user, error } = await supabase
+      .from("users")
+      .select("*")
+      .eq("id", decoded.userId)
+      .single();
 
-    if (!user) {
-      console.log("User not found:", decoded.userId);
+    if (error || !user) {
+      console.log("User not found:", error);
       return res.status(401).json({ error: "User not found" });
     }
 
