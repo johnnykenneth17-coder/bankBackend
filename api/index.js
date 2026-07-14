@@ -994,13 +994,15 @@ async function getRecentBeneficiaries(userId) {
 // Security logging function
 async function logSecurityEvent(userId, eventType, details = {}) {
   try {
-    await supabase.from("security_logs").insert({
-      user_id: userId,
-      event_type: eventType,
-      details: details,
-      ip_address: details.ip || null,
-      timestamp: new Date().toISOString(),
-    });
+    await withDbTimeout(
+      supabase.from("security_logs").insert({
+        user_id: userId,
+        event_type: eventType,
+        details: details,
+        ip_address: details.ip || null,
+        timestamp: new Date().toISOString(),
+      }),
+    );
   } catch (error) {
     console.error("Security logging error:", error);
   }
@@ -1577,11 +1579,9 @@ app.post("/api/auth/register", async (req, res) => {
     }
 
     // Check if user exists
-    const { data: existingUser } = await supabase
-      .from("users")
-      .select("email")
-      .eq("email", email)
-      .single();
+    const { data: existingUser } = await withDbTimeout(
+      supabase.from("users").select("email").eq("email", email).single(),
+    );
 
     if (existingUser) {
       return res.status(400).json({ error: "Email already registered" });
@@ -1622,48 +1622,51 @@ app.post("/api/auth/register", async (req, res) => {
     }
 
     // Create user with all fields - NO ID FIELDS
-    const { data: user, error } = await supabase
-      .from("users")
-      .insert({
-        email,
-        password_hash: hashedPassword,
-        first_name,
-        last_name,
-        middle_name: middle_name || null,
-        phone,
-        country: country || null,
-        state: state || null,
-        city: city || null,
-        address: address || null,
-        postal_code: postal_code || null,
-        date_of_birth: date_of_birth || null,
-        gender: gender || null,
-        marital_status: marital_status || null,
-        occupation: occupation || null,
-        referral_code: referral_code || null,
-        age: calculatedAge || null,
-        bvn,
-        security_question_1,
-        security_answer_1: hashedAnswer1,
-        security_question_2,
-        security_answer_2: hashedAnswer2,
-        passcode_hash: hashedPasscode,
-        passcode_set_at: hashedPasscode ? new Date().toISOString() : null,
-        face_verified: !!face_images && face_images.length > 0,
-        face_verification_date:
-          face_images && face_images.length > 0
-            ? new Date().toISOString()
-            : null,
-        role: "user",
-        kyc_status: "pending",
-        is_active: true,
-        is_frozen: false,
-        account_tier: 1, // ALL NEW USERS START AT TIER 1
-        created_at: new Date().toISOString(),
-        updated_at: new Date().toISOString(),
-      })
-      .select()
-      .single();
+    const { data: user, error } = await withDbTimeout(
+      supabase
+        .from("users")
+        .insert({
+          email,
+          password_hash: hashedPassword,
+          first_name,
+          last_name,
+          middle_name: middle_name || null,
+          phone,
+          country: country || null,
+          state: state || null,
+          city: city || null,
+          address: address || null,
+          postal_code: postal_code || null,
+          date_of_birth: date_of_birth || null,
+          gender: gender || null,
+          marital_status: marital_status || null,
+          occupation: occupation || null,
+          referral_code: referral_code || null,
+          age: calculatedAge || null,
+          bvn,
+          security_question_1,
+          security_answer_1: hashedAnswer1,
+          security_question_2,
+          security_answer_2: hashedAnswer2,
+          passcode_hash: hashedPasscode,
+          passcode_set_at: hashedPasscode ? new Date().toISOString() : null,
+          face_verified: !!face_images && face_images.length > 0,
+          face_verification_date:
+            face_images && face_images.length > 0
+              ? new Date().toISOString()
+              : null,
+          role: "user",
+          kyc_status: "pending",
+          is_active: true,
+          is_frozen: false,
+          account_tier: 1, // ALL NEW USERS START AT TIER 1
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString(),
+        })
+        .select()
+        .single(),
+      12000, // account creation is heavier than a lookup - a bit more headroom
+    );
 
     if (error) {
       console.error("Supabase insert error:", error);
@@ -1896,11 +1899,13 @@ app.post("/api/auth/register", async (req, res) => {
     const sessionId = generateSessionId();
 
     // STEP 1: Get ALL existing active sessions for this user (should be none for new user)
-    const { data: existingSessions } = await supabase
-      .from("user_sessions")
-      .select("id, session_id, device_name, session_token")
-      .eq("user_id", user.id)
-      .eq("is_active", true);
+    const { data: existingSessions } = await withDbTimeout(
+      supabase
+        .from("user_sessions")
+        .select("id, session_id, device_name, session_token")
+        .eq("user_id", user.id)
+        .eq("is_active", true),
+    );
 
     // STEP 2: Generate token with session info (MATCHES LOGIN FORMAT)
     const token = jwt.sign(
@@ -1920,9 +1925,8 @@ app.post("/api/auth/register", async (req, res) => {
     expiresAt.setDate(expiresAt.getDate() + 7);
 
     // STEP 3: Insert the new session (MATCHES LOGIN)
-    const { error: sessionError } = await supabase
-      .from("user_sessions")
-      .insert({
+    const { error: sessionError } = await withDbTimeout(
+      supabase.from("user_sessions").insert({
         user_id: user.id,
         session_token: token,
         session_id: sessionId,
@@ -1936,7 +1940,8 @@ app.post("/api/auth/register", async (req, res) => {
         session_version: sessionVersion,
         created_at: new Date().toISOString(),
         last_activity: new Date().toISOString(),
-      });
+      }),
+    );
 
     if (sessionError) {
       console.error("Session insert error during registration:", sessionError);
@@ -1944,16 +1949,18 @@ app.post("/api/auth/register", async (req, res) => {
     }
 
     // STEP 4: Update user record with active session (MATCHES LOGIN)
-    await supabase
-      .from("users")
-      .update({
-        active_session_id: sessionId,
-        last_active_device: deviceInfo.device_name,
-        active_session_started_at: new Date().toISOString(),
-        last_login: new Date().toISOString(),
-        session_version: sessionVersion,
-      })
-      .eq("id", user.id);
+    await withDbTimeout(
+      supabase
+        .from("users")
+        .update({
+          active_session_id: sessionId,
+          last_active_device: deviceInfo.device_name,
+          active_session_started_at: new Date().toISOString(),
+          last_login: new Date().toISOString(),
+          session_version: sessionVersion,
+        })
+        .eq("id", user.id),
+    );
 
     // STEP 5: Invalidate any existing sessions (should be none, but safe)
     if (existingSessions && existingSessions.length > 0) {
@@ -1961,18 +1968,20 @@ app.post("/api/auth/register", async (req, res) => {
         `Invalidating ${existingSessions.length} existing session(s) for new user ${user.id}`,
       );
 
-      await supabase
-        .from("user_sessions")
-        .update({
-          is_active: false,
-          is_current: false,
-          invalidated_reason: `New registration from ${deviceInfo.device_name}`,
-          expires_at: new Date().toISOString(),
-        })
-        .in(
-          "id",
-          existingSessions.map((s) => s.id),
-        );
+      await withDbTimeout(
+        supabase
+          .from("user_sessions")
+          .update({
+            is_active: false,
+            is_current: false,
+            invalidated_reason: `New registration from ${deviceInfo.device_name}`,
+            expires_at: new Date().toISOString(),
+          })
+          .in(
+            "id",
+            existingSessions.map((s) => s.id),
+          ),
+      );
     }
 
     // STEP 6: Log successful registration
@@ -2064,11 +2073,9 @@ app.post("/api/auth/login", authLimiter, async (req, res) => {
     }
 
     // Fetch user
-    const { data: user, error } = await supabase
-      .from("users")
-      .select("*")
-      .eq("email", email)
-      .single();
+    const { data: user, error } = await withDbTimeout(
+      supabase.from("users").select("*").eq("email", email).single(),
+    );
 
     if (error || !user) {
       attempts.count++;
@@ -2108,13 +2115,15 @@ app.post("/api/auth/login", authLimiter, async (req, res) => {
       const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
 
       // Store OTP with user_id
-      await supabase.from("otps").insert({
-        user_id: user.id,
-        otp_code: otpCode,
-        otp_type: "login_2fa",
-        expires_at: expiresAt,
-        is_used: false,
-      });
+      await withDbTimeout(
+        supabase.from("otps").insert({
+          user_id: user.id,
+          otp_code: otpCode,
+          otp_type: "login_2fa",
+          expires_at: expiresAt,
+          is_used: false,
+        }),
+      );
 
       // Send email
       await sendOTPEmail(user.email, otpCode, "2fa");
@@ -2147,11 +2156,13 @@ app.post("/api/auth/login", authLimiter, async (req, res) => {
     const sessionId = generateSessionId();
 
     // STEP 1: Get ALL existing active sessions for this user
-    const { data: existingSessions } = await supabase
-      .from("user_sessions")
-      .select("id, session_id, device_name, session_token")
-      .eq("user_id", user.id)
-      .eq("is_active", true);
+    const { data: existingSessions } = await withDbTimeout(
+      supabase
+        .from("user_sessions")
+        .select("id, session_id, device_name, session_token")
+        .eq("user_id", user.id)
+        .eq("is_active", true),
+    );
 
     // STEP 2: Generate new token with session info
     const token = jwt.sign(
@@ -2171,9 +2182,8 @@ app.post("/api/auth/login", authLimiter, async (req, res) => {
     expiresAt.setDate(expiresAt.getDate() + 7);
 
     // STEP 3: Insert the new session
-    const { error: sessionError } = await supabase
-      .from("user_sessions")
-      .insert({
+    const { error: sessionError } = await withDbTimeout(
+      supabase.from("user_sessions").insert({
         user_id: user.id,
         session_token: token,
         session_id: sessionId,
@@ -2187,23 +2197,26 @@ app.post("/api/auth/login", authLimiter, async (req, res) => {
         session_version: sessionVersion,
         created_at: new Date().toISOString(),
         last_activity: new Date().toISOString(),
-      });
+      }),
+    );
 
     if (sessionError) {
       console.error("Session insert error:", sessionError);
     }
 
     // STEP 4: Update user record with new active session
-    await supabase
-      .from("users")
-      .update({
-        active_session_id: sessionId,
-        last_active_device: deviceInfo.device_name,
-        active_session_started_at: new Date().toISOString(),
-        last_login: new Date().toISOString(),
-        session_version: sessionVersion,
-      })
-      .eq("id", user.id);
+    await withDbTimeout(
+      supabase
+        .from("users")
+        .update({
+          active_session_id: sessionId,
+          last_active_device: deviceInfo.device_name,
+          active_session_started_at: new Date().toISOString(),
+          last_login: new Date().toISOString(),
+          session_version: sessionVersion,
+        })
+        .eq("id", user.id),
+    );
 
     // STEP 5: Invalidate ALL existing sessions (excluding the new one)
     if (existingSessions && existingSessions.length > 0) {
@@ -2214,26 +2227,30 @@ app.post("/api/auth/login", authLimiter, async (req, res) => {
       // Get the IDs of sessions to invalidate
       const oldSessionIds = existingSessions.map((s) => s.id);
 
-      await supabase
-        .from("user_sessions")
-        .update({
-          is_active: false,
-          is_current: false,
-          invalidated_reason: `New login from ${deviceInfo.device_name}`,
-          expires_at: new Date().toISOString(),
-        })
-        .in("id", oldSessionIds);
+      await withDbTimeout(
+        supabase
+          .from("user_sessions")
+          .update({
+            is_active: false,
+            is_current: false,
+            invalidated_reason: `New login from ${deviceInfo.device_name}`,
+            expires_at: new Date().toISOString(),
+          })
+          .in("id", oldSessionIds),
+      );
 
       // Send notifications for each old session
       for (const oldSession of existingSessions) {
         try {
-          await supabase.from("notifications").insert({
-            user_id: user.id,
-            title: "New Device Login",
-            message: `Your account was accessed from: ${deviceInfo.device_name}. Your session on ${oldSession.device_name || "another device"} was terminated. If this wasn't you, log in and change your password immediately.`,
-            type: "security",
-            created_at: new Date().toISOString(),
-          });
+          await withDbTimeout(
+            supabase.from("notifications").insert({
+              user_id: user.id,
+              title: "New Device Login",
+              message: `Your account was accessed from: ${deviceInfo.device_name}. Your session on ${oldSession.device_name || "another device"} was terminated. If this wasn't you, log in and change your password immediately.`,
+              type: "security",
+              created_at: new Date().toISOString(),
+            }),
+          );
         } catch (err) {
           console.error("Notification error:", err);
           // Don't throw - notification failure shouldn't break login
@@ -3074,7 +3091,9 @@ app.post("/api/auth/check-passcode", async (req, res) => {
   } catch (error) {
     console.error("Check passcode error:", error);
     if (error.message && error.message.includes("aborted")) {
-      return res.status(504).json({ error: "Database is not responding, please try again" });
+      return res
+        .status(504)
+        .json({ error: "Database is not responding, please try again" });
     }
     res.status(500).json({ error: "Failed to check passcode" });
   }
@@ -3098,11 +3117,9 @@ app.post("/api/auth/verify-passcode", async (req, res) => {
       return res.status(400).json({ error: "Invalid passcode format" });
     }
 
-    const { data: user, error } = await supabase
-      .from("users")
-      .select("*")
-      .eq("id", user_id)
-      .single();
+    const { data: user, error } = await withDbTimeout(
+      supabase.from("users").select("*").eq("id", user_id).single(),
+    );
 
     if (error || !user) {
       return res.status(404).json({ error: "User not found" });
@@ -3126,10 +3143,12 @@ app.post("/api/auth/verify-passcode", async (req, res) => {
           .status(429)
           .json({ error: "Too many incorrect attempts. Try again later." });
       } else {
-        await supabase
-          .from("users")
-          .update({ passcode_attempts: 0 })
-          .eq("id", user_id);
+        await withDbTimeout(
+          supabase
+            .from("users")
+            .update({ passcode_attempts: 0 })
+            .eq("id", user_id),
+        );
       }
     }
 
@@ -3137,13 +3156,15 @@ app.post("/api/auth/verify-passcode", async (req, res) => {
 
     if (!isValid) {
       const newAttempts = (user.passcode_attempts || 0) + 1;
-      await supabase
-        .from("users")
-        .update({
-          passcode_attempts: newAttempts,
-          last_passcode_attempt: new Date(),
-        })
-        .eq("id", user_id);
+      await withDbTimeout(
+        supabase
+          .from("users")
+          .update({
+            passcode_attempts: newAttempts,
+            last_passcode_attempt: new Date(),
+          })
+          .eq("id", user_id),
+      );
       return res.status(401).json({
         error: "Invalid passcode",
         attempts_remaining: maxAttempts - newAttempts,
@@ -3151,14 +3172,16 @@ app.post("/api/auth/verify-passcode", async (req, res) => {
     }
 
     // Reset attempts on success
-    await supabase
-      .from("users")
-      .update({
-        passcode_attempts: 0,
-        last_passcode_attempt: null,
-        last_login: new Date(),
-      })
-      .eq("id", user_id);
+    await withDbTimeout(
+      supabase
+        .from("users")
+        .update({
+          passcode_attempts: 0,
+          last_passcode_attempt: null,
+          last_login: new Date(),
+        })
+        .eq("id", user_id),
+    );
 
     // ========== STRICT SESSION MANAGEMENT (SAME AS EMAIL LOGIN) ==========
     const deviceInfo = getDeviceInfo(req);
@@ -3166,11 +3189,13 @@ app.post("/api/auth/verify-passcode", async (req, res) => {
     const sessionId = generateSessionId();
 
     // STEP 1: Get ALL existing active sessions for this user
-    const { data: existingSessions } = await supabase
-      .from("user_sessions")
-      .select("id, session_id, device_name, session_token")
-      .eq("user_id", user.id)
-      .eq("is_active", true);
+    const { data: existingSessions } = await withDbTimeout(
+      supabase
+        .from("user_sessions")
+        .select("id, session_id, device_name, session_token")
+        .eq("user_id", user.id)
+        .eq("is_active", true),
+    );
 
     // STEP 2: Generate new token with session info
     const token = jwt.sign(
@@ -3190,9 +3215,8 @@ app.post("/api/auth/verify-passcode", async (req, res) => {
     expiresAt.setDate(expiresAt.getDate() + 7);
 
     // STEP 3: Insert the new session
-    const { error: sessionError } = await supabase
-      .from("user_sessions")
-      .insert({
+    const { error: sessionError } = await withDbTimeout(
+      supabase.from("user_sessions").insert({
         user_id: user.id,
         session_token: token,
         session_id: sessionId,
@@ -3206,23 +3230,26 @@ app.post("/api/auth/verify-passcode", async (req, res) => {
         session_version: sessionVersion,
         created_at: new Date().toISOString(),
         last_activity: new Date().toISOString(),
-      });
+      }),
+    );
 
     if (sessionError) {
       console.error("Session insert error:", sessionError);
     }
 
     // STEP 4: Update user record with new active session
-    await supabase
-      .from("users")
-      .update({
-        active_session_id: sessionId,
-        last_active_device: deviceInfo.device_name,
-        active_session_started_at: new Date().toISOString(),
-        last_login: new Date().toISOString(),
-        session_version: sessionVersion,
-      })
-      .eq("id", user.id);
+    await withDbTimeout(
+      supabase
+        .from("users")
+        .update({
+          active_session_id: sessionId,
+          last_active_device: deviceInfo.device_name,
+          active_session_started_at: new Date().toISOString(),
+          last_login: new Date().toISOString(),
+          session_version: sessionVersion,
+        })
+        .eq("id", user.id),
+    );
 
     // STEP 5: Invalidate ALL existing sessions (excluding the new one)
     if (existingSessions && existingSessions.length > 0) {
@@ -3233,26 +3260,30 @@ app.post("/api/auth/verify-passcode", async (req, res) => {
       // Get the IDs of sessions to invalidate
       const oldSessionIds = existingSessions.map((s) => s.id);
 
-      await supabase
-        .from("user_sessions")
-        .update({
-          is_active: false,
-          is_current: false,
-          invalidated_reason: `New passcode login from ${deviceInfo.device_name}`,
-          expires_at: new Date().toISOString(),
-        })
-        .in("id", oldSessionIds);
+      await withDbTimeout(
+        supabase
+          .from("user_sessions")
+          .update({
+            is_active: false,
+            is_current: false,
+            invalidated_reason: `New passcode login from ${deviceInfo.device_name}`,
+            expires_at: new Date().toISOString(),
+          })
+          .in("id", oldSessionIds),
+      );
 
       // Send notifications for each old session
       for (const oldSession of existingSessions) {
         try {
-          await supabase.from("notifications").insert({
-            user_id: user.id,
-            title: "New Device Login",
-            message: `Your account was accessed from: ${deviceInfo.device_name}. Your session on ${oldSession.device_name || "another device"} was terminated. If this wasn't you, log in and change your password immediately.`,
-            type: "security",
-            created_at: new Date().toISOString(),
-          });
+          await withDbTimeout(
+            supabase.from("notifications").insert({
+              user_id: user.id,
+              title: "New Device Login",
+              message: `Your account was accessed from: ${deviceInfo.device_name}. Your session on ${oldSession.device_name || "another device"} was terminated. If this wasn't you, log in and change your password immediately.`,
+              type: "security",
+              created_at: new Date().toISOString(),
+            }),
+          );
         } catch (err) {
           console.error("Notification error:", err);
           // Don't throw - notification failure shouldn't break login
@@ -21142,3 +21173,4 @@ createDefaultAdmin();
 
 // Add this instead (required for Vercel)
 module.exports = app;
+ 
