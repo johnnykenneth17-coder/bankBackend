@@ -3074,9 +3074,7 @@ app.post("/api/auth/check-passcode", async (req, res) => {
   } catch (error) {
     console.error("Check passcode error:", error);
     if (error.message && error.message.includes("aborted")) {
-      return res
-        .status(504)
-        .json({ error: "Database is not responding, please try again" });
+      return res.status(504).json({ error: "Database is not responding, please try again" });
     }
     res.status(500).json({ error: "Failed to check passcode" });
   }
