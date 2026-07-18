@@ -10354,7 +10354,7 @@ app.post(
         .json({ error: "Failed to process withdrawal: " + error.message });
     }
   },
-);
+);*/
 
 // index.js - REPLACE the existing savings withdrawal endpoint
 app.post(
@@ -10649,9 +10649,9 @@ app.post(
         .json({ error: "Failed to process withdrawal: " + error.message });
     }
   },
-);*/
+);
 
-// ============================================================
+/*// ============================================================
 // SAVINGS WITHDRAWAL API - PRODUCTION GRADE
 // ============================================================
 // Add this to your index.js file
@@ -11235,7 +11235,7 @@ app.post(
       });
     }
   },
-);
+);*/
 
 // Cancel savings plan (stop auto-save but keep saved amount)
 app.post(

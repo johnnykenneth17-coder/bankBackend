@@ -286,6 +286,13 @@ function generateSessionId() {
   return `${userId.substring(0, 8)}_${timestamp}_${random}_${version}`;
 }*/
 
+function hashTransferContext(fromAccountId, toAccountNumber, amount) {
+  return crypto
+    .createHash("sha256")
+    .update(`${fromAccountId}:${toAccountNumber}:${amount}`)
+    .digest("hex");
+}
+
 // Get device info for tracking
 function getDeviceInfo(req) {
   const userAgent = req.headers["user-agent"] || "Unknown";
@@ -839,4 +846,5 @@ module.exports = {
   revokeSession,
   revokeCurrentSession, // Add this
   generateSessionId,
+  hashTransferContext,
 };
