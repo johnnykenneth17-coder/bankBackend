@@ -310,7 +310,10 @@ const { sendToToken, sendToTokens } = require("../lib/fcm-service");
 // crediting on their first attempt.
 app.get("/api/cron/deposit-webhooks", depositWebhookService.cronHandler);
 
+const monnifyWebhookHandler = require("../lib/monnify-webhook-handler");
 app.post("/api/webhooks/monnify", monnifyWebhookHandler.handleMonnifyWebhook);
+
+const paystackWebhookHandler = require("../lib/paystack-webhook-handler");
 
 app.post("/api/webhooks/paystack",
      express.raw({ type: "application/json" }),
