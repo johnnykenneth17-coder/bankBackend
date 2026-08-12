@@ -15109,7 +15109,10 @@ app.post(
   },
 );
 
-// ── DELETE BENEFICIARY ─────────────────────────────────────────────
+
+
+
+// ── DELETE BENEFICIARY ──────────────────────────────────
 app.delete(
   "/api/user/beneficiaries/:id",
   authenticate,
