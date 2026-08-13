@@ -1,42 +1,21 @@
-// ============================================================
-// ADD THIS IMPORT at the top of transfer-finalization.js
-// ============================================================
-const accountResolutionCache = require("./account-resolution-cache");
+// Line ~14969
+const { account_number, bank_code, bank_name } = req.body;
 
-// ============================================================
-// INSIDE finalizeVerifiedTransfer(), AFTER the successful
-// complete_external_transfer RPC call, add:
-// ============================================================
+// Line ~14979 — pass bank_name through
+const resolution = await accountResolutionCache.resolveAccount({
+  accountNumber: account_number,
+  bankCode: bank_code || null,
+  bankName: bank_name || null,
+  userId: req.user.id,
+  maxResults: 5,
+});
 
-// After: if (verified.status === "SUCCESSFUL") { ... rpc call ... }
-// Add this block inside the success branch:
-
-if (verified.status === "SUCCESSFUL") {
-  // ... existing RPC and notification code ...
-
-  // ── NEW: Cache receiver details + save as beneficiary ──────
-  // After a successful external transfer, store the receiver's
-  // details so the sender (and the system) can resolve them
-  // instantly next time without calling Flutterwave/Paystack.
-  const { data: fullTransfer } = await supabase
-    .from("flutterwave_transfers")
-    .select(
-      "user_id, beneficiary_name, account_number, bank_code, bank_name",
-    )
-    .eq("transaction_reference", reference)
-    .single();
-
-  if (fullTransfer) {
-    accountResolutionCache
-      .cacheTransferReceiver({
-        userId: fullTransfer.user_id,
-        receiverName: fullTransfer.beneficiary_name,
-        receiverAccount: fullTransfer.account_number,
-        receiverBankCode: fullTransfer.bank_code,
-        receiverBankName: fullTransfer.bank_name,
-      })
-      .catch((err) =>
-        console.error("[FINALIZE] Cache receiver failed:", err),
-      );
-  }
+// Line ~14989 — recordHit is keyed by bank_name now, not bank_code
+if (resolution.results.length > 0) {
+  accountResolutionCache.recordHit(
+    account_number,
+    resolution.results[0].bank_name,
+  );
 }
+
+app.get("/api/cron/cleanup-account-cache", accountResolutionCache.cronHandler);
