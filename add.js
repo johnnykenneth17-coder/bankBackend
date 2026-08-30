@@ -1,0 +1,3 @@
+FROZYLA_API_BASE_URL = "https://frozyla-app-back.vercel.app"
+
+FEECENT_FROZYLA_HMAC_SECRET = "39d67b8f96870c659ffc96df206425f37195941d9da8ad8f31bd403995f7a657"
