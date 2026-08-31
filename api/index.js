@@ -367,6 +367,8 @@ const statementService = require("../lib/statement-service");
 
 const savingsAdminRouter = require("./services/savings-admin-routes");
 
+const onboardingRoutes = require("../lib/onboarding-routes");
+
 const savingsCatalogRouter = require("./services/savings-catalog-routes");
 
 const savingsGenericRouter = require("./services/savings-generic-routes");
@@ -15091,6 +15093,8 @@ app.use(
   authorizeAdmin,
   savingsAdminRouter(requirePermission),
 );
+
+app.use("/api/onboarding", onboardingRoutes);
 
 app.use("/api/user/savings/catalog", authenticate, savingsCatalogRouter);
 
